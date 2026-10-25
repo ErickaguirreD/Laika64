@@ -1,0 +1,88 @@
+# ---- Build outputs (all targets) ----
+*.obj
+*.o
+*.a
+*.lib
+*.pdb
+*.ilk
+*.exp
+*.map
+*.exe
+*.xex
+*.xdb
+*.pe
+*.pch
+*.idb
+*.tlog
+*.lastbuildstate
+*.unsuccessfulbuild
+*.cache
+*.log
+spa.bin
+*.spa.h
+Debug/
+Release/
+Profile/
+build/
+build-*/
+out/
+CMakeUserPresets.json
+
+# ---- Visual Studio per-user / intermediate files ----
+.vs/
+ipch/
+*.sdf
+*.suo
+*.opensdf
+*.vcxproj.user
+*Zone.Identifier
+
+# ---- Local data: never commit ROMs, saves or downloaded test ROMs ----
+*.z64
+*.n64
+*.v64
+*.zip
+*.eep
+*.sra
+*.fla
+*.mpk
+*.st[0-9]
+roms/
+tests/roms/
+local.cfg
+
+# ---- V1 leftovers that stay in the working tree when switching from master ----
+# (V1 build outputs, its ROM folder and files Xenia writes next to the
+# current directory; V1 itself lives on master.)
+/xbox64/
+/files/
+/release/*
+/1/
+/2/
+/cache/
+/cache0/
+/cache1/
+/source/
+/xenon/
+
+# Result files the execmem tool writes on the console (copied back here)
+execmem_*.txt
+__pycache__/
+
+# Claude Code worktrees of parallel agents
+.claude/
+
+# Local working notes (not published)
+CLAUDE.md
+
+# Technical notes kept on this machine only (not published)
+docs-local/
+# Release zips (build_release.ps1) stay local: published as GitHub releases, not in the history
+/release/
+
+# console regression data (game memory and pictures) and console settings: local only
+/tests/console/data/
+/tests/console/console.local
+
+# Box art and game info fetched by tools/fetch_game_art.py (copyrighted pictures: never committed)
+art/games/

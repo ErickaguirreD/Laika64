@@ -1,0 +1,163 @@
+// Harissa64 V2 - software RDP: renderer state.
+//
+// The software renderer is a serial CPU port of ParaLLEl-RDP's compute
+// shaders (MIT licence, Themaister/parallel-rdp at commit 1cecd042, see
+// THIRD_PARTY.md), which reproduce the RDP bit-exactly: span setup, coverage,
+// attribute interpolation, perspective divide, texture sampling, combiner,
+// blender, depth test, dither and framebuffer formats. TMEM loads are written
+// here as the hardware does them (walking the load), not as the shaders' GPU
+// "gather" formulation.
+//
+// GLSL integers wrap; the core is built with wrapping signed arithmetic
+// (-fwrapv on gcc; MSVC wraps) and these files rely on it.
+#ifndef H64_RDP_STATE_H
+#define H64_RDP_STATE_H
+
+#include "../common/h64_types.h"
+
+struct H64System;
+
+// Other-modes flags (same bit layout as ParaLLEl-RDP's StaticRasterizationState)
+enum
+{
+    RS_INTERLACE_FIELD = 1 << 0,
+    RS_INTERLACE_KEEP_ODD = 1 << 1,
+    RS_AA = 1 << 2,
+    RS_PERSPECTIVE = 1 << 3,
+    RS_TLUT = 1 << 4,
+    RS_TLUT_TYPE = 1 << 5,
+    RS_CVG_TIMES_ALPHA = 1 << 6,
+    RS_ALPHA_CVG_SELECT = 1 << 7,
+    RS_MULTI_CYCLE = 1 << 8,
+    RS_TEX_LOD = 1 << 9,
+    RS_SHARPEN_LOD = 1 << 10,
+    RS_DETAIL_LOD = 1 << 11,
+    RS_FILL = 1 << 12,
+    RS_COPY = 1 << 13,
+    RS_SAMPLE_QUAD = 1 << 14,
+    RS_ALPHA_TEST = 1 << 15,
+    RS_ALPHA_TEST_DITHER = 1 << 16,
+    RS_MID_TEXEL = 1 << 17,
+    RS_CONVERT_ONE = 1 << 22,
+    RS_BILERP0 = 1 << 23,
+    RS_BILERP1 = 1 << 24
+};
+
+enum
+{
+    DB_DEPTH_TEST = 1 << 0,
+    DB_DEPTH_UPDATE = 1 << 1,
+    DB_FORCE_BLEND = 1 << 3,
+    DB_IMAGE_READ = 1 << 4,
+    DB_COLOR_ON_CVG = 1 << 5,
+    DB_MULTI_CYCLE = 1 << 6,
+    DB_AA = 1 << 7,
+    DB_DITHER = 1 << 8
+};
+
+enum { TILE_CLAMP_S = 1, TILE_MIRROR_S = 2, TILE_CLAMP_T = 4, TILE_MIRROR_T = 8 };
+enum { FB_I4 = 0, FB_I8, FB_RGBA5551, FB_IA88, FB_RGBA8888 };
+
+struct H64RdpTile
+{
+    u32 slo, shi, tlo, thi;      // 10.2
+    u32 offset, stride;          // bytes
+    u8 fmt, size, palette;
+    u8 maskS, shiftS, maskT, shiftT;
+    u8 flags;
+};
+
+struct H64RdpCombiner { u8 rgbMulAdd, rgbMulSub, rgbMul, rgbAdd, aMulAdd, aMulSub, aMul, aAdd; };
+
+// Where a TMEM load came from in RDRAM: what a hi-res texture pack (.hts)
+// identifies a texture by (its checksum is taken over the RDRAM texels).
+struct H64RdpLoadSrc
+{
+    u32 tmemOff, tmemEnd;   // bytes loaded into TMEM: [tmemOff, tmemEnd)
+    u32 addr;               // RDRAM address of the first texel loaded
+    u32 rowBytes;           // RDRAM bytes between texel rows (LOAD_TILE; 0 for LOAD_BLOCK)
+    u8 size;                // texel size of the texture image (0 4-bit .. 3 32-bit)
+    u8 valid, block;
+};
+
+struct H64RdpState
+{
+    u8 tmem[4096];               // N64 byte order (logical)
+    const u8 *loadRam;           // where texture loads read (NULL: RDRAM); a snapshot for deferred rendering
+    u32 loadRamGen;              // changes each time a deferred job sets loadRam (one per task or DPC batch)
+    const u32 *cpuRanges;        // with loadRam: start, end pairs of colour images the CPU wrote over since
+    u32 cpuRangeCount;           // the GPU drew them (loads there read the snapshot, see h64_gfx.cpp)
+    int softDraw;                // 1: this command draws even with options.rdpStateOnly (a GPU renderer hands it over)
+    u8 *drawRam;                 // where drawing reads and writes (NULL: RDRAM), e.g. a deferred job's snapshot
+    u8 *drawRam2;                // also written (NULL: none), e.g. RDRAM beside the snapshot
+    H64RdpTile tiles[8];
+
+    u32 rasterFlags;             // RS_*
+    u32 dither;                  // other modes bits 4..7
+    u32 depthBlendFlags;         // DB_*
+    u8 coverageMode, zMode;
+    u8 blend[2][4];              // per cycle: 1a, 1b, 2a, 2b
+    int usePrimDepth;
+    H64RdpCombiner combiner[2];
+
+    u32 primColor, envColor, fogColor, blendColor, fillColor;
+    u8 primMinLevel, primLodFrac;
+    s32 primDepth;               // z << 16
+    u32 primDz;
+    s32 convert[6];
+    u32 keyWidth[3], keyCenter[3], keyScale[3];
+
+    u32 scissorXlo, scissorYlo, scissorXhi, scissorYhi;
+
+    u32 texAddr, texWidth;
+    u8 texFmt, texSize;
+    u32 colorAddr, colorWidth;
+    int colorFmt;                // FB_*
+    u32 depthAddr;
+
+    // Hi-res texture packs (render/xenos/h64_hts.cpp): the RDRAM source of the
+    // latest loads, and the palette entries of the latest LOAD_TLUTs (logical
+    // 16-bit values, entry = (TMEM byte offset - 0x800) / 8).
+    H64RdpLoadSrc loadSrc[16];
+    u32 loadSrcNext;
+    u16 tlutEntries[256];
+
+    u16 noise;                   // current noise sample
+    u32 primitives;              // statistics
+    // Debug probe (h64test --probe X,Y,FRAME): every pixel write at (x, y) is logged.
+    int probeOn;
+    u32 probeX, probeY;
+};
+
+// Texture unit (h64_rdp_tex.cpp)
+struct H64RdpTexel { s32 c[4]; };   // r, g, b, a (or u, v, y, y for YUV)
+void h64_rdp_load(H64System *sys, u32 tile, u32 sl, u32 tl, u32 sh, u32 th, int mode);   // 0 tile, 1 TLUT, 2 block
+void h64_rdp_sample(H64RdpState *st, const H64RdpTile *tile, const s32 *stIn, int tlut, int tlutType, int sampleQuad,
+                    int midTexel, int convertOne, int bilerp, const s32 *factors, const H64RdpTexel *prev, H64RdpTexel *out);
+// One texel of `tile` at tile coordinates (s, t) (after shift, clamp and
+// mask), decoded as the texture unit reads it from TMEM. With `tlut`, colour
+// indices go through the palette (`tlutType`: 0 RGBA16, 1 IA16); without it
+// CI texels come out as their index. For GPU renderers.
+void h64_rdp_fetch_texel(const H64RdpState *st, const H64RdpTile *tile, u32 s, u32 t, int tlut, int tlutType,
+                         H64RdpTexel *out);
+// n texels of row t from s0 on as A8R8G8B8 (as h64_rdp_fetch_texel gives
+// them), when the format has a fast path (RGBA16 without TLUT, no S mask):
+// returns 0 otherwise.
+int h64_rdp_fetch_row_argb(const H64RdpState *st, const H64RdpTile *tile, u32 s0, u32 t, u32 n, int tlut, u32 *out);
+// The state of the software RDP (allocated on first use).
+H64RdpState *h64_rdp_state(H64System *sys);
+s32 h64_rdp_sample_copy(H64RdpState *st, const H64RdpTile *tile, s32 s, s32 t, int sOffset, int tlut, int fbSize);
+void h64_rdp_texture_convert(const H64RdpTexel *in, const s32 *factors, H64RdpTexel *out);
+// A 16-bit YUV texel as the texture filter reads it (u - 128, v - 128, y, y),
+// chroma from its pair (s >> 1).
+void h64_rdp_fetch_yuv(const H64RdpState *st, const H64RdpTile *tile, u32 s, u32 t, H64RdpTexel *out);
+void h64_rdp_compute_lod(u32 *tile0, u32 *tile1, s32 *lodFrac, u32 maxLevel, s32 minLod, const s32 *st, const s32 *stDx,
+                         const s32 *stDy, int perspectiveOverflow, int texLod, int sharpen, int detail);
+
+// Helpers shared by the RDP files
+static inline s32 h64_sext(s32 v, int bits) { return (s32)((u32)v << (32 - bits)) >> (32 - bits); }
+static inline s32 h64_clamp(s32 v, s32 lo, s32 hi) { return v < lo ? lo : v > hi ? hi : v; }
+static inline int h64_find_msb(u32 v) { int n = -1; while (v) { v >>= 1; n++; } return n; }
+static inline int h64_find_lsb(u32 v) { int n = 0; if (!v) return -1; while (!(v & 1)) { v >>= 1; n++; } return n; }
+
+#endif

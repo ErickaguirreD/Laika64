@@ -1,0 +1,147 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- Harissa64 V2, Xbox 360 target (Visual Studio 2010 + Xbox 360 SDK).
+       Outputs go to platform\xbox360\<Configuration>\ (the XDK platform sets them). -->
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Xbox 360">
+      <Configuration>Debug</Configuration>
+      <Platform>Xbox 360</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Xbox 360">
+      <Configuration>Release</Configuration>
+      <Platform>Xbox 360</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{6C1F4E2A-8B3D-4F5E-9A61-2D7C0B9E4F12}</ProjectGuid>
+    <Keyword>Xbox360Proj</Keyword>
+    <ProjectName>harissa64v2</ProjectName>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Xbox 360'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <CharacterSet>MultiByte</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Xbox 360'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>MultiByte</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <H64RepoRoot>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..'))\</H64RepoRoot>
+    <H64Version>$([System.IO.File]::ReadAllText('$(H64RepoRoot)VERSION').Trim())</H64Version>
+    <LinkIncremental>false</LinkIncremental>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <WarningLevel>Level3</WarningLevel>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <ExceptionHandling>Async</ExceptionHandling>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
+      <RuntimeTypeInfo>false</RuntimeTypeInfo>
+      <PreprocessorDefinitions>_XBOX;Z_SOLO;H64_VERSION=$(H64Version);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(H64RepoRoot);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <CompileAs>CompileAsCpp</CompileAs>
+      <!-- The reference FPU changes the rounding mode at run time (#pragma fenv_access). -->
+      <FloatingPointModel>Precise</FloatingPointModel>
+    </ClCompile>
+    <Link>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <ProgramDatabaseFile>$(OutDir)$(ProjectName).pdb</ProgramDatabaseFile>
+      <GenerateMapFile>true</GenerateMapFile>
+    </Link>
+    <ImageXex>
+      <ConfigurationFile>title\xex.xml</ConfigurationFile>
+      <!-- Title data (name "Harissa64", 64x64 title image) for the dashboards: an XDBF/SPA
+           section named after the title ID, built from title\harissa64v2.gameconfig below. -->
+      <AdditionalSections>48413632=$(OutDir)spa.bin</AdditionalSections>
+    </ImageXex>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Xbox 360'">
+    <ClCompile>
+      <Optimization>Disabled</Optimization>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+      <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>xapilibd.lib;d3d9d.lib;d3dx9d.lib;xgraphicsd.lib;xboxkrnl.lib;xaudiod2.lib;xmcored.lib;xinput2.lib;xnetd.lib;xbdm.lib;xavd.lib</AdditionalDependencies>
+      <AdditionalOptions>/SECTION:.jitc,ERW %(AdditionalOptions)</AdditionalOptions>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Xbox 360'">
+    <ClCompile>
+      <Optimization>Full</Optimization>
+      <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <StringPooling>true</StringPooling>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <Link>
+      <OptimizeReferences>true</OptimizeReferences>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <AdditionalDependencies>xapilib.lib;d3d9.lib;d3dx9.lib;xgraphics.lib;xboxkrnl.lib;xaudio2.lib;xmcore.lib;xinput2.lib;xnet.lib;xav.lib</AdditionalDependencies>
+      <AdditionalOptions>/SECTION:.jitc,ERW %(AdditionalOptions)</AdditionalOptions>
+    </Link>
+  </ItemDefinitionGroup>
+  <!-- The portable core and the unit tests are picked up by wildcard: object
+       files share one directory, so source file names must be unique across
+       core/ and tests/unit/ (see the developer notes). -->
+  <ItemGroup>
+    <ClCompile Include="..\..\core\**\*.cpp" />
+    <ClCompile Include="..\..\render\xenos\*.cpp" />
+    <ClCompile Include="..\..\tests\unit\*.cpp" />
+    <!-- zlib, inflate only (zipped ROMs), compiled as C. -->
+    <ClCompile Include="..\..\third_party\zlib\adler32.c;..\..\third_party\zlib\crc32.c;..\..\third_party\zlib\inffast.c;..\..\third_party\zlib\inflate.c;..\..\third_party\zlib\inftrees.c;..\..\third_party\zlib\zutil.c">
+      <CompileAs>CompileAsC</CompileAs>
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+    </ClCompile>
+    <!-- BearSSL 0.6 (TLS for the update check), compiled as C; no OS random or
+         time source (xb_update.cpp gives both), portable code paths only. -->
+    <ClCompile Include="..\..\third_party\bearssl\src\**\*.c">
+      <CompileAs>CompileAsC</CompileAs>
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <AdditionalIncludeDirectories>..\..\third_party\bearssl\inc;..\..\third_party\bearssl\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>inline=__inline;BR_USE_WIN32_RAND=0;BR_USE_WIN32_TIME=0;BR_USE_URANDOM=0;BR_USE_UNIX_TIME=0;BR_RDRAND=0;BR_AES_X86NI=0;BR_SSE2=0;BR_POWER8=0;BR_INT128=0;BR_UMUL128=0;BR_LE_UNALIGNED=0;BR_BE_UNALIGNED=0;BR_64=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <ClCompile Include="main.cpp" />
+    <ClCompile Include="xb_art.cpp" />
+    <ClCompile Include="xb_audio.cpp" />
+    <ClCompile Include="xb_config.cpp" />
+    <ClCompile Include="xb_lang.cpp" />
+    <ClCompile Include="xb_menu.cpp" />
+    <ClCompile Include="xb_ui.cpp" />
+    <ClCompile Include="xb_net.cpp">
+      <AdditionalIncludeDirectories>..\..\third_party\bearssl\inc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <ClCompile Include="xb_update.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\..\core\**\*.h" />
+    <ClInclude Include="..\..\render\**\*.h" />
+    <ClInclude Include="..\..\tests\unit\*.h" />
+    <ClInclude Include="xb_ui_atlas.h" />
+    <ClInclude Include="xb_lang_table.h" />
+    <ClInclude Include="xb_logo.h" />
+    <ClInclude Include="xb_flags.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="title\xex.xml" />
+    <None Include="title\art\icon.png" />
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="title\harissa64v2.gameconfig">
+      <Message>Build SPA file from %(FullPath)</Message>
+      <Command>"$(XEDK)\bin\win32\spac.exe" -nologo -noh -forceoverwrite -o "$(OutDir)spa.bin" "%(FullPath)"</Command>
+      <AdditionalInputs>title\art\icon.png</AdditionalInputs>
+      <Outputs>$(OutDir)spa.bin</Outputs>
+    </CustomBuild>
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

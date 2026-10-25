@@ -1,0 +1,4159 @@
+// Harissa64 V2 - graphics task HLE (see h64_gfx.h).
+//
+// Microcode behaviour (command encodings, matrix stack, lights, viewport,
+// texture generation, fog, branch and cull commands) follows GLideN64's
+// gSP.cpp, GBI.cpp and uCodes/F3D*.cpp (GPL v2, commit 41c7ba2, August 2026),
+// rewritten for V2: no renderer state is kept here, triangles leave as
+// screen-space vertices (render/api.h) after clipping and culling.
+#include "h64_gfx.h"
+
+#include <math.h>
+#include <stdlib.h>
+#include <string.h>
+#include <vector>
+#include <algorithm>
+
+#if defined(_XBOX)
+#include <ppcintrinsics.h>
+#include <xtl.h>        // the Win32 types xboxmath.h needs
+#include <xboxmath.h>
+#endif
+#include "../common/h64_crc32.h"
+#include "../common/h64_endian.h"
+#include "../common/h64_log.h"
+#include "../common/h64_mem.h"
+#include "../rdp/h64_rdp.h"
+#include "../rdp/h64_rdp_state.h"
+#include "../system/h64_system.h"
+#include "../../render/api.h"
+
+enum { UC_NONE = 0, UC_F3D, UC_F3DEX, UC_F3DEX2, UC_S2DEX2, UC_S2DEX1, UC_ZSORT, UC_BOSS, UC_F5ROGUE, UC_F5INDI };
+enum { UC_TURBO3D = 40 };   // Turbo3D (Dark Rift): h64_gfx_turbo3d.inc
+// Rare's modified microcodes, recognised by the CRC of their code (GLideN64's
+// table): F3D with other commands and vertex formats.
+enum { RARE_NONE = 0, RARE_GOLDEN, RARE_PD, RARE_DKR, RARE_JFG, RARE_CBFD };
+
+// Geometry mode bits, as decoded (the microcodes place them differently).
+enum
+{
+    GM_ZBUFFER = 1,
+    GM_SHADE = 2,
+    GM_SMOOTH = 4,
+    GM_CULL_FRONT = 8,
+    GM_CULL_BACK = 16,
+    GM_FOG = 32,
+    GM_LIGHTING = 64,
+    GM_TEXGEN = 128,
+    GM_TEXGEN_LINEAR = 256
+};
+
+// Vertex clip flags.
+// CL_GUARD: outside the clip ratio's guard band (G_MW_CLIP), where the microcodes clip.
+enum { CL_POSX = 1, CL_NEGX = 2, CL_POSY = 4, CL_NEGY = 8, CL_W = 16, CL_GUARD = 32 };
+
+#define GFX_VTX_MAX 80
+#define GFX_STACK_MAX 32
+#define GFX_PC_MAX 18
+#define GFX_MAX_COMMANDS 4000000u
+
+struct GfxUcode
+{
+    u32 start, dstart, dsize;
+    int type;
+    int zex;     // F3DZEX (Zelda): G_BRANCH_W instead of G_BRANCH_Z
+    int noNear;  // ".NoN": no near-plane clipping
+    int rare;    // RARE_*
+    int cull40;  // F3DEX 0.95/0.96 (Mario Kart 64's): G_CULLDL vertex numbers * 40, as F3D
+    int flx;     // F3DFLX (F-Zero X's races): F3DEX2 with an "alpha light" in the second lookat's slot and
+                 // texture generation that gives vertex alpha from a table (GLideN64 F3DFLX2)
+    u32 crc;     // CRC-32 of the first 4 KB of code (see detect_ucode)
+    int s2v103;  // S2DEX 1.03: its own rounding table and placement of 2D objects
+    int am;      // F3DAM (Hey You, Pikachu!): F3DEX2 with texture coordinates through a 2x2 matrix
+    int line;    // L3DEX / L3DEX2: triangles and G_LINE3D are drawn as lines
+    int omInit;  // each task starts from the microcode's default other modes (F3DLP)
+    int cullOne; // F3DLX.Rej: culling both faces culls the back faces only
+    int combineH;// F3DEX2 2.0xH (Pokemon Snap...): G_SPECIAL_1 combines the matrices, not a counted list
+};
+
+struct GfxVtx
+{
+    float x, y, z, w;        // clip space
+    float r, g, b, a;        // 0..255
+    float s, t;              // s10.5 units, texture scale applied
+    float nx, ny, nz;        // normal (lighting, texture generation)
+    u32 clip;
+    int xyOverride;          // G_MWO_POINT_XYSCREEN: screen position given
+    float sx, sy;
+    int zOverride;           // G_MWO_POINT_ZSCREEN
+    float sz;
+    int stOverride;          // G_MWO_POINT_ST: s, t given (kept whole with texture perspective off)
+    // Screen position, made once when loaded (triangles share vertices):
+    // valid while projGen == H64Gfx.vpGen (0: needs clipping or an override).
+    float px, py, pz, iw;
+    u32 projGen;
+};
+
+// A growable array of plain structures: add() returns the new element
+// uninitialised. std::vector's resize/push_back built a zeroed temporary and
+// copied it in (the XDK compiler copies structures byte by byte): ~1600
+// cycles a triangle on the console with Conker's thousands a frame.
+template <typename T> struct PodVec
+{
+    T *p;
+    u32 n, cap;
+    PodVec() : p(0), n(0), cap(0) {}
+    ~PodVec() { free(p); }
+    u32 size() const { return n; }
+    void clear() { n = 0; }
+    T &operator[](u32 i) { return p[i]; }
+    const T &operator[](u32 i) const { return p[i]; }
+    T *add(u32 k)
+    {
+        if (n + k > cap)
+        {
+            u32 c = cap ? cap * 2 : 1024;
+            T *q;
+            while (c < n + k) c *= 2;
+            q = (T *)malloc((size_t)c * sizeof(T));
+            if (!q) return 0;
+            if (n) memcpy(q, p, (size_t)n * sizeof(T));
+            free(p);
+            p = q;
+            cap = c;
+        }
+        n += k;
+        return p + n - k;
+    }
+    void swap(PodVec &o)
+    {
+        T *tp = p; u32 tn = n, tc = cap;
+        p = o.p; n = o.n; cap = o.cap;
+        o.p = tp; o.n = tn; o.cap = tc;
+    }
+private:
+    PodVec(const PodVec &);
+    PodVec &operator=(const PodVec &);
+};
+
+struct GfxOp
+{
+    u32 kind;    // 0: RDP command (words[index..index+count)), 1: triangle tris[index]
+    u32 index, count;
+};
+
+struct GfxTri
+{
+    H64RenderVertex v[3];
+    u32 flags, tile, levels;
+};
+
+// A small colour image the display lists drew, with a signature of each of
+// its lines' RDRAM when the drawing started. The GPU never writes RDRAM, so
+// a line whose signature changed since was written by the CPU (or a DMA): a
+// texture load there reads that, not the GPU's picture. Paper Mario draws
+// small images at 0x28E000 and later keeps textures and palettes in that
+// memory; copying the old pictures back over them spoilt its colours.
+struct CimgSig
+{
+    u32 start, rowBytes, rows, use;
+    std::vector<u32> sig;
+};
+
+struct H64Gfx
+{
+    H64System *sys;
+    GfxUcode ucodes[16];
+    int ucodeCount, ucodeNext;
+    const GfxUcode *uc;
+
+    u32 segments[16];
+    float mv[GFX_STACK_MAX][4][4];
+    int mvi, stackSize;
+    float proj[4][4], combined[4][4];
+    int combinedValid, forcedCombined;
+    GfxVtx vtx[GFX_VTX_MAX];
+    u32 geomRaw;
+    u32 omH, omL;
+    float lightCol[10][3];
+    float lightDir[10][3];
+    int numLights;
+    float lookat[2][3];
+    u32 dmaIo;                     // G_DMA_IO's address (F3DFLX: the alpha table is at +128)
+    u32 amOrg, amScale0, amScale1; // F3DAM: G_TEXTURE's w1, G_MW_FOG offsets 0x0C and 0x10 (see load_vertices)
+    float vscale[4], vtrans[4];
+    u32 vpGen;
+    // Per-task profiling sums, added to sys->prof once a task (written per
+    // triangle and vertex, sys->prof's lines bounced between the CPU cores).
+    u64 pTri, pNtri, pVtx, pNvtx, pNlight;               // changes with the viewport (GfxVtx.projGen)
+    float clipRatio;
+    float texScaleS, texScaleT;
+    u32 texLevel, texTile, texOn;
+    float fogMul, fogOff;
+    u32 half1;
+    // Rare microcodes: DMA offsets, billboards, vertex colour table, counted display lists
+    u32 dmaMtx, dmaVtx, colorBase;
+    u32 texOffset, texShift, texCount;
+    u32 timgW0, timgW1;
+    int billboard, vertexi, dlCount;
+    // Conker's Bad Fur Day: point lights, a separate normal table, coordinate modifiers
+    float lightPos[10][3], lightCa[10];
+    float coordMod[16];
+    u32 normalBase;
+    int advLighting;
+    u32 pc[GFX_PC_MAX];
+    int pci, halt, abort;
+    int fullSync;
+    u32 commands;
+    u32 nVerts, nTris;      // this task's vertices and triangles (cost estimate)
+    u32 warned;
+
+    PodVec<u64> words;
+    PodVec<GfxTri> tris;
+    PodVec<GfxOp> ops;
+
+    // Deferred rendering: what texture loads read (snapshot), colour images seen.
+    u32 timgAddr, timgWidth, timgSize;
+    std::vector<u32> loadRanges;   // start, end pairs
+    std::vector<u64> rangeSort;    // the same as start << 32 | end, sorted (h64_gfx_parse_task)
+    u32 cimg[8][2];                // recent colour images: start, end
+    u32 cimgNext;
+    int texFromCimg;
+    CimgSig cimgSig[8];            // small colour images drawn, with their lines' signatures
+    u32 cimgUse;
+
+    // S2DEX 1.x: the 2D matrix (uObjMtx), object render mode, the status
+    // words G_OBJ_LOADTXTR and G_SELECT_DL test, a pending G_SELECT_DL.
+    s32 objA, objB, objC, objD;
+    s16 objX, objY;
+    u16 objScaleX, objScaleY;
+    u32 objRender;
+    u32 objStatus[4];
+    u32 selAddr, selSid, selFlag;
+
+    // ZSort: the microcode's DMEM (vertices are transformed there and saved
+    // to RDRAM for the CPU to sort), its screen scale/offset (10.2), fog,
+    // lights.
+    u8 zdmem[4096];
+    float zsScale[2], zsTrans[2], zsFogM, zsFogO;
+    float zsLightCol[9][3], zsLightDir[8][3], zsLookat[2][3];
+    int zsNumLights, zsLookatOn;
+
+    // Boss Game Studios' ZSort (World Driver Championship, Stunt Racer 64):
+    // the task waits for the CPU (signals) between its main and sub display
+    // lists and inside the sub list (bossWait: the parse stopped there).
+    int bossWait, bossMain, bossSub, bossWaiting;
+    // Streamed lists rendered on the graphics worker (h64_gfx_package): the
+    // parse keeps its output instead of drawing it on the CPU thread.
+    int noFlush;
+    u32 bossRdp[3], bossMask[2];
+    float bossVS[2], bossVT[2], bossInvw, bossFogM, bossFogO, bossLookat[2][3];
+    u8 bossFog[256];
+    s16 bossTable[8][8];
+    // Factor 5 (h64_gfx_f5.inc): each list's link word, the vertex colour
+    // table, texture coordinate scales, the viewport's and projection's addresses.
+    u32 f5dl[GFX_PC_MAX];
+    u32 f5ColorBase, f5TexScale[2], f5VpAddr, f5PerspAddr;
+    // Indiana Jones / Naboo: the microcode's DMEM (GLideN64's layout), the
+    // vertex generator and texture coordinate matrices, the polygon walker's state.
+    u8 f5dm[4096];
+    float *f5Mtx;
+    float f5MtxGen[4][4];
+    s32 f5StAdj[16];
+    u16 nAA;
+    s16 nBB, nEE, nHH;
+    u8 nDD, nCC, nTT;
+    int f5Restore;   // the saved mode is due back before the next Naboo polygon
+    // Streamed display list (options.gfxStream): the list branched to its own
+    // command, which the CPU rewrites once it has written more of the list.
+    int streamWait;
+    u32 streamAddr, streamW0, streamW1;
+};
+
+// A parsed task waiting for (or being) rendered.
+struct H64GfxOut
+{
+    PodVec<u64> words;
+    PodVec<GfxTri> tris;
+    PodVec<GfxOp> ops;
+    u8 *snapshot;                  // RDRAM-sized; only the task's load ranges are valid
+    std::vector<u32> cpuRanges;    // start, end pairs: loaded colour image lines the CPU wrote since they were drawn
+};
+
+// ---------------------------------------------------------------- memory
+static u32 seg_to_phys(H64Gfx *g, u32 a)
+{
+    return (g->segments[(a >> 24) & 0x0F] + (a & 0x00FFFFFF)) & 0x00FFFFFF;
+}
+
+static u32 rd32(H64Gfx *g, u32 a)
+{
+    a &= 0x7FFFFC;
+    return h64_load_be32(g->sys->rdram + a);
+}
+
+static s16 rd16(H64Gfx *g, u32 a) { return (s16)h64_load_be16(g->sys->rdram + (a & 0x7FFFFE)); }
+static u8 rd8(H64Gfx *g, u32 a) { return g->sys->rdram[a & 0x7FFFFF]; }
+
+// Integers to floats through tables: on the Xbox 360's CPU each conversion
+// goes through memory (a load-hit-store stall of ~40 cycles), a dozen per
+// vertex (Conker's cutscenes: ~11 ms a frame loading vertices). Exact.
+static float s_u8f[256], s_s8f[256], s_s8n[256];   // b, (s8)b, (s8)b / 128
+static void init_tables(void)
+{
+    int i;
+    for (i = 0; i < 256; i++)
+    {
+        s_u8f[i] = (float)i;
+        s_s8f[i] = (float)(s8)i;
+        s_s8n[i] = (float)(s8)i / 128.0f;
+    }
+}
+static float rdf16(H64Gfx *g, u32 a)
+{
+    const u8 *p = g->sys->rdram + (a & 0x7FFFFE);
+    return s_s8f[p[0]] * 256.0f + s_u8f[p[1]];
+}
+static float rdf8(H64Gfx *g, u32 a) { return s_u8f[g->sys->rdram[a & 0x7FFFFF]]; }
+static float rdn8(H64Gfx *g, u32 a) { return s_s8n[g->sys->rdram[a & 0x7FFFFF]]; }
+
+static void load_matrix(H64Gfx *g, u32 phys, float m[4][4])
+{
+    int i, j;
+    for (i = 0; i < 4; i++)
+        for (j = 0; j < 4; j++)
+        {
+            u32 k = (u32)(i * 4 + j) * 2;
+            s32 v = (s32)(((u32)(u16)rd16(g, phys + k) << 16) | (u16)rd16(g, phys + 32 + k));
+            m[i][j] = (float)v / 65536.0f;
+        }
+}
+
+static void mat_mul(float out[4][4], const float a[4][4], const float b[4][4])
+{
+    float r[4][4];
+    int i, j;
+    for (i = 0; i < 4; i++)
+        for (j = 0; j < 4; j++)
+            r[i][j] = a[i][0] * b[0][j] + a[i][1] * b[1][j] + a[i][2] * b[2][j] + a[i][3] * b[3][j];
+    memcpy(out, r, sizeof(r));
+}
+
+static void mat_identity(float m[4][4])
+{
+    memset(m, 0, sizeof(float) * 16);
+    m[0][0] = m[1][1] = m[2][2] = m[3][3] = 1.0f;
+}
+
+// ---------------------------------------------------------------- output
+static void out_rdp(H64Gfx *g, const u64 *w, u32 n)
+{
+    u32 index = g->words.size(), i;
+    u64 *d = g->words.add(n);
+    GfxOp *op = g->ops.add(1);
+    if (!d || !op) { g->abort = 1; return; }
+    for (i = 0; i < n; i++) d[i] = w[i];
+    op->kind = 0;
+    op->index = index;
+    op->count = n;
+}
+
+// Sampled words of an image line (up to 16, at most 20 bytes apart on lines
+// up to 320 bytes: a palette or a small texture written there changes one).
+static u32 row_sig(const u8 *ram, u32 a, u32 rowBytes)
+{
+    u32 step = (rowBytes / 16) & ~3u, h = 0x811C9DC5u, i;
+    if (step < 4) step = 4;
+    for (i = 0; i < 16 && i * step + 4 <= rowBytes; i++)
+        h = (h ^ h64_load_be32(ram + ((a + i * step) & ~3u))) * 16777619u;
+    return h;
+}
+
+// Small images only (up to 96 KB, guessed height): the frames the VI shows
+// are drawn again every frame and keep the old behaviour.
+static void cimg_track(H64Gfx *g, u32 start, u32 rowBytes, u32 rows)
+{
+    CimgSig *c = 0;
+    u32 k, r;
+    if (!g->sys->options.gfxCpuWritten || !rowBytes || rowBytes * rows > 96 * 1024 || start + rowBytes * rows > H64_RDRAM_SIZE) return;
+    for (k = 0; k < 8 && !c; k++)
+        if (g->cimgSig[k].rows && g->cimgSig[k].start == start) c = &g->cimgSig[k];
+    for (k = 0; k < 8 && !c; k++)
+        if (!g->cimgSig[k].rows) c = &g->cimgSig[k];
+    if (!c)
+    {
+        c = &g->cimgSig[0];
+        for (k = 1; k < 8; k++)
+            if (g->cimgSig[k].use < c->use) c = &g->cimgSig[k];
+    }
+    c->start = start;
+    c->rowBytes = rowBytes;
+    c->rows = rows;
+    c->use = ++g->cimgUse;
+    if (c->sig.size() < rows) c->sig.resize(rows);
+    for (r = 0; r < rows; r++) c->sig[r] = row_sig(g->sys->rdram, start + r * rowBytes, rowBytes);
+}
+
+// The lines of tracked images in [lo, hi) whose RDRAM changed since they were drawn.
+static void cimg_check(H64Gfx *g, u32 lo, u32 hi, std::vector<u32> &out)
+{
+    u32 k, r, r0, r1;
+    for (k = 0; k < 8; k++)
+    {
+        const CimgSig *c = &g->cimgSig[k];
+        u32 end = c->start + c->rowBytes * c->rows;
+        if (!c->rows || hi <= c->start || lo >= end) continue;
+        r0 = lo > c->start ? (lo - c->start) / c->rowBytes : 0;
+        r1 = (hi < end ? hi - c->start + c->rowBytes - 1 : end - c->start) / c->rowBytes;
+        for (r = r0; r < r1; r++)
+            if (row_sig(g->sys->rdram, c->start + r * c->rowBytes, c->rowBytes) != c->sig[r])
+            {
+                u32 a = c->start + r * c->rowBytes;
+                if (!out.empty() && out.back() == a) out.back() = a + c->rowBytes;
+                else { out.push_back(a); out.push_back(a + c->rowBytes); }
+            }
+    }
+}
+
+// Texture images and loads (h64_rdp_load's arithmetic): the RDRAM a load reads.
+static void note_rdp(H64Gfx *g, u32 w0, u32 w1)
+{
+    u32 op = (w0 >> 24) & 0x3F;
+    if (op == 0x3D)   // SET_TEXTURE_IMAGE
+    {
+        u32 k;
+        g->timgSize = (w0 >> 19) & 3;
+        g->timgWidth = (w0 & 0x3FF) + 1;
+        g->timgAddr = w1 & 0xFFFFFF;
+        for (k = 0; k < 8; k++)
+            if (g->timgAddr >= g->cimg[k][0] && g->timgAddr < g->cimg[k][1]) g->texFromCimg = 1;
+    }
+    else if (op == 0x3F)   // SET_COLOR_IMAGE: remember it (a later texture may read it)
+    {
+        u32 size = (w0 >> 19) & 3, width = (w0 & 0x3FF) + 1, start = w1 & 0xFFFFFF;
+        u32 bytes = width * (width <= 320 ? 240 : width * 3 / 4) << (size ? size - 1 : 0);
+        g->cimg[g->cimgNext & 7][0] = start;
+        g->cimg[g->cimgNext & 7][1] = start + bytes;
+        g->cimgNext++;
+        cimg_track(g, start, width << (size ? size - 1 : 0), width <= 320 ? 240 : width * 3 / 4);
+    }
+    else if (op == 0x30 || op == 0x33 || op == 0x34)   // LOAD_TLUT, LOAD_BLOCK, LOAD_TILE
+    {
+        u32 sl = (w0 >> 12) & 0xFFF, tl = w0 & 0xFFF, sh = (w1 >> 12) & 0xFFF, th = w1 & 0xFFF;
+        u32 sz = g->timgSize ? g->timgSize : 1, start, end;
+        if (op == 0x33)
+        {
+            u32 texels = (sh - sl + 1) & 0xFFF;
+            start = g->timgAddr + ((tl * g->timgWidth + sl) << (sz - 1));
+            end = start + ((((texels << sz) + 15) >> 4) * 8);
+        }
+        else
+        {
+            u32 lines = (th >> 2) >= (tl >> 2) ? (th >> 2) - (tl >> 2) + 1 : 1;
+            u32 pixels = ((sh >> 2) - (sl >> 2) + 1) & 0xFFF;
+            start = g->timgAddr + (((tl >> 2) * g->timgWidth + (sl >> 2)) << (sz - 1));
+            end = start + (lines - 1) * (g->timgWidth << (sz - 1)) + ((((pixels << sz) + 15) >> 4) * 8);
+            if (op == 0x30) end = start + pixels * 2 + 16;   // TLUT: one line of 16-bit entries
+        }
+        start &= ~7u;
+        end = (end + 15) & ~7u;
+        if (start < H64_RDRAM_SIZE)
+        {
+            if (end > H64_RDRAM_SIZE || end < start) end = H64_RDRAM_SIZE;
+            g->loadRanges.push_back(start);
+            g->loadRanges.push_back(end);
+        }
+    }
+}
+
+static void out_rdp1(H64Gfx *g, u32 w0, u32 w1)
+{
+    note_rdp(g, w0, w1);
+    u64 w = ((u64)w0 << 32) | w1;
+    out_rdp(g, &w, 1);
+}
+
+static void out_othermode(H64Gfx *g)
+{
+    out_rdp1(g, 0xEF000000u | (g->omH & 0x00FFFFFF), g->omL);
+}
+
+// Field by field: the XDK compiler copies structures byte by byte.
+static inline void copy_rv(H64RenderVertex *o, const H64RenderVertex *i)
+{
+    o->x = i->x; o->y = i->y; o->z = i->z; o->invw = i->invw;
+    o->r = i->r; o->g = i->g; o->b = i->b; o->a = i->a;
+    o->s = i->s; o->t = i->t;
+}
+
+// A new triangle at the end of the lists (vertices to fill in).
+static GfxTri *new_tri(H64Gfx *g, u32 flags)
+{
+    static GfxTri s_dummy;   // out of memory: written, never sent (the task aborts)
+    u32 n = g->tris.size();
+    GfxTri *t = g->tris.add(1);
+    GfxOp *op = g->ops.add(1);
+    if (!t || !op) { g->abort = 1; return &s_dummy; }
+    t->flags = flags;
+    t->tile = g->texTile;
+    t->levels = g->texLevel + 1;
+    op->kind = 1;
+    op->index = n;
+    op->count = 0;
+    return t;
+}
+
+static void out_tri(H64Gfx *g, const H64RenderVertex *a, const H64RenderVertex *b, const H64RenderVertex *c, u32 flags)
+{
+    GfxTri *t = new_tri(g, flags);
+    copy_rv(&t->v[0], a);
+    copy_rv(&t->v[1], b);
+    copy_rv(&t->v[2], c);
+}
+
+// ---------------------------------------------------------------- microcode detection
+static void detect_ucode(H64Gfx *g, GfxUcode *u)
+{
+    char data[2048 + 1];
+    u32 i, n = u->dsize ? u->dsize : 2048;
+    u->type = UC_NONE;
+    u->zex = 0;
+    u->noNear = 0;
+    u->cull40 = 0;
+    u->flx = 0;
+    u->s2v103 = 0;
+    u->am = 0;
+    u->line = 0;
+    u->omInit = 0;
+    u->cullOne = 0;
+    u->combineH = 0;
+    u->rare = RARE_NONE;
+    {
+        // CRC-32 of the first 4 KB of code as GLideN64 computes it (its
+        // RDRAM holds 32-bit words byte-reversed).
+        static const struct { u32 crc; int type, rare, noNear; const char *name; } known[] = {
+            { 0x302BCA09u, UC_F3D, RARE_GOLDEN, 0, "GoldenEye" },
+            { 0x1C4F7869u, UC_F3D, RARE_PD, 0, "Perfect Dark" },
+            { 0x6E6FC893u, UC_F3D, RARE_DKR, 0, "Diddy Kong Racing" },
+            { 0x8D91244Fu, UC_F3D, RARE_DKR, 0, "Diddy Kong Racing" },
+            { 0xBDE9D1FBu, UC_F3D, RARE_JFG, 0, "Jet Force Gemini, Mickey's Speedway" },
+            { 0x1B4ACE88u, UC_F3DEX2, RARE_CBFD, 1, "Conker's Bad Fur Day" },   // F3DEXBG.NoN
+            { 0xDA51CCDBu, UC_F5ROGUE, RARE_NONE, 0, "Star Wars: Rogue Squadron (Factor 5)" },
+            { 0x23FEF05Fu, UC_F5INDI, RARE_NONE, 0, "Star Wars Episode I: Battle for Naboo (Factor 5)" },
+            { 0x6859BF8Eu, UC_F5INDI, RARE_NONE, 0, "Indiana Jones and the Infernal Machine (Factor 5)" },
+            { 0x2BDCFC8Au, UC_TURBO3D, RARE_NONE, 0, "Turbo3D (Dark Rift)" },   // no name string
+            { 0xE62A706Du, UC_F3D, RARE_NONE, 0, "Fast3D (Tetris 64)" },        // no name string (GLideN64 GBI.cpp)
+        };
+        u8 code[4096];
+        u32 crc, k;
+        for (k = 0; k < 4096; k += 4)
+        {
+            u32 w = rd32(g, u->start + k);
+            code[k] = (u8)w;
+            code[k + 1] = (u8)(w >> 8);
+            code[k + 2] = (u8)(w >> 16);
+            code[k + 3] = (u8)(w >> 24);
+        }
+        crc = h64_crc32(0, code, sizeof(code));
+        u->crc = crc;
+        // Boss's microcode is shorter than 4 KB and what follows it in RDRAM
+        // changes as the game runs (detected again after a state load: another
+        // CRC): its first 2 KB, the same in both its games, identify it.
+        if (h64_crc32(0, code, 2048) == 0x57B8095Au)
+        {
+            u->type = UC_BOSS;
+            H64_INFO("[gfx] microcode at %06X: Boss Game Studios' ZSort", u->start);
+            return;
+        }
+        for (k = 0; k < sizeof(known) / sizeof(known[0]); k++)
+            if (known[k].crc == crc)
+            {
+                u->type = known[k].type;
+                u->rare = known[k].rare;
+                u->noNear = known[k].noNear;
+                H64_INFO("[gfx] microcode at %06X: CRC %08X, %s's variant", u->start, crc, known[k].name);
+                return;
+            }
+    }
+    if (n > 2048) n = 2048;
+    for (i = 0; i < n; i++) data[i] = (char)rd8(g, u->dstart + i);
+    data[n] = 0;
+    for (i = 0; i + 3 < n; i++)
+    {
+        char str[256];
+        u32 j = 0;
+        if (data[i] != 'R' || data[i + 1] != 'S' || data[i + 2] != 'P') continue;
+        memset(str, 0, sizeof(str));
+        while (i + j < n && j < 255 && data[i + j] > 0x0A) { str[j] = data[i + j]; j++; }
+        str[j] = 0;
+        if (!strncmp(str + 4, "SW", 2))
+            u->type = UC_F3D;
+        else if (!strncmp(str + 4, "Gfx", 3) && j > 31 && !strncmp(str + 14, "F3D", 3))
+        {
+            u->noNear = strstr(str + 4, ".NoN") != 0 || strstr(str + 4, ".Rej") != 0;
+            // F3DLP.Rej (Quake II, Fighting Force, NFL Quarterback Club 98):
+            // F3DEX 1.x as far as the display lists go. Its tasks start from
+            // the default other modes 0x080CFF, as the real microcode sends
+            // them (Quake II never sets the texture filter: from 0 its
+            // palette textures were read as YUV, grey planets).
+            if (!strncmp(str + 14, "F3DLP", 5)) u->omInit = 1;
+            // F3DLX.Rej has no "cull both": with both bits set it culls the
+            // back faces (GLideN64's cullBoth = false). Mortal Kombat 4 sets
+            // both for its fighters and arenas: only the HUD was drawn.
+            if (!strncmp(str + 14, "F3DLX.Rej", 9)) u->cullOne = 1;
+            if (!strncmp(str + 14, "F3DZEX", 6))
+            {
+                u->type = UC_F3DEX2;
+                u->zex = 1;
+            }
+            else if (!strncmp(str + 14, "F3DFLX", 6))
+            {
+                u->type = UC_F3DEX2;   // F-Zero X's races (they ran on the LLE RSP: ~13 FPS on the console)
+                u->flx = 1;
+            }
+            else if (!strncmp(str + 14, "F3DAM", 5))
+            {
+                u->type = UC_F3DEX2;   // F3DAM (GLideN64 F3DAM): texture coordinates through a matrix
+                u->am = 1;
+            }
+            else if (!strncmp(str + 14, "F3DTEX/A", 8))
+                u->type = UC_NONE;   // variants not handled yet
+            else if (str[28] == '1' || !strncmp(str + 28, "0.95", 4) || !strncmp(str + 28, "0.96", 4))
+            {
+                u->type = UC_F3DEX;
+                u->cull40 = str[28] == '0';
+            }
+            else if (j > 31 && str[31] == '2')
+            {
+                u->type = UC_F3DEX2;
+                u->combineH = j > 35 && str[35] == 'H';
+            }
+        }
+        else if (!strncmp(str + 4, "Gfx", 3) && j > 22 && !strncmp(str + 14, "L3DEX", 5))
+        {
+            // L3DEX (1.2x, F3DEX's commands) and L3DEX2 (2.0x): every triangle
+            // drawn as its three edges, G_LINE3D a line (GLideN64 L3DEX.cpp,
+            // L3DEX2.cpp). Madden NFL 2001's field lines, Spider-Man.
+            u32 t = 22;
+            while (t < j && (str[t] < '0' || str[t] > '9')) t++;
+            if (str[t] == '1') u->type = UC_F3DEX;
+            else if (str[t] == '2') u->type = UC_F3DEX2;
+            u->line = u->type != UC_NONE;
+        }
+        else if (!strncmp(str + 4, "Gfx", 3) && j > 19 && !strncmp(str + 14, "ZSort", 5))
+            u->type = UC_ZSORT;   // ZSortp (Mia Hamm Soccer 64)
+        else if (!strncmp(str + 4, "Gfx", 3) && j > 19 && !strncmp(str + 14, "S2DEX", 5))
+        {
+            // S2DEX2 (the F3DEX2-era 2D microcode, OoT's backgrounds): version 2.xx.
+            const char *v = strstr(str, "fifo ");
+            if (!v) v = strstr(str, "xbus ");
+            if (v && v[5] == '2') u->type = UC_S2DEX2;
+            else if (!v && g->sys->options.gfxS2dex1)
+            {
+                // S2DEX 1.05 and later (Yoshi's Story: 1.06), and 1.03 (GT 64),
+                // which rounds and places its objects differently (GLideN64).
+                const char *n = strstr(str + 19, " 1.");
+                if (n && n[3] >= '0' && n[3] <= '9' && n[4] >= '5' && n[4] <= '9') u->type = UC_S2DEX1;
+                else if (n && n[3] == '0' && n[4] == '3') { u->type = UC_S2DEX1; u->s2v103 = 1; }
+            }
+        }
+        H64_INFO("[gfx] microcode \"%s\" at %06X: %s", str, u->start,
+                 u->type == UC_F3D ? "F3D" : u->type == UC_F3DEX ? "F3DEX" :
+                 u->type == UC_F3DEX2 ? (u->zex ? "F3DZEX" : "F3DEX2") : u->type == UC_S2DEX2 ? "S2DEX2" : u->type == UC_S2DEX1 ? "S2DEX 1.x" : u->type == UC_ZSORT ? "ZSort" : "not handled (LLE)");
+        return;
+    }
+    {
+        // No name in this data segment (Kirby 64 and NASCAR 2000 load a
+        // microcode again with another one): the same code as a microcode
+        // already identified is that microcode.
+        int k;
+        for (k = 0; k < g->ucodeCount; k++)
+        {
+            const GfxUcode *o = &g->ucodes[k];
+            if (o != u && o->type != UC_NONE && o->crc == u->crc)
+            {
+                u->type = o->type; u->zex = o->zex; u->noNear = o->noNear; u->rare = o->rare;
+                u->cull40 = o->cull40; u->flx = o->flx; u->s2v103 = o->s2v103; u->am = o->am; u->line = o->line;
+                u->combineH = o->combineH;
+                u->omInit = o->omInit; u->cullOne = o->cullOne;
+                H64_INFO("[gfx] microcode at %06X (data %06X): same code as the one at %06X", u->start, u->dstart, o->start);
+                return;
+            }
+        }
+    }
+    H64_INFO("[gfx] microcode at %06X: CRC %08X, no name string, not handled (LLE)", u->start, u->crc);
+}
+
+static const GfxUcode *find_ucode(H64Gfx *g, u32 start, u32 dstart, u32 dsize)
+{
+    int i;
+    GfxUcode *u;
+    for (i = 0; i < g->ucodeCount; i++)
+        if (g->ucodes[i].start == start && g->ucodes[i].dstart == dstart && g->ucodes[i].dsize == dsize)
+            return &g->ucodes[i];
+    u = &g->ucodes[g->ucodeNext];
+    g->ucodeNext = (g->ucodeNext + 1) & 15;
+    if (g->ucodeCount < 16) g->ucodeCount++;
+    u->start = start;
+    u->dstart = dstart;
+    u->dsize = dsize;
+    detect_ucode(g, u);
+    return u;
+}
+
+// ---------------------------------------------------------------- geometry mode
+static u32 geom(const H64Gfx *g)
+{
+    u32 r = g->geomRaw, m = 0;
+    if (r & 0x1) m |= GM_ZBUFFER;
+    if (r & 0x4) m |= GM_SHADE;
+    if (r & 0x10000) m |= GM_FOG;
+    if (r & 0x20000) m |= GM_LIGHTING;
+    if (r & 0x40000) m |= GM_TEXGEN;
+    if (r & 0x80000) m |= GM_TEXGEN_LINEAR;
+    if (g->uc->type == UC_F3DEX2)
+    {
+        if (r & 0x200) m |= GM_CULL_FRONT;
+        if (r & 0x400) m |= GM_CULL_BACK;
+        if (r & 0x200000) m |= GM_SMOOTH;
+    }
+    else
+    {
+        if (r & 0x200) m |= GM_SMOOTH;
+        if (r & 0x1000) m |= GM_CULL_FRONT;
+        if (r & 0x2000) m |= GM_CULL_BACK;
+    }
+    if (g->uc->type == UC_F5INDI && (r & 0x4)) m |= GM_SMOOTH;   // its smooth shading is the shade bit
+    if (g->uc->cullOne && (m & (GM_CULL_FRONT | GM_CULL_BACK)) == (GM_CULL_FRONT | GM_CULL_BACK)) m &= ~GM_CULL_FRONT;
+    return m;
+}
+
+// ---------------------------------------------------------------- vertices
+static void update_combined(H64Gfx *g)
+{
+    if (!g->combinedValid)
+    {
+        mat_mul(g->combined, g->mv[g->mvi], g->proj);
+        g->combinedValid = 1;
+    }
+}
+
+// Direction `d` from eye space into model space (transpose of the model-view
+// rotation), normalised.
+static void to_model_dir(const float m[4][4], const float d[3], float out[3])
+{
+    float x = m[0][0] * d[0] + m[0][1] * d[1] + m[0][2] * d[2];
+    float y = m[1][0] * d[0] + m[1][1] * d[1] + m[1][2] * d[2];
+    float z = m[2][0] * d[0] + m[2][1] * d[1] + m[2][2] * d[2];
+    float len = sqrtf(x * x + y * y + z * z);
+    if (len > 0) { x /= len; y /= len; z /= len; }
+    out[0] = x;
+    out[1] = y;
+    out[2] = z;
+}
+
+// Vertex formats: the standard 16-byte Vtx; Perfect Dark's 12-byte vertex with
+// a colour/normal index into a table (G_VTXCOLORBASE); Diddy Kong Racing's
+// 10-byte vertex (position and colour, no texture coordinates or normal).
+enum { VF_STD = 0, VF_PD, VF_DKR, VF_CBFD };
+
+// Conker's lighting (GLideN64 gSPLightVertexCBFD_basic/_advanced): the
+// vertex colour times ambient + point lights (distance falloff from the
+// light's position, given in clip space after the coordinate modifiers),
+// plus in the advanced mode the last light as a directional one. Normals come
+// from the G_MV_NORMALES table (x, y) and the vertex's flag (z); a negative
+// flag leaves the colour unlit.
+// a >= 0 ? b : c without a branch on the Xbox 360 (fsel): a branch on a float
+// compare waits for the FPU and often mispredicts (~30 cycles there).
+static H64_INLINE float fsel(float a, float b, float c)
+{
+#if defined(_XBOX)
+    return (float)__fsel(a, b, c);
+#else
+    return a >= 0.0f ? b : c;
+#endif
+}
+
+// Conker's lighting (after GLideN64): ambient + point lights + in the
+// advanced mode a directional one. Returns the factors the vertex colour is
+// multiplied by. Scalars in and out, inlined: see load_vertices_body.
+static H64_INLINE void cbfd_light(const H64Gfx *g, float x, float y, float z, float nx, float ny, float nz, const float ldir[][3],
+                                  const float lc[][3], float *fr, float *fg, float *fb)
+{
+    int nl = g->numLights > 8 ? 8 : g->numLights, l;
+    float r, gg, b, p0, p1, p2;
+    const float *cm = g->coordMod;
+    r = lc[nl][0];
+    gg = lc[nl][1];
+    b = lc[nl][2];
+    p0 = (x + cm[8]) * cm[12];
+    p1 = (y + cm[9]) * cm[13];
+    p2 = (z + cm[10]) * cm[14];
+    // Branch-free, the same results: min(x, 1) = fsel(x - 1, 1, x); a
+    // contribution that is not positive adds an exact zero (colours are >= 0).
+    l = nl - 1;
+    if (g->advLighting && l >= 0)
+    {
+        float d = nx * ldir[l][0] + ny * ldir[l][1] + nz * ldir[l][2];
+        d = fsel(d - 1.0f, 1.0f, d);
+        d = fsel(-d, 0.0f, d);
+        r += lc[l][0] * d;
+        gg += lc[l][1] * d;
+        b += lc[l][2] * d;
+    }
+    {
+        int facing = g->advLighting && (g->geomRaw & 0x00400000u);   // G_POINT_LIGHTING: also facing the light
+        // Two lights at a time: their intensities are independent (the in-order
+        // core runs both chains interleaved); summed in the same order as one
+        // at a time, so the results are the same.
+        for (l = nl - 2; l >= 0; l -= 2)
+        {
+            int k = l > 0 ? l - 1 : l;
+            float dx = p0 - g->lightPos[l][0], dy = p1 - g->lightPos[l][1], dz = p2 - g->lightPos[l][2];
+            float ex = p0 - g->lightPos[k][0], ey = p1 - g->lightPos[k][1], ez = p2 - g->lightPos[k][2];
+            float len = (dx * dx + dy * dy + dz * dz) * (1.0f / 32768.0f);   // 2 / 65536: exact
+            float len2 = (ex * ex + ey * ey + ez * ez) * (1.0f / 32768.0f);
+            float in = fsel(-len, 1.0f, g->lightCa[l] / len);                // len > 0 ? ca / len : 1
+            float in2 = fsel(-len2, 1.0f, g->lightCa[k] / len2);
+            in = fsel(in - 1.0f, 1.0f, in);
+            in2 = fsel(in2 - 1.0f, 1.0f, in2);
+            if (facing)
+            {
+                float d = nx * ldir[l][0] + ny * ldir[l][1] + nz * ldir[l][2];
+                float d2 = nx * ldir[k][0] + ny * ldir[k][1] + nz * ldir[k][2];
+                in *= fsel(d - 1.0f, 1.0f, d);
+                in2 *= fsel(d2 - 1.0f, 1.0f, d2);
+            }
+            in = fsel(-in, 0.0f, in);
+            in2 = fsel(-in2, 0.0f, in2);
+            r += lc[l][0] * in;
+            gg += lc[l][1] * in;
+            b += lc[l][2] * in;
+            if (l > 0)
+            {
+                r += lc[k][0] * in2;
+                gg += lc[k][1] * in2;
+                b += lc[k][2] * in2;
+            }
+        }
+    }
+    *fr = r > 1.0f ? 1.0f : r;
+    *fg = gg > 1.0f ? 1.0f : gg;
+    *fb = b > 1.0f ? 1.0f : b;
+}
+
+#if defined(_XBOX)
+// Conker's point lights four at a time on VMX128 (the console only; the hosts
+// keep the scalar code above). Per vertex the scalar loop took ~200 cycles a
+// light (dependent chains with a division each on the in-order core); results
+// differ from it by rounding only (reciprocal estimate refined, sums in
+// another order). Lanes past the last light have no colour: they add zero.
+struct CbfdVec
+{
+    XMVECTOR px[2], py[2], pz[2], ca[2], dx[2], dy[2], dz[2], cr[2], cg[2], cb[2];
+    int groups, facing;
+};
+
+static void cbfd_prepare(const H64Gfx *g, const float ldir[][3], const float lc[][3], CbfdVec *v)
+{
+    __declspec(align(16)) float t[10][8];
+    int nl = g->numLights > 8 ? 8 : g->numLights, np = nl - 1, k, j;
+    if (np < 0) np = 0;
+    memset(t, 0, sizeof(t));
+    for (k = 0; k < np; k++)
+    {
+        t[0][k] = g->lightPos[k][0];
+        t[1][k] = g->lightPos[k][1];
+        t[2][k] = g->lightPos[k][2];
+        t[3][k] = g->lightCa[k];
+        t[4][k] = ldir[k][0];
+        t[5][k] = ldir[k][1];
+        t[6][k] = ldir[k][2];
+        t[7][k] = lc[k][0];
+        t[8][k] = lc[k][1];
+        t[9][k] = lc[k][2];
+    }
+    v->groups = (np + 3) / 4;
+    v->facing = g->advLighting && (g->geomRaw & 0x00400000u);
+    for (j = 0; j < 2; j++)
+    {
+        v->px[j] = XMLoadFloat4A((const XMFLOAT4A *)&t[0][4 * j]);
+        v->py[j] = XMLoadFloat4A((const XMFLOAT4A *)&t[1][4 * j]);
+        v->pz[j] = XMLoadFloat4A((const XMFLOAT4A *)&t[2][4 * j]);
+        v->ca[j] = XMLoadFloat4A((const XMFLOAT4A *)&t[3][4 * j]);
+        v->dx[j] = XMLoadFloat4A((const XMFLOAT4A *)&t[4][4 * j]);
+        v->dy[j] = XMLoadFloat4A((const XMFLOAT4A *)&t[5][4 * j]);
+        v->dz[j] = XMLoadFloat4A((const XMFLOAT4A *)&t[6][4 * j]);
+        v->cr[j] = XMLoadFloat4A((const XMFLOAT4A *)&t[7][4 * j]);
+        v->cg[j] = XMLoadFloat4A((const XMFLOAT4A *)&t[8][4 * j]);
+        v->cb[j] = XMLoadFloat4A((const XMFLOAT4A *)&t[9][4 * j]);
+    }
+}
+
+static H64_INLINE void cbfd_light_vmx(const H64Gfx *g, const CbfdVec *v, float x, float y, float z, float nx, float ny,
+                                      float nz, const float ldir[][3], const float lc[][3], float *fr, float *fg, float *fb)
+{
+    int nl = g->numLights > 8 ? 8 : g->numLights, l, k;
+    const float *cm = g->coordMod;
+    float r = lc[nl][0], gg = lc[nl][1], b = lc[nl][2];
+    XMVECTOR one = XMVectorSplatOne(), zero = XMVectorZero(), scale = XMVectorReplicate(1.0f / 32768.0f);
+    XMVECTOR P0 = XMVectorReplicate((x + cm[8]) * cm[12]), P1 = XMVectorReplicate((y + cm[9]) * cm[13]);
+    XMVECTOR P2 = XMVectorReplicate((z + cm[10]) * cm[14]);
+    XMVECTOR NX = XMVectorReplicate(nx), NY = XMVectorReplicate(ny), NZ = XMVectorReplicate(nz);
+    XMVECTOR aR = zero, aG = zero, aB = zero, sums;
+    __declspec(align(16)) float out[4];
+    l = nl - 1;
+    if (g->advLighting && l >= 0)
+    {
+        float d = nx * ldir[l][0] + ny * ldir[l][1] + nz * ldir[l][2];
+        d = fsel(d - 1.0f, 1.0f, d);
+        d = fsel(-d, 0.0f, d);
+        r += lc[l][0] * d;
+        gg += lc[l][1] * d;
+        b += lc[l][2] * d;
+    }
+    for (k = 0; k < v->groups; k++)
+    {
+        XMVECTOR dx = XMVectorSubtract(P0, v->px[k]), dy = XMVectorSubtract(P1, v->py[k]), dz = XMVectorSubtract(P2, v->pz[k]);
+        XMVECTOR len = XMVectorMultiply(XMVectorMultiplyAdd(dz, dz, XMVectorMultiplyAdd(dy, dy, XMVectorMultiply(dx, dx))), scale);
+        XMVECTOR in = XMVectorMultiply(v->ca[k], XMVectorReciprocal(len));
+        in = XMVectorSelect(in, one, XMVectorLessOrEqual(len, zero));   // len <= 0: 1
+        in = XMVectorMin(in, one);
+        if (v->facing)
+        {
+            XMVECTOR d = XMVectorMultiplyAdd(NZ, v->dz[k], XMVectorMultiplyAdd(NY, v->dy[k], XMVectorMultiply(NX, v->dx[k])));
+            in = XMVectorMultiply(in, XMVectorMin(d, one));
+        }
+        in = XMVectorMax(in, zero);
+        aR = XMVectorMultiplyAdd(v->cr[k], in, aR);
+        aG = XMVectorMultiplyAdd(v->cg[k], in, aG);
+        aB = XMVectorMultiplyAdd(v->cb[k], in, aB);
+    }
+    // The three sums at once: x = R, y = G, z = B.
+    sums = XMVectorSelect(XMVector4Dot(aG, one), XMVector4Dot(aR, one), XMVectorSelectControl(1, 0, 0, 0));
+    sums = XMVectorSelect(sums, XMVector4Dot(aB, one), XMVectorSelectControl(0, 0, 1, 0));
+    XMStoreFloat4A((XMFLOAT4A *)out, sums);
+    r += out[0];
+    gg += out[1];
+    b += out[2];
+    *fr = fsel(r - 1.0f, 1.0f, r);
+    *fg = fsel(gg - 1.0f, 1.0f, gg);
+    *fb = fsel(b - 1.0f, 1.0f, b);
+}
+#endif
+
+static void load_vertices_body(H64Gfx *g, u32 phys, u32 n, u32 v0, int fmt);
+static void load_vertices_fmt(H64Gfx *g, u32 phys, u32 n, u32 v0, int fmt)
+{
+    u64 t0 = h64_prof_now(g->sys);
+    load_vertices_body(g, phys, n, v0, fmt);
+    g->pVtx += h64_prof_now(g->sys) - t0;
+    g->pNvtx += n;
+}
+
+// Each vertex is read (bytes) and computed in locals, and written once at the
+// end: byte reads may alias anything, so with the results stored as they were
+// computed the compiler read each one back from memory right after storing it
+// (load-hit-store stalls, ~40 cycles each on the Xbox 360: ~3000 cycles a
+// vertex in Conker's cutscenes).
+static void load_vertices_body(H64Gfx *g, u32 phys, u32 n, u32 v0, int fmt)
+{
+    u32 i, stride = fmt == VF_PD ? 12 : fmt == VF_DKR ? 10 : 16;
+    u32 gm = geom(g);
+    float ldir[10][3], look[2][3], lc[10][3], m[4][4];
+    float texS = g->texScaleS, texT = g->texScaleT, fogMul = g->fogMul, fogOff = g->fogOff, cr = g->clipRatio;
+    int l, lighting = (gm & GM_LIGHTING) && fmt != VF_DKR, cbfd = (gm & GM_LIGHTING) && fmt == VF_CBFD;
+    int billboard = fmt == VF_DKR && g->billboard, nLights = g->numLights, noNear = g->uc->noNear;
+    float vs0 = g->vscale[0], vs1 = g->vscale[1], vs2 = g->vscale[2], vt0 = g->vtrans[0], vt1 = g->vtrans[1], vt2 = g->vtrans[2];
+    u32 vpGen = g->vpGen;
+#if defined(_XBOX)
+    CbfdVec cvec;
+#endif
+    g->nVerts += n;
+    if (v0 >= GFX_VTX_MAX) return;
+    if (v0 + n > GFX_VTX_MAX) n = GFX_VTX_MAX - v0;
+    update_combined(g);
+    memcpy(m, g->combined, sizeof(m));
+    if (gm & GM_LIGHTING)
+        for (l = 0; l < nLights && l < 8; l++) to_model_dir(g->mv[g->mvi], g->lightDir[l], ldir[l]);
+    if (cbfd)
+        for (l = 0; l < 10; l++)
+        {
+            lc[l][0] = g->lightCol[l][0] / 255.0f;
+            lc[l][1] = g->lightCol[l][1] / 255.0f;
+            lc[l][2] = g->lightCol[l][2] / 255.0f;
+        }
+#if defined(_XBOX)
+    if (cbfd) cbfd_prepare(g, ldir, lc, &cvec);
+#endif
+    if (gm & GM_TEXGEN)
+    {
+        to_model_dir(g->mv[g->mvi], g->lookat[0], look[0]);
+        to_model_dir(g->mv[g->mvi], g->lookat[1], look[1]);
+    }
+    for (i = 0; i < n; i++)
+    {
+        GfxVtx *v = &g->vtx[v0 + i];
+        u32 a = phys + i * stride, clip = 0;
+        float px = rdf16(g, a), py = rdf16(g, a + 2), pz = rdf16(g, a + 4);
+        float s = 0, t = 0, x, y, z, w, r, gg, b, al, nx = 0, ny = 0, nz = 0;
+        u32 c = fmt == VF_PD ? g->colorBase + (h64_load_be16(g->sys->rdram + ((a + 6) & 0x7FFFFE)) & 0xFF) :
+                fmt == VF_DKR ? a + 6 : a + 12;   // colour, or normal with lighting
+        int unlit = 0;
+        if (fmt != VF_DKR)
+        {
+            s = rdf16(g, a + 8);
+            t = rdf16(g, a + 10);
+            if (g->uc->am)
+            {
+                // F3DAM: s' = (Ao * s + Bo * t) / 32768 + offset, t' with the
+                // second row (GLideN64 calcF3DAMTexCoords: 16-bit products,
+                // u32 arithmetic, then the high halves).
+                u32 s0 = (u32)(s32)rd16(g, a + 8), t0 = (u32)(s32)rd16(g, a + 10);
+                u32 acc0 = (((g->amOrg & 0xFFFF) * t0) << 1) + 0x8000, acc1 = (((g->amScale1 & 0xFFFF) * t0) << 1) + 0x8000;
+                u32 sres = (((g->amOrg >> 16) * s0) << 1) + acc0, tres = (((g->amScale1 >> 16) * s0) << 1) + acc1;
+                s = (float)(s16)((sres >> 16) + (g->amScale0 >> 16));
+                t = (float)(s16)((tres >> 16) + (g->amScale0 & 0xFFFF));
+            }
+        }
+        al = rdf8(g, c + 3);
+        if (cbfd)
+        {
+            nx = rdn8(g, g->normalBase + (v0 + i) * 2);
+            ny = rdn8(g, g->normalBase + (v0 + i) * 2 + 1);
+            nz = rdn8(g, a + 7);
+            r = rdf8(g, a + 12);
+            gg = rdf8(g, a + 13);
+            b = rdf8(g, a + 14);
+            unlit = rd8(g, a + 6) >= 0x80;   // the flag halfword's sign
+        }
+        else if (lighting)
+        {
+            nx = rdn8(g, c);
+            ny = rdn8(g, c + 1);
+            nz = rdn8(g, c + 2);
+            r = gg = b = 0;
+        }
+        else
+        {
+            r = rdf8(g, c);
+            gg = rdf8(g, c + 1);
+            b = rdf8(g, c + 2);
+        }
+        const float xc = g->sys->options.gfxKeepOffscreen ? 0.75f : 1.0f;   // 16:9 widescreen: see the clip tests
+        // From here on, no memory read can alias what is computed.
+        x = px * m[0][0] + py * m[1][0] + pz * m[2][0] + m[3][0];
+        y = px * m[0][1] + py * m[1][1] + pz * m[2][1] + m[3][1];
+        z = px * m[0][2] + py * m[1][2] + pz * m[2][2] + m[3][2];
+        w = px * m[0][3] + py * m[1][3] + pz * m[2][3] + m[3][3];
+        if (billboard)
+        {
+            // Billboards: positions relative to vertex 0 (GLideN64 gSPBillboardVertex),
+            // as it is now (vertex 0 itself: its new position, doubled).
+            if (v0 + i == 0) { x += x; y += y; z += z; w += w; }
+            else { x += g->vtx[0].x; y += g->vtx[0].y; z += g->vtx[0].z; w += g->vtx[0].w; }
+        }
+        if (cbfd)
+        {
+            if (!unlit)
+            {
+                float fr, fg, fb;
+#if defined(_XBOX)
+                cbfd_light_vmx(g, &cvec, x, y, z, nx, ny, nz, ldir, lc, &fr, &fg, &fb);
+#else
+                cbfd_light(g, x, y, z, nx, ny, nz, ldir, lc, &fr, &fg, &fb);
+#endif
+                g->pNlight += (u64)nLights;
+                r *= fr;
+                gg *= fg;
+                b *= fb;
+            }
+        }
+        else if (lighting)
+        {
+            r = g->lightCol[nLights][0];
+            gg = g->lightCol[nLights][1];
+            b = g->lightCol[nLights][2];
+            for (l = 0; l < nLights && l < 8; l++)
+            {
+                float d = nx * ldir[l][0] + ny * ldir[l][1] + nz * ldir[l][2];
+                if (d > 0)
+                {
+                    r += g->lightCol[l][0] * d;
+                    gg += g->lightCol[l][1] * d;
+                    b += g->lightCol[l][2] * d;
+                }
+            }
+            r = r > 255.0f ? 255.0f : r;
+            gg = gg > 255.0f ? 255.0f : gg;
+            b = b > 255.0f ? 255.0f : b;
+        }
+        if (lighting && (gm & GM_TEXGEN) && g->uc->flx)
+        {
+            // F3DFLX: the normal against the alpha light picks the vertex
+            // alpha in a table (GLideN64 F3DFLX2; F-Zero X's machines).
+            float d = (look[0][0] * nx + look[0][1] * ny + look[0][2] * nz) * 128.0f;
+            al = (float)rd8(g, g->dmaIo + 128 + (s32)(s16)d);
+        }
+        else if (lighting && (gm & GM_TEXGEN))
+        {
+            float tx = look[0][0] * nx + look[0][1] * ny + look[0][2] * nz;
+            float ty = look[1][0] * nx + look[1][1] * ny + look[1][2] * nz;
+            // GLideN64's formulas give texels (0..1024 before the
+            // G_TEXTURE scale); s and t here are in the vertex's s10.5
+            // units, hence x32 (MK64's and GoldenEye's shiny Nintendo
+            // logos sampled about one texel: dark).
+            if (gm & GM_TEXGEN_LINEAR)
+            {
+                if (tx < -1.0f) tx = -1.0f;
+                if (tx > 1.0f) tx = 1.0f;
+                if (ty < -1.0f) ty = -1.0f;
+                if (ty > 1.0f) ty = 1.0f;
+                s = acosf(-tx) * 325.94931f * 32.0f;
+                t = acosf(-ty) * 325.94931f * 32.0f;
+            }
+            else
+            {
+                s = (tx + 1.0f) * 512.0f * 32.0f;
+                t = (ty + 1.0f) * 512.0f * 32.0f;
+            }
+        }
+        if ((gm & GM_FOG) && w > 0)
+        {
+            float f = z / w * fogMul + fogOff;
+            al = f < 0 ? 0.0f : f > 255.0f ? 255.0f : f;
+        }
+        // 16:9 widescreen draws 4/3 as wide: x is tested against that width
+        // (G_CULLDL dropped objects in the extra width; GLideN64 does the same).
+        const float xw = x * xc;
+        if (xw > w) clip |= CL_POSX;
+        if (xw < -w) clip |= CL_NEGX;
+        if (y > w) clip |= CL_POSY;
+        if (y < -w) clip |= CL_NEGY;
+        if (w < 0.01f) clip |= CL_W;
+        if (x > cr * w || x < -cr * w || y > cr * w || y < -cr * w) clip |= CL_GUARD;
+        v->x = x; v->y = y; v->z = z; v->w = w;
+        v->r = r; v->g = gg; v->b = b; v->a = al;
+        v->s = s * texS;
+        v->t = t * texT;
+        v->nx = nx; v->ny = ny; v->nz = nz;
+        v->clip = clip;
+        v->xyOverride = v->zOverride = v->stOverride = 0;
+        v->projGen = 0;
+        if (w >= 0.0001f && (noNear || z >= -w))
+        {
+            // As triangle() would project it, if inside the guard band.
+            float iw = 1.0f / w;
+            float sx = vt0 + vs0 * x * iw, sy = vt1 - vs1 * y * iw;
+            v->px = sx;
+            v->py = sy;
+            v->pz = (vt2 + vs2 * z * iw) * 32.0f;
+            v->iw = iw;
+            if (sx >= -1000.0f && sx <= 2000.0f && sy >= -1000.0f && sy <= 2000.0f) v->projGen = vpGen;
+        }
+    }
+}
+
+static void load_vertices(H64Gfx *g, u32 addr, u32 n, u32 v0)
+{
+    load_vertices_fmt(g, seg_to_phys(g, addr), n, v0, VF_STD);
+}
+
+static void modify_vertex(H64Gfx *g, u32 n, u32 where, u32 val)
+{
+    GfxVtx *v;
+    if (n >= GFX_VTX_MAX) return;
+    v = &g->vtx[n];
+    switch (where)
+    {
+    case 0x10:   // G_MWO_POINT_RGBA
+        v->r = (float)(val >> 24);
+        v->g = (float)((val >> 16) & 0xFF);
+        v->b = (float)((val >> 8) & 0xFF);
+        v->a = (float)(val & 0xFF);
+        break;
+    case 0x14:   // G_MWO_POINT_ST
+        v->s = (float)(s16)(val >> 16);
+        v->t = (float)(s16)val;
+        v->stOverride = 1;
+        break;
+    case 0x18:   // G_MWO_POINT_XYSCREEN (1/4 pixel)
+        v->xyOverride = 1;
+        v->projGen = 0;
+        v->sx = (s16)(val >> 16) / 4.0f;
+        v->sy = (s16)val / 4.0f;
+        v->clip &= ~(CL_POSX | CL_NEGX | CL_POSY | CL_NEGY | CL_GUARD);
+        break;
+    case 0x1C:   // G_MWO_POINT_ZSCREEN (16.16 in G_MAXZ units)
+        v->zOverride = 1;
+        v->projGen = 0;
+        v->sz = (float)val / 65536.0f * 32.0f;
+        break;
+    }
+}
+
+// ---------------------------------------------------------------- triangles
+struct ClipVtx
+{
+    float x, y, z, w, r, g, b, a, s, t;
+};
+
+static void clip_lerp(ClipVtx *o, const ClipVtx *a, const ClipVtx *b, float f)
+{
+    o->x = a->x + (b->x - a->x) * f;
+    o->y = a->y + (b->y - a->y) * f;
+    o->z = a->z + (b->z - a->z) * f;
+    o->w = a->w + (b->w - a->w) * f;
+    o->r = a->r + (b->r - a->r) * f;
+    o->g = a->g + (b->g - a->g) * f;
+    o->b = a->b + (b->b - a->b) * f;
+    o->a = a->a + (b->a - a->a) * f;
+    o->s = a->s + (b->s - a->s) * f;
+    o->t = a->t + (b->t - a->t) * f;
+}
+
+// Clips the polygon against the plane p.x*x + p.y*y + p.z*z + p.w*w >= 0.
+static int clip_plane(ClipVtx *in, int n, ClipVtx *out, const float p[4])
+{
+    int i, m = 0;
+    for (i = 0; i < n; i++)
+    {
+        const ClipVtx *a = &in[i], *b = &in[(i + 1) % n];
+        float da = p[0] * a->x + p[1] * a->y + p[2] * a->z + p[3] * a->w;
+        float db = p[0] * b->x + p[1] * b->y + p[2] * b->z + p[3] * b->w;
+        if (da >= 0) out[m++] = *a;
+        if ((da >= 0) != (db >= 0))
+        {
+            clip_lerp(&out[m], a, b, da / (da - db));
+            m++;
+        }
+    }
+    return m;
+}
+
+static void project_iw(H64Gfx *g, const ClipVtx *c, float iw, H64RenderVertex *o)
+{
+    float z;
+    o->x = g->vtrans[0] + g->vscale[0] * c->x * iw;
+    o->y = g->vtrans[1] - g->vscale[1] * c->y * iw;
+    // Not clamped per vertex: the RDP clamps Z per pixel. With the ".NoN"
+    // microcodes (no near clipping) a vertex just in front of the eye gets a Z
+    // out of range, and clamping it skewed the whole triangle's depth (OoT's
+    // Kokiri paths, decals on the ground, failed their depth test at some
+    // camera angles). The triangle setup saturates to its s15.16 range.
+    z = (g->vtrans[2] + g->vscale[2] * c->z * iw) * 32.0f;
+    o->z = z;
+    o->invw = iw;
+    o->r = c->r;
+    o->g = c->g;
+    o->b = c->b;
+    o->a = c->a;
+    o->s = c->s;
+    o->t = c->t;
+}
+
+static void project(H64Gfx *g, const ClipVtx *c, H64RenderVertex *o)
+{
+    project_iw(g, c, 1.0f / c->w, o);
+}
+
+// With texture perspective off (other modes' G_TP_NONE) the RDP reads S and T
+// without dividing by W, and the microcodes send them scaled by their W of
+// half the range for w = 1: the texture coordinates come out halved
+// (GLideN64's shaders: texCoord *= 0.5 unless the vertex's s, t were set by
+// G_MODIFYVTX). Ready 2 Rumble Round 2 draws its text so: its letters
+// sampled twice too far showed other letters' pieces.
+static H64_INLINE float st_scale(const H64Gfx *g, const GfxVtx *v)
+{
+    return (g->omH & 0x80000) || v->stOverride ? 1.0f : 0.5f;
+}
+
+static void triangle_body(H64Gfx *g, u32 i0, u32 i1, u32 i2);
+static void triangle(H64Gfx *g, u32 i0, u32 i1, u32 i2)
+{
+    triangle_body(g, i0, i1, i2);
+    g->pNtri++;
+}
+
+static void triangle_body(H64Gfx *g, u32 i0, u32 i1, u32 i2)
+{
+    const GfxVtx *v[3];
+    ClipVtx poly[2][16];
+    H64RenderVertex sv[16];
+    u32 gm = geom(g), flags = 0;
+    int n = 3, cur = 0, k, needClip = 0, guard, keep = !g->sys->options.gfxViewportClip || g->sys->options.gfxKeepOffscreen;
+    float area = 0, iw[3];
+    g->nTris++;
+    if (i0 >= GFX_VTX_MAX || i1 >= GFX_VTX_MAX || i2 >= GFX_VTX_MAX) return;
+    v[0] = &g->vtx[i0];
+    v[1] = &g->vtx[i1];
+    v[2] = &g->vtx[i2];
+    // Entirely outside one plane (a side of the viewport, or behind the eye):
+    // dropped as the microcodes do. The scissor does not always stop them:
+    // Mario Kart 64's points screen draws each player's view in a quarter of
+    // a full-screen scissor, and the clouds of one view showed in another.
+    if (v[0]->clip & v[1]->clip & v[2]->clip & (keep ? CL_W : CL_POSX | CL_NEGX | CL_POSY | CL_NEGY | CL_W))
+        return;
+    // Across the guard band (clip ratio times the viewport): clipped there as
+    // the microcodes do. With a ratio of 1 the triangles stop at the
+    // viewport's sides: Mario Kart 64's views in a full-screen scissor.
+    guard = !keep && ((v[0]->clip | v[1]->clip | v[2]->clip) & CL_GUARD);
+    if (!guard && v[0]->projGen == g->vpGen && v[1]->projGen == g->vpGen && v[2]->projGen == g->vpGen)
+    {
+        // No clipping: the vertices' own screen positions (same results as below).
+        GfxTri *t;
+        const GfxVtx *cv;
+        // The sum in the order of the general path below (same rounding).
+        area = v[0]->px * v[1]->py - v[1]->px * v[0]->py;
+        area += v[1]->px * v[2]->py - v[2]->px * v[1]->py;
+        area += v[2]->px * v[0]->py - v[0]->px * v[2]->py;
+        if (area == 0) return;
+        if ((gm & GM_CULL_BACK) && area > 0) return;
+        if ((gm & GM_CULL_FRONT) && area < 0) return;
+        if (gm & GM_ZBUFFER) flags |= H64_TRI_ZBUFFER;
+        if (gm & GM_SHADE) flags |= H64_TRI_SHADE;
+        if (g->texOn) flags |= H64_TRI_TEXTURE;
+        t = new_tri(g, flags);
+        for (k = 0; k < 3; k++)
+        {
+            H64RenderVertex *o = &t->v[k];
+            const GfxVtx *s = v[k];
+            cv = (gm & GM_SMOOTH) ? s : v[0];
+            o->x = s->px; o->y = s->py; o->z = s->pz; o->invw = s->iw;
+            o->r = cv->r; o->g = cv->g; o->b = cv->b; o->a = cv->a;
+            o->s = s->s * st_scale(g, s); o->t = s->t * st_scale(g, s);
+        }
+        return;
+    }
+    for (k = 0; k < 3; k++)
+    {
+        ClipVtx *c = &poly[0][k];
+        c->x = v[k]->x;
+        c->y = v[k]->y;
+        c->z = v[k]->z;
+        c->w = v[k]->w;
+        c->r = v[k]->r;
+        c->g = v[k]->g;
+        c->b = v[k]->b;
+        c->a = v[k]->a;
+        c->s = v[k]->s * st_scale(g, v[k]);
+        c->t = v[k]->t * st_scale(g, v[k]);
+        if (v[k]->xyOverride || v[k]->zOverride)
+        {
+            if (c->w <= 0) c->w = 1.0f;
+        }
+        else if (c->w < 0.0001f || (!g->uc->noNear && c->z < -c->w))
+            needClip = 1;
+    }
+    if (guard) needClip = 1;
+    if (!(gm & GM_SMOOTH))
+        for (k = 1; k < 3; k++)
+        {
+            poly[0][k].r = poly[0][0].r;
+            poly[0][k].g = poly[0][0].g;
+            poly[0][k].b = poly[0][0].b;
+            poly[0][k].a = poly[0][0].a;
+        }
+    if (!needClip)
+    {
+        // Keep the projected positions inside the RDP's range (1 / w kept
+        // for project: one division a vertex, ~30 cycles each on the Xbox 360).
+        for (k = 0; k < 3; k++)
+        {
+            float sx, sy;
+            iw[k] = 1.0f / poly[0][k].w;
+            sx = g->vtrans[0] + g->vscale[0] * poly[0][k].x * iw[k];
+            sy = g->vtrans[1] - g->vscale[1] * poly[0][k].y * iw[k];
+            if (sx < -1000.0f || sx > 2000.0f || sy < -1000.0f || sy > 2000.0f) needClip = 2;
+        }
+    }
+    if (needClip)
+    {
+        // Planes, as p . (x, y, z, w) >= 0: w > 0 (just in front of the eye),
+        // the near plane z >= -w unless the microcode does not clip it, and a
+        // guard band keeping screen positions in [-1000, 2000].
+        float p[10][4];
+        int j, planes = 0;
+        p[planes][0] = 0; p[planes][1] = 0; p[planes][2] = 0; p[planes][3] = 1.0f; planes++;
+        if (!g->uc->noNear) { p[planes][0] = 0; p[planes][1] = 0; p[planes][2] = 1.0f; p[planes][3] = 1.0f; planes++; }
+        p[planes][0] = g->vscale[0]; p[planes][1] = 0; p[planes][2] = 0; p[planes][3] = g->vtrans[0] + 1000.0f; planes++;
+        p[planes][0] = -g->vscale[0]; p[planes][1] = 0; p[planes][2] = 0; p[planes][3] = 2000.0f - g->vtrans[0]; planes++;
+        p[planes][0] = 0; p[planes][1] = -g->vscale[1]; p[planes][2] = 0; p[planes][3] = g->vtrans[1] + 1000.0f; planes++;
+        p[planes][0] = 0; p[planes][1] = g->vscale[1]; p[planes][2] = 0; p[planes][3] = 2000.0f - g->vtrans[1]; planes++;
+        if (guard)
+        {
+            float cr = g->clipRatio;
+            p[planes][0] = -1.0f; p[planes][1] = 0; p[planes][2] = 0; p[planes][3] = cr; planes++;
+            p[planes][0] = 1.0f; p[planes][1] = 0; p[planes][2] = 0; p[planes][3] = cr; planes++;
+            p[planes][0] = 0; p[planes][1] = -1.0f; p[planes][2] = 0; p[planes][3] = cr; planes++;
+            p[planes][0] = 0; p[planes][1] = 1.0f; p[planes][2] = 0; p[planes][3] = cr; planes++;
+        }
+        for (j = 0; j < planes && n >= 3; j++)
+        {
+            n = clip_plane(poly[cur], n, poly[cur ^ 1], p[j]);
+            cur ^= 1;
+            if (j == 0)
+                for (k = 0; k < n; k++)
+                    if (poly[cur][k].w < 0.0001f) poly[cur][k].w = 0.0001f;
+        }
+        if (n < 3) return;
+        // The fog factor of the new vertices comes from their own depth, as
+        // the microcodes compute it, not interpolated (OoT's field at the
+        // title screen came out foggier than with the real microcode).
+        if ((gm & GM_FOG) && (gm & GM_SMOOTH) && !keep)
+            for (k = 0; k < n; k++)
+            {
+                float f = poly[cur][k].z / poly[cur][k].w * g->fogMul + g->fogOff;
+                poly[cur][k].a = f < 0 ? 0.0f : f > 255.0f ? 255.0f : f;
+            }
+    }
+    for (k = 0; k < n; k++)
+    {
+        if (!needClip) project_iw(g, &poly[cur][k], iw[k], &sv[k]);
+        else project(g, &poly[cur][k], &sv[k]);
+        if (!needClip && k < 3)
+        {
+            if (v[k]->xyOverride) { sv[k].x = v[k]->sx; sv[k].y = v[k]->sy; }
+            if (v[k]->zOverride) sv[k].z = v[k]->sz;
+        }
+    }
+    // Facing: visually counter-clockwise triangles are front faces; screen y
+    // points down, so their signed area is negative here.
+    for (k = 0; k < n; k++)
+    {
+        const H64RenderVertex *a = &sv[k], *b = &sv[k + 1 < n ? k + 1 : 0];
+        area += a->x * b->y - b->x * a->y;
+    }
+    if (area == 0) return;
+    if ((gm & GM_CULL_BACK) && area > 0) return;
+    if ((gm & GM_CULL_FRONT) && area < 0) return;
+
+    if (gm & GM_ZBUFFER) flags |= H64_TRI_ZBUFFER;
+    if (gm & GM_SHADE) flags |= H64_TRI_SHADE;
+    if (g->texOn) flags |= H64_TRI_TEXTURE;
+    for (k = 1; k + 1 < n; k++)
+        out_tri(g, &sv[0], &sv[k], &sv[k + 1], flags);
+}
+
+// L3DEX / L3DEX2: a line from vertex i0 to i1, (3 + wd) / 2 pixels wide
+// (GLideN64 gSPLine3D), as a screen-space quad of two triangles. Colour from
+// each end, or from vertex `flat` without smooth shading. A line with an end
+// behind the eye is dropped.
+static void line3d(H64Gfx *g, u32 i0, u32 i1, s32 wd, u32 flat)
+{
+    H64RenderVertex e[2], q[4];
+    u32 gm = geom(g), flags = 0, idx[2], k;
+    float dx, dy, len, half = (1.5f + wd * 0.5f) * 0.5f;
+    if (i0 >= GFX_VTX_MAX || i1 >= GFX_VTX_MAX || flat >= GFX_VTX_MAX || half <= 0) return;
+    idx[0] = i0;
+    idx[1] = i1;
+    for (k = 0; k < 2; k++)
+    {
+        const GfxVtx *v = &g->vtx[idx[k]];
+        const GfxVtx *cv = (gm & GM_SMOOTH) ? v : &g->vtx[flat];
+        ClipVtx c;
+        if (v->w < 0.0001f && !v->xyOverride) return;
+        c.x = v->x; c.y = v->y; c.z = v->z; c.w = v->w > 0.0001f ? v->w : 1.0f;
+        c.r = cv->r; c.g = cv->g; c.b = cv->b; c.a = cv->a;
+        c.s = v->s * st_scale(g, v); c.t = v->t * st_scale(g, v);
+        project(g, &c, &e[k]);
+        if (v->xyOverride) { e[k].x = v->sx; e[k].y = v->sy; }
+        if (v->zOverride) e[k].z = v->sz;
+    }
+    dx = e[1].x - e[0].x;
+    dy = e[1].y - e[0].y;
+    len = sqrtf(dx * dx + dy * dy);
+    if (len < 0.0001f) return;
+    dx = dx / len * half;
+    dy = dy / len * half;
+    for (k = 0; k < 4; k++)
+    {
+        float side = (k & 1) ? -1.0f : 1.0f;
+        copy_rv(&q[k], &e[k >> 1]);
+        q[k].x = e[k >> 1].x - dy * side;
+        q[k].y = e[k >> 1].y + dx * side;
+    }
+    if (gm & GM_ZBUFFER) flags |= H64_TRI_ZBUFFER;
+    if (gm & GM_SHADE) flags |= H64_TRI_SHADE;
+    if (g->texOn) flags |= H64_TRI_TEXTURE;
+    out_tri(g, &q[0], &q[2], &q[1], flags);
+    out_tri(g, &q[2], &q[3], &q[1], flags);
+}
+
+// A triangle under L3DEX: its edges, skipping repeated vertices.
+static void line_tri(H64Gfx *g, u32 a, u32 b, u32 c, s32 wd)
+{
+    if (a != b) line3d(g, a, b, wd, a);
+    if (b != c) line3d(g, b, c, wd, a);
+    if (c != a) line3d(g, c, a, wd, a);
+}
+
+// Culls the display list when every vertex in [v0, vn] is outside the same plane.
+static int cull_vertices(H64Gfx *g, u32 v0, u32 vn)
+{
+    u32 i, clip = CL_POSX | CL_NEGX | CL_POSY | CL_NEGY | CL_W;
+    if (vn < v0) { u32 t = v0; v0 = vn; vn = t; }
+    if (vn >= GFX_VTX_MAX) return 1;
+    for (i = v0; i <= vn; i++)
+    {
+        clip &= g->vtx[i].clip;
+        if (!clip) return 0;
+    }
+    return 1;
+}
+
+// ---------------------------------------------------------------- commands
+static void end_dl(H64Gfx *g)
+{
+    if (g->pci > 0) g->pci--;
+    else g->halt = 1;
+}
+
+static void call_dl(H64Gfx *g, u32 addr, int push)
+{
+    u32 phys = seg_to_phys(g, addr);
+    if (push)
+    {
+        if (g->pci < GFX_PC_MAX - 1) g->pc[++g->pci] = phys;
+        else g->abort = 1;
+    }
+    else
+    {
+        if (g->sys->options.gfxStream && phys == ((g->pc[g->pci] - 8) & 0x7FFFFF))
+        {
+            // A branch to itself: the real microcode reads this command
+            // again until the CPU replaces it (Gauntlet Legends writes its
+            // list while the RSP runs it). The task waits here.
+            g->streamWait = 1;
+            g->streamAddr = phys;
+            g->streamW0 = rd32(g, phys);
+            g->streamW1 = rd32(g, phys + 4);
+            g->halt = 1;
+        }
+        g->pc[g->pci] = phys;
+    }
+}
+
+static void do_matrix(H64Gfx *g, u32 addr, int projection, int load, int push)
+{
+    float m[4][4];
+    load_matrix(g, seg_to_phys(g, addr), m);
+    if (projection)
+    {
+        if (load) memcpy(g->proj, m, sizeof(m));
+        else mat_mul(g->proj, m, g->proj);
+    }
+    else
+    {
+        if (push && g->mvi < g->stackSize - 1)
+        {
+            memcpy(g->mv[g->mvi + 1], g->mv[g->mvi], sizeof(m));
+            g->mvi++;
+        }
+        if (load) memcpy(g->mv[g->mvi], m, sizeof(m));
+        else mat_mul(g->mv[g->mvi], m, g->mv[g->mvi]);
+    }
+    g->combinedValid = 0;
+    g->forcedCombined = 0;
+}
+
+static void pop_matrix(H64Gfx *g, u32 n)
+{
+    if ((u32)g->mvi >= n) g->mvi -= (int)n;
+    else g->mvi = 0;
+    if (!g->forcedCombined) g->combinedValid = 0;
+}
+
+static void force_matrix(H64Gfx *g, u32 addr)
+{
+    load_matrix(g, seg_to_phys(g, addr), g->combined);
+    g->combinedValid = 1;
+    g->forcedCombined = 1;
+}
+
+static void set_viewport(H64Gfx *g, u32 addr)
+{
+    u32 a = seg_to_phys(g, addr);
+    g->vscale[0] = rd16(g, a) / 4.0f;
+    g->vscale[1] = rd16(g, a + 2) / 4.0f;
+    g->vscale[2] = rd16(g, a + 4);
+    g->vscale[3] = rd16(g, a + 6);
+    g->vtrans[0] = rd16(g, a + 8) / 4.0f;
+    g->vtrans[1] = rd16(g, a + 10) / 4.0f;
+    g->vtrans[2] = rd16(g, a + 12);
+    g->vtrans[3] = rd16(g, a + 14);
+    if (++g->vpGen == 0) g->vpGen = 1;
+}
+
+static void set_light(H64Gfx *g, u32 addr, int n)
+{
+    u32 a = seg_to_phys(g, addr);
+    if (n < 0 || n > 8) return;
+    g->lightCol[n][0] = rd8(g, a);
+    g->lightCol[n][1] = rd8(g, a + 1);
+    g->lightCol[n][2] = rd8(g, a + 2);
+    g->lightDir[n][0] = (s8)rd8(g, a + 8);
+    g->lightDir[n][1] = (s8)rd8(g, a + 9);
+    g->lightDir[n][2] = (s8)rd8(g, a + 10);
+}
+
+static void set_lookat(H64Gfx *g, u32 addr, int n)
+{
+    u32 a = seg_to_phys(g, addr);
+    float x = (s8)rd8(g, a + 8), y = (s8)rd8(g, a + 9), z = (s8)rd8(g, a + 10);
+    float len = sqrtf(x * x + y * y + z * z);
+    if (len > 0) { x /= len; y /= len; z /= len; }
+    g->lookat[n][0] = x;
+    g->lookat[n][1] = y;
+    g->lookat[n][2] = z;
+}
+
+// F3DFLX's alpha light (GLideN64 F3DFLX2_LoadAlphaLight): a direction in
+// s7.8 halfwords at +8, kept as lookat 0 for the vertex alpha table.
+static void set_alpha_light(H64Gfx *g, u32 addr)
+{
+    u32 a = seg_to_phys(g, addr);
+    float x = (s16)h64_load_be16(g->sys->rdram + ((a + 8) & 0x7FFFFE)) / 256.0f;
+    float y = (s16)h64_load_be16(g->sys->rdram + ((a + 10) & 0x7FFFFE)) / 256.0f;
+    float z = (s16)h64_load_be16(g->sys->rdram + ((a + 12) & 0x7FFFFE)) / 256.0f;
+    float len = sqrtf(x * x + y * y + z * z);
+    if (len > 0) { x /= len; y /= len; z /= len; }
+    g->lookat[0][0] = x;
+    g->lookat[0][1] = y;
+    g->lookat[0][2] = z;
+}
+
+static void set_light_color(H64Gfx *g, int n, u32 col)
+{
+    if (n < 0 || n > 8) return;
+    g->lightCol[n][0] = (float)(col >> 24);
+    g->lightCol[n][1] = (float)((col >> 16) & 0xFF);
+    g->lightCol[n][2] = (float)((col >> 8) & 0xFF);
+}
+
+static void set_texture(H64Gfx *g, u32 w1, u32 level, u32 tile, u32 on)
+{
+    g->texOn = on;
+    if (!on) return;
+    g->texScaleS = (w1 >> 16) / 65536.0f;
+    g->texScaleT = (w1 & 0xFFFF) / 65536.0f;
+    if (g->texScaleS == 0) g->texScaleS = 1.0f;
+    if (g->texScaleT == 0) g->texScaleT = 1.0f;
+    g->texLevel = level;
+    g->texTile = tile;
+}
+
+static void set_othermode(H64Gfx *g, int high, u32 shift, u32 len, u32 data)
+{
+    u32 mask = (len >= 32 ? 0xFFFFFFFFu : ((1u << len) - 1)) << shift;
+    if (high) g->omH = (g->omH & ~mask) | (data & mask);
+    else g->omL = (g->omL & ~mask) | (data & mask);
+    out_othermode(g);
+}
+
+static void insert_matrix(H64Gfx *g, u32 where, u32 num)
+{
+    float *m;
+    u32 addr = (where + 0x80) & 0xFFFF, idx, i;
+    if (where & 3) return;
+    if (addr < 0x40) m = &g->mv[g->mvi][0][0];
+    else if (addr < 0x80) { m = &g->proj[0][0]; addr -= 0x40; }
+    else if (addr < 0xC0) { update_combined(g); m = &g->combined[0][0]; addr -= 0x80; g->forcedCombined = 1; }
+    else return;
+    idx = addr < 0x20 ? addr >> 1 : (addr - 0x20) >> 1;
+    for (i = 0; i < 2; i++)
+    {
+        u16 part = (u16)(i == 0 ? num >> 16 : num);
+        s32 fixed = (s32)floor(m[idx + i] * 65536.0f + 0.5f);
+        if (addr < 0x20) fixed = (s32)(((u32)part << 16) | ((u32)fixed & 0xFFFF));
+        else fixed = (s32)(((u32)fixed & 0xFFFF0000u) | part);
+        m[idx + i] = fixed / 65536.0f;
+    }
+    if (m != &g->combined[0][0] && !g->forcedCombined) g->combinedValid = 0;
+}
+
+// An RDP command embedded in the display list (opcode 0xC0..0xFF).
+static void rdp_passthrough(H64Gfx *g, u32 w0, u32 w1)
+{
+    u32 op = w0 >> 24;
+    switch (op)
+    {
+    case 0xE4: case 0xE5:   // TEXRECT(FLIP): the next two commands carry (s, t) and (dsdx, dtdy)
+    {
+        u32 a = g->pc[g->pci];
+        u64 w[2];
+        u32 h1 = rd32(g, a + 4), h2 = rd32(g, a + 12);
+        g->pc[g->pci] += 16;
+        w[0] = ((u64)w0 << 32) | w1;
+        w[1] = ((u64)h1 << 32) | h2;
+        out_rdp(g, w, 2);
+        return;
+    }
+    case 0xFD: case 0xFE: case 0xFF:   // SETTIMG / SETZIMG / SETCIMG: segmented address
+        out_rdp1(g, w0, seg_to_phys(g, w1));
+        return;
+    case 0xEF:   // SETOTHERMODE
+        g->omH = w0 & 0x00FFFFFF;
+        g->omL = w1;
+        out_rdp1(g, w0, w1);
+        return;
+    case 0xE9:   // FULLSYNC
+        g->fullSync = 1;
+        out_rdp1(g, w0, w1);
+        return;
+    default:
+        if (op >= 0xC8 && op <= 0xCF)
+        {
+            // Raw RDP triangles are not expected in display lists.
+            if (!(g->warned & 1)) { H64_WARN("[gfx] raw RDP triangle in a display list (ignored)"); g->warned |= 1; }
+            return;
+        }
+        out_rdp1(g, w0, w1);
+        return;
+    }
+}
+
+static int load_ucode(H64Gfx *g, u32 start, u32 dstart, u32 dsize)
+{
+    const GfxUcode *u = find_ucode(g, start & 0x7FFFFF, dstart & 0x7FFFFF, dsize);   // KSEG0 or physical
+    if (u->type == UC_NONE) return 0;
+    g->uc = u;
+    return 1;
+}
+
+static void f3d_moveword(H64Gfx *g, u32 w0, u32 w1)
+{
+    u32 index = w0 & 0xFF, offset = (w0 >> 8) & 0xFFFF;
+    switch (index)
+    {
+    case 0x00: insert_matrix(g, offset, w1); break;
+    case 0x02:
+        g->numLights = w1 >= 0x80000020u ? (int)((w1 - 0x80000000u) >> 5) - 1 : 0;
+        if (g->numLights > 8) g->numLights = 8;
+        if (g->numLights < 0) g->numLights = 0;
+        break;
+    case 0x04:   // G_MW_CLIP: the clip ratio (gSPClipRatio writes r, r, -r, -r)
+        if (offset == 0x04)
+        {
+            int r = (s16)w1;
+            if (r < 0) r = -r;
+            if (r >= 1 && r <= 6) g->clipRatio = (float)r;
+        }
+        break;
+    case 0x06: g->segments[(offset >> 2) & 0xF] = w1 & 0x00FFFFFF; break;
+    case 0x08:
+        g->fogMul = (float)(s16)(w1 >> 16);
+        g->fogOff = (float)(s16)w1;
+        break;
+    case 0x0A:
+        if ((offset & 0x1F) == 0) set_light_color(g, (int)(offset >> 5), w1);
+        break;
+    case 0x0C: modify_vertex(g, offset / 40, offset % 40, w1); break;
+    default: break;
+    }
+}
+
+// A triangle with its own texture coordinates (Diddy Kong Racing's DMA
+// triangles carry s, t per corner).
+static void triangle_st(H64Gfx *g, u32 i0, u32 i1, u32 i2, const float st[6])
+{
+    u32 idx[3];
+    float saved[3][2];
+    int k;
+    idx[0] = i0; idx[1] = i1; idx[2] = i2;
+    if (i0 >= GFX_VTX_MAX || i1 >= GFX_VTX_MAX || i2 >= GFX_VTX_MAX) return;
+    for (k = 0; k < 3; k++) { saved[k][0] = g->vtx[idx[k]].s; saved[k][1] = g->vtx[idx[k]].t; }
+    for (k = 0; k < 3; k++) { g->vtx[idx[k]].s = st[k * 2]; g->vtx[idx[k]].t = st[k * 2 + 1]; }
+    triangle(g, i0, i1, i2);
+    for (k = 2; k >= 0; k--) { g->vtx[idx[k]].s = saved[k][0]; g->vtx[idx[k]].t = saved[k][1]; }
+}
+
+// Commands that differ in Rare's microcodes (GLideN64 F3DGOLDEN.cpp, F3DPD.cpp,
+// F3DDKR.cpp, gSP.cpp: studied and rewritten). Returns 0 for the commands
+// they share with F3D.
+static int run_rare(H64Gfx *g, u32 w0, u32 w1)
+{
+    u32 cmd = w0 >> 24;
+    int rare = g->uc->rare;
+    if (rare == RARE_GOLDEN || rare == RARE_PD)
+    {
+        if (cmd == 0xB1)   // G_TRIX: up to four triangles, 4-bit vertex indices
+        {
+            while (w1 != 0)
+            {
+                u32 a = w1 & 0xF, b = (w1 >> 4) & 0xF, c = w0 & 0xF;
+                w1 >>= 8;
+                w0 >>= 4;
+                triangle(g, a, b, c);
+            }
+            return 1;
+        }
+        if (rare == RARE_GOLDEN && cmd == 0xBD) { f3d_moveword(g, w0, w1); return 1; }
+        if (rare == RARE_PD && cmd == 0x04)
+        {
+            load_vertices_fmt(g, seg_to_phys(g, w1), ((w0 >> 20) & 0xF) + 1, (w0 >> 16) & 0xF, VF_PD);
+            return 1;
+        }
+        if (rare == RARE_PD && cmd == 0x07) { g->colorBase = seg_to_phys(g, w1); return 1; }   // G_VTXCOLORBASE
+        return 0;
+    }
+    // Diddy Kong Racing, Jet Force Gemini, Mickey's Speedway USA
+    switch (cmd)
+    {
+    case 0x01:   // G_DMA_MTX: one of four model-view slots, projection identity
+    {
+        float m[4][4];
+        u32 index = (w0 >> 16) & 0xF, multiply;
+        if ((w0 & 0xFFFF) != 64) return 1;
+        if (index == 0) { index = (w0 >> 22) & 3; multiply = 0; }   // DKR
+        else multiply = (w0 >> 23) & 1;                               // JFG
+        load_matrix(g, (g->dmaMtx + seg_to_phys(g, w1)) & 0x7FFFFF, m);
+        g->mvi = (int)index;
+        if (multiply) mat_mul(g->mv[index], m, g->mv[0]);
+        else memcpy(g->mv[index], m, sizeof(m));
+        mat_identity(g->proj);
+        g->combinedValid = 0;
+        return 1;
+    }
+    case 0x02:   // G_DMA_TEX_OFFSET: a table of texture address offsets
+        g->texOffset = seg_to_phys(g, w1);
+        g->texShift = 0;
+        g->texCount = 0;
+        return 1;
+    case 0x04:   // G_DMA_VTX
+    {
+        u32 n = (w0 >> 19) & 0x1F;
+        if (rare == RARE_DKR) n++;
+        if (w0 & 0x10000) { if (g->billboard) g->vertexi = 1; }
+        else g->vertexi = 0;
+        load_vertices_fmt(g, (g->dmaVtx + seg_to_phys(g, w1)) & 0x7FFFFF, n, (u32)g->vertexi + ((w0 >> 9) & 0x1F), VF_DKR);
+        g->vertexi += (int)n;
+        return 1;
+    }
+    case 0x05:   // G_DMA_TRI: 16-byte triangles with their own s, t
+    {
+        u32 n = ((w0 >> 20) & 0xF) + 1, a = seg_to_phys(g, w1), i;
+        g->texOn = (w0 >> 16) & 0xF;
+        for (i = 0; i < n; i++, a += 16)
+        {
+            u32 w = rd32(g, a);
+            float st[6];
+            int k;
+            g->geomRaw &= ~0x3000u;
+            if (!(w & 0x40000000u)) g->geomRaw |= g->vscale[0] > 0 ? 0x2000u : 0x1000u;   // cull back/front
+            for (k = 0; k < 3; k++)
+            {
+                st[k * 2] = rd16(g, a + 4 + k * 4) * g->texScaleS;
+                st[k * 2 + 1] = rd16(g, a + 6 + k * 4) * g->texScaleT;
+            }
+            triangle_st(g, (w >> 16) & 0xFF, (w >> 8) & 0xFF, w & 0xFF, st);
+        }
+        g->vertexi = 0;
+        return 1;
+    }
+    case 0x07:   // G_DMA_DL: the next `count` commands of another list
+        if (g->pci < GFX_PC_MAX - 1)
+        {
+            g->pc[++g->pci] = seg_to_phys(g, w1);
+            g->dlCount = (int)((w0 >> 16) & 0xFF) + 1;
+        }
+        return 1;
+    case 0xBF:   // G_DMA_OFFSETS
+        g->dmaMtx = w0 & 0xFFFFFF;
+        g->dmaVtx = w1 & 0xFFFFFF;
+        return 1;
+    case 0xBC:   // G_MOVEWORD: billboard flag, model-view slot
+        if ((w0 & 0xFF) == 0x02) { g->billboard = (int)(w1 & 1); return 1; }
+        if ((w0 & 0xFF) == 0x0A) { g->mvi = (int)((w1 >> 6) & 3); g->combinedValid = 0; return 1; }
+        return 0;
+    case 0xFD:   // SETTIMG: RGBA images move by the offset table's current entry
+        g->timgW0 = w0;
+        g->timgW1 = w1;
+        if (g->texOffset)
+        {
+            if (((w0 >> 21) & 7) == 0)
+            {
+                g->texShift = (u32)(u16)rd16(g, g->texOffset + g->texCount * 2);
+                rdp_passthrough(g, w0, seg_to_phys(g, w1) + g->texShift);
+                return 1;
+            }
+            g->texOffset = g->texShift = g->texCount = 0;
+        }
+        return 0;
+    case 0xF3:   // LOADBLOCK
+        if (g->texOffset)
+        {
+            u32 lrs = (w1 >> 12) & 0xFFF;
+            if (g->texShift % (((lrs >> 2) + 1) << 3))
+            {
+                rdp_passthrough(g, g->timgW0, seg_to_phys(g, g->timgW1));   // the unshifted image after all
+                g->texOffset = g->texShift = g->texCount = 0;
+            }
+            else
+                g->texCount++;
+        }
+        return 0;
+    case 0x03: case 0x06: case 0x00: case 0xB2: case 0xB3: case 0xB4: case 0xB5:
+    case 0xB6: case 0xB7: case 0xB8: case 0xB9: case 0xBA: case 0xBB: case 0xBE:
+        return 0;
+    default:
+        return cmd >= 0xC0 ? 0 : 1;   // F3D commands these microcodes do not have
+    }
+}
+
+// F3D: an RDP triangle command (0xC8..0xCF) sent 32 bits at a time,
+// G_RDPHALF_1 then G_RDPHALF_CONT for each 64-bit word (G_RDPHALF_2 for the
+// last), straight to the RDP (GoldenEye's sky). The halves after this one are
+// read here.
+static void rdp_half_triangle(H64Gfx *g, u32 first)
+{
+    u64 w[22];
+    u32 op = (first >> 24) & 0x3F, n = 4 + ((op & 4) ? 8 : 0) + ((op & 2) ? 8 : 0) + ((op & 1) ? 2 : 0), k;
+    u32 hi = first, a = g->pc[g->pci];
+    for (k = 0; k < n; k++)
+    {
+        if (k)
+        {
+            if (rd32(g, a) >> 24 != 0xB4) return;
+            hi = rd32(g, a + 4);
+            a += 8;
+        }
+        if ((rd32(g, a) >> 24) != 0xB2 && (rd32(g, a) >> 24) != 0xB3) return;
+        w[k] = ((u64)hi << 32) | rd32(g, a + 4);
+        a += 8;
+    }
+    g->pc[g->pci] = a;
+    out_rdp(g, w, n);
+}
+
+// ---- G_SPRITE2D (F3D and F3DEX, libultra's sprite2d): 0x09 points at a
+// uSprite (image, palette, stride, sub-image width/height, format, size,
+// sub-image s/t); the commands that follow are 0xBE (G_SPRITE2D_SCALEFLIP:
+// 5.10 scales in w1, flips in w0) and 0xBD (G_SPRITE2D_DRAW: screen x/y in
+// 10.2), as GLideN64 reads them (gSP.cpp gSPSprite2DBase, GPL v2: studied
+// and rewritten). The sprite goes to the RDP as bands of lines loaded into
+// TMEM through tile 7, each drawn by a TEXRECT with tile 0. Glover, Flying
+// Dragon and Midway's Greatest Arcade Hits draw their screens this way:
+// without it 0xBE was taken for G_CULLDL, the list ended there and the
+// games waited for a frame that never came (black screen).
+static void sprite2d_draw(H64Gfx *g, u32 sp, u32 scaleX, u32 scaleY, u32 flipX, u32 flipY, s32 frameX, s32 frameY)
+{
+    u32 ptr = seg_to_phys(g, rd32(g, sp)), tlut = rd32(g, sp + 4);
+    s32 stride = rd16(g, sp + 8), imageW = rd16(g, sp + 10), imageH = rd16(g, sp + 12);
+    u32 fmt = rd8(g, sp + 14) & 7, siz = rd8(g, sp + 15) & 3;
+    s32 imageX = rd16(g, sp + 16), imageY = rd16(g, sp + 18);
+    u32 cycle = (g->omH >> 20) & 3, loadSiz = siz ? siz : 1;
+    u32 tmemBytes = (tlut || siz == 3) ? 2048 : 4096, lineBytes, line, band;
+    s32 sx0, texW, r;
+    if (stride <= 0 || imageW <= 0 || imageH <= 0 || imageX < 0 || imageY < 0 || cycle == 3) return;
+    if (scaleX == 0) scaleX = 1 << 10;
+    if (scaleY == 0) scaleY = 1 << 10;
+    if (cycle == 2) { scaleX = scaleY = 1 << 10; flipX = flipY = 0; }   // copy mode: 1:1 only
+    // 4-bit texels are loaded as 8-bit pairs, from an even column.
+    sx0 = siz == 0 ? (imageX & ~1) : imageX;
+    texW = imageX + imageW - sx0;
+    lineBytes = siz == 3 ? (u32)texW * 2 : ((u32)texW << siz) / 2;
+    lineBytes = (lineBytes + 7) & ~7u;
+    if (!lineBytes || lineBytes > tmemBytes) return;
+    line = lineBytes / 8;
+    band = tmemBytes / lineBytes;
+    for (r = 0; r < imageH; r += (s32)band)
+    {
+        s32 n = imageH - r < (s32)band ? imageH - r : (s32)band, ty = imageY + r;
+        s32 pr = flipY ? imageH - r - n : r;   // the band's first pixel row from the top
+        s32 xh = frameX, yh = frameY + (s32)(((s64)pr << 12) / scaleY);
+        s32 xl = frameX + (s32)(((s64)imageW << 12) / scaleX), yl = frameY + (s32)(((s64)(pr + n) << 12) / scaleY);
+        s32 s = imageX << 5, t = ty << 5, dsdx = (s32)scaleX, dtdy = (s32)scaleY;
+        u32 lx0 = siz == 0 ? (u32)sx0 / 2 : (u32)sx0, lx1 = siz == 0 ? (u32)(sx0 + texW - 1) / 2 : (u32)(sx0 + texW - 1);
+        u64 w[2];
+        if (flipX) { s = ((imageX + imageW) << 5) - 1; dsdx = -dsdx; }
+        if (flipY) { t = ((ty + n) << 5) - 1; dtdy = -dtdy; }
+        if (yl <= yh) continue;
+        out_rdp1(g, 0xFD000000u | (fmt << 21) | (loadSiz << 19) | (u32)((siz == 0 ? stride / 2 : stride) - 1), ptr);   // SETTIMG
+        out_rdp1(g, 0xF5000000u | (fmt << 21) | (loadSiz << 19) | (line << 9), 0x07000000u);                         // SETTILE 7
+        out_rdp1(g, 0xE6000000u, 0);                                                                                 // LOADSYNC
+        out_rdp1(g, 0xF4000000u | (lx0 << 14) | ((u32)ty << 2), 0x07000000u | (lx1 << 14) | ((u32)(ty + n - 1) << 2)); // LOADTILE
+        out_rdp1(g, 0xE7000000u, 0);                                                                                 // PIPESYNC
+        out_rdp1(g, 0xF5000000u | (fmt << 21) | (siz << 19) | (line << 9), (2u << 18) | (2u << 8));                  // SETTILE 0, clamped
+        out_rdp1(g, 0xF2000000u | ((u32)sx0 << 14) | ((u32)ty << 2), ((u32)(sx0 + texW - 1) << 14) | ((u32)(ty + n - 1) << 2));
+        if (cycle == 2)   // copy mode: inclusive lower-right corner, four pixels a step
+        {
+            xl -= 4;
+            yl -= 4;
+            dsdx = 4 << 10;
+        }
+        if (xl < 0 || yl < 0) continue;
+        if (xh < 0) { s += (s32)(((s64)(-xh) * dsdx) >> 7); xh = 0; }
+        if (yh < 0) { t += (s32)(((s64)(-yh) * dtdy) >> 7); yh = 0; }
+        w[0] = ((u64)(0xE4000000u | (((u32)xl & 0xFFF) << 12) | ((u32)yl & 0xFFF)) << 32) | ((((u32)xh & 0xFFF) << 12) | ((u32)yh & 0xFFF));
+        w[1] = ((u64)((((u32)s & 0xFFFF) << 16) | ((u32)t & 0xFFFF)) << 32) | ((((u32)dsdx & 0xFFFF) << 16) | ((u32)dtdy & 0xFFFF));
+        out_rdp(g, w, 2);
+    }
+}
+
+static void sprite2d(H64Gfx *g, u32 w1)
+{
+    u32 sp = seg_to_phys(g, w1), tlut = rd32(g, sp + 4), fmt = rd8(g, sp + 14) & 7;
+    u32 scaleX = 1 << 10, scaleY = 1 << 10, flipX = 0, flipY = 0;
+    if (tlut)
+    {
+        // The palette (256 RGBA16 entries) into the upper half of TMEM.
+        out_rdp1(g, 0xFD000000u | (2u << 19), seg_to_phys(g, tlut));   // SETTIMG RGBA16, width 1
+        out_rdp1(g, 0xF5000000u | 0x100, 0x07000000u);                 // SETTILE 7 at TMEM 0x800
+        out_rdp1(g, 0xE6000000u, 0);
+        out_rdp1(g, 0xF0000000u, 0x07000000u | (1020u << 12));         // LOADTLUT, 256 entries
+        // The microcode sets the palette mode itself (Flying Dragon's name
+        // screen drew garbage without).
+        set_othermode(g, 1, 14, 2, fmt != 0 ? 2u << 14 : 0);           // G_TT_RGBA16 for colour-indexed images
+    }
+    else
+        set_othermode(g, 1, 14, 2, 0);
+    for (;;)
+    {
+        u32 a = g->pc[g->pci], c0 = rd32(g, a), c1 = rd32(g, a + 4), cmd = c0 >> 24;
+        if (cmd == 0xBE)        // G_SPRITE2D_SCALEFLIP
+        {
+            scaleX = c1 >> 16;
+            scaleY = c1 & 0xFFFF;
+            flipX = (c0 >> 8) & 0xFF;
+            flipY = c0 & 0xFF;
+        }
+        else if (cmd == 0xBD)   // G_SPRITE2D_DRAW
+            sprite2d_draw(g, sp, scaleX, scaleY, flipX, flipY, (s16)(c1 >> 16), (s16)c1);
+        else
+            break;
+        g->pc[g->pci] = a + 8;
+    }
+}
+
+// ---- F3D / F3DEX (the 0xB0..0xBF immediate commands share most encodings)
+static void run_f3d(H64Gfx *g, u32 w0, u32 w1)
+{
+    u32 cmd = w0 >> 24;
+    int ex = g->uc->type == UC_F3DEX;
+    if (g->uc->rare && run_rare(g, w0, w1)) return;
+    if (g->uc->line)   // L3DEX: G_TRI1, G_TRI2 as edges, 0xB5 G_LINE3D
+    {
+        if (cmd == 0xBF) { line_tri(g, (w1 >> 17) & 0x7F, (w1 >> 9) & 0x7F, (w1 >> 1) & 0x7F, 0); return; }
+        if (cmd == 0xB1)
+        {
+            line_tri(g, (w0 >> 17) & 0x7F, (w0 >> 9) & 0x7F, (w0 >> 1) & 0x7F, 0);
+            line_tri(g, (w1 >> 17) & 0x7F, (w1 >> 9) & 0x7F, (w1 >> 1) & 0x7F, 0);
+            return;
+        }
+        if (cmd == 0xB5) { line3d(g, (w1 >> 17) & 0x7F, (w1 >> 9) & 0x7F, (s8)w1, (w1 >> 17) & 0x7F); return; }
+    }
+    switch (cmd)
+    {
+    case 0x00: break;   // G_SPNOOP
+    case 0x01:          // G_MTX
+    {
+        u32 p = (w0 >> 16) & 0xFF;
+        do_matrix(g, w1, p & 1, p & 2, p & 4);
+        break;
+    }
+    case 0x03:          // G_MOVEMEM
+    {
+        u32 idx = (w0 >> 16) & 0xFF;
+        if (idx == 0x80) set_viewport(g, w1);
+        else if (idx == 0x82) set_lookat(g, w1, 1);
+        else if (idx == 0x84) set_lookat(g, w1, 0);
+        else if (idx >= 0x86 && idx <= 0x94) set_light(g, w1, (int)(idx - 0x86) / 2);
+        else if (idx == 0x9E) { force_matrix(g, w1); g->pc[g->pci] += 24; }
+        break;
+    }
+    case 0x04:          // G_VTX
+        if (ex) load_vertices(g, w1, (w0 >> 10) & 0x3F, (w0 >> 17) & 0x7F);
+        else load_vertices(g, w1, ((w0 >> 20) & 0xF) + 1, (w0 >> 16) & 0xF);
+        break;
+    case 0x06:          // G_DL
+        call_dl(g, w1, ((w0 >> 16) & 0xFF) == 0);
+        break;
+    case 0x09:          // G_SPRITE2D_BASE
+        sprite2d(g, w1);
+        break;
+    case 0xAF:          // G_LOAD_UCODE (F3DEX)
+        if (!ex || !load_ucode(g, w1, g->half1, (w0 & 0xFFFF) + 1)) g->abort = 1;
+        break;
+    case 0xB0:          // G_BRANCH_Z (F3DEX)
+        if (ex)
+        {
+            u32 n = (w0 >> 1) & 0x7FF;
+            if (n < GFX_VTX_MAX)
+            {
+                const GfxVtx *v = &g->vtx[n];
+                u32 z = v->w != 0 ? (u32)(s32)(v->z / v->w * 1023.0f) : 0x400;
+                if (z > 0x3FF || z <= ((w1 >> 16) & 0xFFFF)) g->pc[g->pci] = seg_to_phys(g, g->half1);
+            }
+        }
+        break;
+    case 0xB1:          // G_TRI2 (F3DEX)
+        if (ex)
+        {
+            triangle(g, (w0 >> 17) & 0x7F, (w0 >> 9) & 0x7F, (w0 >> 1) & 0x7F);
+            triangle(g, (w1 >> 17) & 0x7F, (w1 >> 9) & 0x7F, (w1 >> 1) & 0x7F);
+        }
+        break;
+    case 0xB2:          // G_MODIFYVTX (F3DEX), G_RDPHALF_CONT (F3D)
+        if (ex) modify_vertex(g, (w0 & 0xFFFF) >> 1, (w0 >> 16) & 0xFF, w1);
+        break;
+    case 0xB3: break;   // G_RDPHALF_2 (read with TEXRECT)
+    case 0xB4:          // G_RDPHALF_1
+        g->half1 = w1;
+        if (!ex && (w1 >> 24) >= 0xC8 && (w1 >> 24) <= 0xCF) rdp_half_triangle(g, w1);
+        break;
+    case 0xB5:          // G_QUAD
+    {
+        u32 a = (w1 >> 25) & 0x7F, b = (w1 >> 17) & 0x7F, c = (w1 >> 9) & 0x7F, d = (w1 >> 1) & 0x7F;
+        triangle(g, a, b, c);
+        triangle(g, a, c, d);
+        break;
+    }
+    case 0xB6: g->geomRaw &= ~w1; break;   // G_CLEARGEOMETRYMODE
+    case 0xB7: g->geomRaw |= w1; break;    // G_SETGEOMETRYMODE
+    case 0xB8: end_dl(g); break;           // G_ENDDL
+    case 0xB9: set_othermode(g, 0, (w0 >> 8) & 0xFF, w0 & 0xFF, w1); break;
+    case 0xBA: set_othermode(g, 1, (w0 >> 8) & 0xFF, w0 & 0xFF, w1); break;
+    case 0xBB: set_texture(g, w1, (w0 >> 11) & 7, (w0 >> 8) & 7, w0 & 0xFF); break;
+    case 0xBC: f3d_moveword(g, w0, w1); break;   // G_MOVEWORD
+    case 0xBD: if (w1 == 0) pop_matrix(g, 1); break;   // G_POPMTX (modelview)
+    case 0xBE:          // G_CULLDL
+        // Vertex numbers * 2, or * 40 for F3D and the F3DEX 0.9x microcodes
+        // (Mario Kart 64 Amped Up: 0x140 = up to vertex 7; read * 2 it was
+        // vertex 160, out of range, and every list was culled: no road, no
+        // karts).
+        if (ex && !g->uc->cull40) { if (cull_vertices(g, (w0 & 0xFFFF) >> 1, (w1 & 0xFFFF) >> 1)) end_dl(g); }
+        else if (cull_vertices(g, (w0 & 0xFFFFFF) / 40, w1 / 40 - 1)) end_dl(g);
+        break;
+    case 0xBF:          // G_TRI1
+        if (ex) triangle(g, (w1 >> 17) & 0x7F, (w1 >> 9) & 0x7F, (w1 >> 1) & 0x7F);
+        else
+        {
+            u32 a = ((w1 >> 16) & 0xFF) / 10, b = ((w1 >> 8) & 0xFF) / 10, c = (w1 & 0xFF) / 10;
+            u32 flag = w1 >> 24;
+            if (flag == 1) triangle(g, b, c, a);
+            else if (flag == 2) triangle(g, c, a, b);
+            else triangle(g, a, b, c);
+        }
+        break;
+    default:
+        if (cmd >= 0xC0) rdp_passthrough(g, w0, w1);
+        else if (!(g->warned & 2)) { H64_WARN("[gfx] F3D command %02X not handled", cmd); g->warned |= 2; }
+        break;
+    }
+}
+
+// Conker's Bad Fur Day (GLideN64 F3DEX2CBFD.cpp and gSP.cpp: studied and
+// rewritten). Returns 0 for the commands it shares with F3DEX2.
+static int run_cbfd(H64Gfx *g, u32 w0, u32 w1)
+{
+    u32 cmd = w0 >> 24;
+    if (cmd >= 0x10 && cmd <= 0x1F)   // four triangles, 5-bit vertex indices
+    {
+        triangle(g, (w0 >> 23) & 31, (w0 >> 18) & 31, (((w0 >> 15) & 7) << 2) | (w1 >> 30));
+        triangle(g, (w0 >> 10) & 31, (w0 >> 5) & 31, w0 & 31);
+        triangle(g, (w1 >> 25) & 31, (w1 >> 20) & 31, (w1 >> 15) & 31);
+        triangle(g, (w1 >> 10) & 31, (w1 >> 5) & 31, w1 & 31);
+        return 1;
+    }
+    switch (cmd)
+    {
+    case 0x01:   // G_VTX: the same encoding, Conker's vertex
+    {
+        u32 n = (w0 >> 12) & 0xFF;
+        load_vertices_fmt(g, seg_to_phys(g, w1), n, ((w0 >> 1) & 0x7F) - n, VF_CBFD);
+        return 1;
+    }
+    case 0xDD: g->advLighting = 1; return 1;   // G_LOAD_UCODE: switches to the advanced lighting
+    case 0xDC:   // G_MOVEMEM
+        switch (w0 & 0xFF)
+        {
+        case 8: set_viewport(g, w1); break;
+        case 10:   // lights are 48 bytes; the first two are the lookats
+        {
+            u32 n = ((w0 >> 5) & 0x3FFF) / 48;
+            if (n < 2) set_lookat(g, w1, (int)n);
+            else if (n - 2 < 10)
+            {
+                u32 a = seg_to_phys(g, w1);
+                n -= 2;
+                set_light(g, w1, (int)n);
+                g->lightPos[n][0] = rd16(g, a + 32);
+                g->lightPos[n][1] = rd16(g, a + 34);
+                g->lightPos[n][2] = rd16(g, a + 36);
+                g->lightCa[n] = rd8(g, a + 12) / 16.0f;
+            }
+            break;
+        }
+        case 14: g->normalBase = seg_to_phys(g, w1); break;   // G_MV_NORMALES
+        default: break;
+        }
+        return 1;
+    case 0xDB:   // G_MOVEWORD
+        switch ((w0 >> 16) & 0xFF)
+        {
+        case 0x02: g->numLights = (int)(w1 / 48) > 8 ? 8 : (int)(w1 / 48); return 1;
+        case 0x06: case 0x08: return 0;   // segment, fog: as F3DEX2
+        case 0x10:   // G_MW_COORD_MOD
+            if (!(w0 & 8))
+            {
+                u32 idx = (w0 >> 1) & 3, pos = w0 & 0x30;
+                float *cm = g->coordMod;
+                if (pos == 0) { cm[idx] = (s16)(w1 >> 16); cm[1 + idx] = (s16)w1; }
+                else if (pos == 0x10)
+                {
+                    cm[4 + idx] = (w1 >> 16) / 65536.0f;
+                    cm[5 + idx] = (w1 & 0xFFFF) / 65536.0f;
+                    cm[12 + idx] = cm[idx] + cm[4 + idx];
+                    cm[13 + idx] = cm[1 + idx] + cm[5 + idx];
+                }
+                else if (pos == 0x20) { cm[8 + idx] = (s16)(w1 >> 16); cm[9 + idx] = (s16)w1; }
+            }
+            return 1;
+        default: return 1;
+        }
+    default:
+        return 0;
+    }
+}
+
+// ---- F3DEX2 / F3DZEX
+static void run_f3dex2(H64Gfx *g, u32 w0, u32 w1)
+{
+    u32 cmd = w0 >> 24;
+    if (g->uc->rare == RARE_CBFD && run_cbfd(g, w0, w1)) return;
+    if (g->uc->line)   // L3DEX2: G_TRI1, G_TRI2 as edges (width in w1's top byte), 0x08 G_LINE3D
+    {
+        if (cmd == 0x05) { line_tri(g, (w0 >> 17) & 0x7F, (w0 >> 9) & 0x7F, (w0 >> 1) & 0x7F, (s8)(w1 >> 24)); return; }
+        if (cmd == 0x06)
+        {
+            line_tri(g, (w0 >> 17) & 0x7F, (w0 >> 9) & 0x7F, (w0 >> 1) & 0x7F, (s8)(w1 >> 24));
+            line_tri(g, (w1 >> 17) & 0x7F, (w1 >> 9) & 0x7F, (w1 >> 1) & 0x7F, (s8)(w1 >> 24));
+            return;
+        }
+        if (cmd == 0x08) { line3d(g, (w0 >> 17) & 0x7F, (w0 >> 9) & 0x7F, (s8)w0, (w0 >> 17) & 0x7F); return; }
+    }
+    switch (cmd)
+    {
+    case 0x00: break;   // G_NOOP
+    case 0x01:          // G_VTX
+    {
+        u32 n = (w0 >> 12) & 0xFF;
+        load_vertices(g, w1, n, ((w0 >> 1) & 0x7F) - n);
+        break;
+    }
+    case 0x02: modify_vertex(g, (w0 & 0xFFFF) >> 1, (w0 >> 16) & 0xFF, w1); break;   // G_MODIFYVTX
+    case 0x03: if (cull_vertices(g, (w0 & 0xFFFF) >> 1, (w1 & 0xFFFF) >> 1)) end_dl(g); break;   // G_CULLDL
+    case 0x04:          // G_BRANCH_Z, or G_BRANCH_W on F3DZEX
+    {
+        if (g->uc->zex)
+        {
+            u32 n = (w0 >> 1) & 0x7F;
+            if (n < GFX_VTX_MAX && g->vtx[n].w < (float)w1) g->pc[g->pci] = seg_to_phys(g, g->half1);
+        }
+        else
+        {
+            u32 n = (w0 >> 1) & 0x7FF;
+            if (n < GFX_VTX_MAX)
+            {
+                const GfxVtx *v = &g->vtx[n];
+                u32 z = v->w != 0 ? (u32)(s32)(v->z / v->w * 1023.0f) : 0x400;
+                if (z > 0x3FF || z <= ((w1 >> 16) & 0xFFFF)) g->pc[g->pci] = seg_to_phys(g, g->half1);
+            }
+        }
+        break;
+    }
+    case 0x05: triangle(g, (w0 >> 17) & 0x7F, (w0 >> 9) & 0x7F, (w0 >> 1) & 0x7F); break;   // G_TRI1
+    case 0x06: case 0x07:   // G_TRI2, G_QUAD
+        triangle(g, (w0 >> 17) & 0x7F, (w0 >> 9) & 0x7F, (w0 >> 1) & 0x7F);
+        triangle(g, (w1 >> 17) & 0x7F, (w1 >> 9) & 0x7F, (w1 >> 1) & 0x7F);
+        break;
+    case 0x08: break;   // G_LINE3D (not drawn)
+    case 0xD3: case 0xD4: break;   // G_SPECIAL_3, G_SPECIAL_2
+    case 0xD5:          // G_SPECIAL_1: the next (w0 & 0xFF) commands of another list (GLideN64 gSPDlistCount)
+        if (!g->uc->combineH && !g->uc->zex && g->pci < GFX_PC_MAX - 1 && seg_to_phys(g, w1))
+        {
+            g->pc[++g->pci] = seg_to_phys(g, w1);
+            g->dlCount = (int)(w0 & 0xFF) + 1;
+        }
+        break;
+    case 0xD6: g->dmaIo = seg_to_phys(g, w1); break;   // G_DMA_IO: only its address is used (F3DFLX)
+    case 0xD7:          // G_TEXTURE
+        set_texture(g, w1, (w0 >> 11) & 7, (w0 >> 8) & 7, (w0 >> 1) & 0x7F);
+        if (g->uc->am)
+        {
+            // F3DAM: the scale goes into the texture coordinate matrix (GLideN64 F3DAM_Texture).
+            g->amOrg = w1;
+            g->texScaleS = g->texScaleT = 1.0f;
+        }
+        break;
+    case 0xD8: pop_matrix(g, w1 >> 6); break;   // G_POPMTX
+    case 0xD9: g->geomRaw = (g->geomRaw & (w0 & 0x00FFFFFF)) | w1; break;   // G_GEOMETRYMODE
+    case 0xDA:          // G_MTX
+    {
+        u32 p = (w0 & 0xFF) ^ 1;   // G_MTX_PUSH is inverted
+        do_matrix(g, w1, p & 4, p & 2, p & 1);
+        break;
+    }
+    case 0xDB:          // G_MOVEWORD
+    {
+        u32 index = (w0 >> 16) & 0xFF, offset = w0 & 0xFFFF;
+        switch (index)
+        {
+        case 0x00: insert_matrix(g, offset, w1); break;
+        case 0x02: g->numLights = (int)(w1 / 24); if (g->numLights > 8) g->numLights = 8; break;
+        case 0x04:   // G_MW_CLIP, as in f3d_moveword
+            if (offset == 0x04)
+            {
+                int r = (s16)w1;
+                if (r < 0) r = -r;
+                if (r >= 1 && r <= 6) g->clipRatio = (float)r;
+            }
+            break;
+        case 0x06: g->segments[(offset >> 2) & 0xF] = w1 & 0x00FFFFFF; break;
+        case 0x08:
+            if (g->uc->am && (offset & 0xFF) == 0x0C) { g->amScale0 = w1; break; }   // F3DAM's matrix (GLideN64 F3DAM_MoveWord)
+            if (g->uc->am && (offset & 0xFF) == 0x10) { g->amScale1 = w1; break; }
+            if (g->uc->am && (offset & 0xFF) != 0) break;
+            g->fogMul = (float)(s16)(w1 >> 16);
+            g->fogOff = (float)(s16)w1;
+            break;
+        case 0x0A: if (offset % 24 == 0) set_light_color(g, (int)(offset / 24), w1); break;
+        case 0x0C:   // G_MW_FORCEMTX
+            if (w1 == 0) { g->forcedCombined = 0; g->combinedValid = 0; }
+            else g->forcedCombined = 1;
+            break;
+        default: break;
+        }
+        break;
+    }
+    case 0xDC:          // G_MOVEMEM
+    {
+        u32 idx = w0 & 0xFF;
+        if (idx == 8) set_viewport(g, w1);
+        else if (idx == 14) { force_matrix(g, w1); g->pc[g->pci] += 8; }
+        else if (idx == 10)
+        {
+            u32 n = (((w0 >> 8) & 0xFF) * 8) / 24;
+            if (n == 1 && g->uc->flx) set_alpha_light(g, w1);
+            else if (n < 2) set_lookat(g, w1, (int)n);
+            else set_light(g, w1, (int)n - 2);
+        }
+        break;
+    }
+    case 0xDD:          // G_LOAD_UCODE
+        if (!load_ucode(g, w1, g->half1, (w0 & 0xFFFF) + 1)) g->abort = 1;
+        break;
+    case 0xDE: call_dl(g, w1, ((w0 >> 16) & 0xFF) == 0); break;   // G_DL
+    case 0xDF: end_dl(g); break;                                   // G_ENDDL
+    case 0xE0: break;                                              // G_SPNOOP
+    case 0xE1: g->half1 = w1; break;                               // G_RDPHALF_1
+    case 0xE2: case 0xE3:   // G_SETOTHERMODE_L / _H
+    {
+        u32 len = (w0 & 0xFF) + 1;
+        s32 shift = 32 - (s32)((w0 >> 8) & 0xFF) - (s32)len;
+        if (shift < 0) shift = 0;
+        set_othermode(g, cmd == 0xE3, (u32)shift, len, w1);
+        break;
+    }
+    case 0xF1: break;   // G_RDPHALF_2 (read with TEXRECT)
+    default:
+        if (cmd >= 0xC0) rdp_passthrough(g, w0, w1);
+        else if (!(g->warned & 4)) { H64_WARN("[gfx] F3DEX2 command %02X not handled", cmd); g->warned |= 4; }
+        break;
+    }
+}
+
+// ---- S2DEX2 (subset): the commands OoT's prerendered backgrounds use. Any
+// other S2DEX command leaves the task to the LLE RSP.
+//
+// G_BG_COPY draws a picture from RDRAM 1:1 in copy mode. The microcode does
+// it with LoadTile/TEXRECT strips (gs2dex.h, uObjBg); the same RDP commands
+// are emitted here: for each band of lines that fits in TMEM, the texels go
+// to TMEM through tile 7 and a copy-mode rectangle draws them with tile 0.
+// The picture wraps at imageW/imageH; a frame starting above or left of the
+// screen is clipped there (the scissor clips the rest).
+static void bg_copy(H64Gfx *g, u32 addr)
+{
+    u32 a = seg_to_phys(g, addr);
+    s32 imageX = (u16)rd16(g, a + 0) >> 5, imageW = (u16)rd16(g, a + 2) >> 2;
+    s32 frameX = rd16(g, a + 4) >> 2, frameW = (u16)rd16(g, a + 6) >> 2;
+    s32 imageY = (u16)rd16(g, a + 8) >> 5, imageH = (u16)rd16(g, a + 10) >> 2;
+    s32 frameY = rd16(g, a + 12) >> 2, frameH = (u16)rd16(g, a + 14) >> 2;
+    u32 ptr = seg_to_phys(g, rd32(g, a + 16));
+    u32 fmt = rd8(g, a + 22), siz = rd8(g, a + 23), pal = (u16)rd16(g, a + 24), flip = (u16)rd16(g, a + 26);
+    u32 bpp = 4u << siz, tmemBytes = fmt == 2 ? 2048 : 4096;
+    s32 y, rows;
+    if (flip || (siz != 1 && siz != 2) || ((g->omH >> 20) & 3) != 2 || imageW <= 0 || imageH <= 0)
+    {
+        g->abort = 1;   // not handled here: the LLE RSP draws it
+        return;
+    }
+    if (frameX < 0) { imageX += -frameX; frameW += frameX; frameX = 0; }
+    if (frameY < 0) { imageY += -frameY; frameH += frameY; frameY = 0; }
+    if (frameW <= 0 || frameH <= 0) return;
+    imageX %= imageW;
+    imageY %= imageH;
+    for (y = 0; y < frameH; y += rows)
+    {
+        s32 sy = (imageY + y) % imageH, x, span;
+        rows = frameH - y;
+        if (rows > imageH - sy) rows = imageH - sy;   // the picture wraps vertically
+        for (x = 0; x < frameW; x += span)
+        {
+            s32 sx = (imageX + x) % imageW, r, band;
+            u32 lineBytes;
+            span = frameW - x;
+            if (span > imageW - sx) span = imageW - sx;   // and horizontally
+            lineBytes = ((u32)span * bpp + 63) / 64 * 8;
+            band = (s32)(tmemBytes / lineBytes);
+            if (band < 1) { g->abort = 1; return; }
+            for (r = 0; r < rows; r += band)
+            {
+                s32 n = rows - r < band ? rows - r : band, ty = sy + r, dx = frameX + x, dy = frameY + y + r;
+                u64 w[2];
+                u32 line = lineBytes / 8;
+                out_rdp1(g, 0xFD000000u | (fmt << 21) | (siz << 19) | (u32)(imageW - 1), ptr);           // SETTIMG
+                out_rdp1(g, 0xF5000000u | (fmt << 21) | (siz << 19) | (line << 9), 0x07000000u);        // SETTILE 7
+                out_rdp1(g, 0xE6000000u, 0);                                                            // LOADSYNC
+                out_rdp1(g, 0xF4000000u | ((u32)sx << 14) | ((u32)ty << 2),
+                         0x07000000u | ((u32)(sx + span - 1) << 14) | ((u32)(ty + n - 1) << 2));        // LOADTILE
+                out_rdp1(g, 0xE7000000u, 0);                                                            // PIPESYNC
+                out_rdp1(g, 0xF5000000u | (fmt << 21) | (siz << 19) | (line << 9), (pal & 15) << 20);  // SETTILE 0
+                out_rdp1(g, 0xF2000000u | ((u32)sx << 14) | ((u32)ty << 2),
+                         ((u32)(sx + span - 1) << 14) | ((u32)(ty + n - 1) << 2));                      // SETTILESIZE 0
+                // TEXRECT in copy mode: inclusive lower-right corner, dsdx = 4.0.
+                w[0] = ((u64)(0xE4000000u | ((u32)(dx + span - 1) << 14) | ((u32)(dy + n - 1) << 2)) << 32) |
+                       (((u32)dx << 14) | ((u32)dy << 2));
+                w[1] = ((u64)(((u32)sx << 21) | ((u32)ty << 5)) << 32) | 0x10000400u;
+                out_rdp(g, w, 2);
+            }
+        }
+    }
+}
+
+// G_BG_1CYC draws a picture from RDRAM scaled, in 1-cycle mode with the
+// game's combiner and blender (Majora's Mask's cutscene and pause
+// backgrounds; with the task left to the LLE RSP they ran at 9-15 VI/s).
+// uObjScaleBg (gs2dex.h): the uObjBg fields, then scaleW and scaleH (5.10:
+// texels per pixel) at 28 and 30. As the microcode does, bands of image lines
+// go to TMEM through tile 7 (one more line and column for the bilinear
+// filter) and a scaled rectangle draws each band with tile 0. The picture is
+// split where it wraps horizontally; a flipped, 4-bit or 32-bit picture, or
+// one that wraps vertically (except under S2DEX 1.x, see below), is left to
+// the LLE RSP.
+// G_BG_1CYC's bands for frame lines [frameY, frameY + frameH) (10.2), the
+// picture not wrapping vertically in between (see bg_1cyc).
+static void bg_1cyc_part(H64Gfx *g, u32 ptr, u32 fmt, u32 siz, u32 pal, u32 bpp, u32 tmemBytes, s32 imageX, s32 imageW,
+                         s32 strideW, s32 imageY, s32 imageH, s32 frameX, s32 frameW, s32 frameY, s32 frameH, s32 scaleW, s32 scaleH)
+{
+    s32 xa, xw;
+    for (xa = 0; xa < frameW; xa += xw)
+    {
+        // A piece of the frame's width: up to where the picture wraps, and
+        // narrow enough for two lines (and the bilinear column) in TMEM.
+        s32 sa = (imageX + xa * scaleW / 128) % (imageW * 32), texW, ya, yh;
+        u32 lineBytes;
+        xw = frameW - xa;
+        if ((s32)((s64)xw * scaleW / 128) > imageW * 32 - sa)
+            xw = (s32)(((s64)(imageW * 32 - sa) * 128 + scaleW - 1) / scaleW);
+        xw = (xw + 3) & ~3;   // whole pixels
+        if (xw <= 0) xw = 4;
+        for (;;)
+        {
+            texW = ((sa & 31) + xw * scaleW / 128) / 32 + 2;
+            if (texW > imageW - (sa >> 5)) texW = imageW - (sa >> 5);
+            lineBytes = ((u32)texW * bpp + 63) / 64 * 8;
+            if (lineBytes * 2 <= tmemBytes || xw <= 4) break;
+            xw = (xw / 2 + 3) & ~3;
+        }
+        if (lineBytes * 2 > tmemBytes) { g->abort = 1; return; }
+        for (ya = 0; ya < frameH; ya = yh)
+        {
+            s32 ta = imageY + ya * scaleH / 128, ty0 = ta >> 5, fit = (s32)(tmemBytes / lineBytes), tyMax, rows, sx0 = sa >> 5;
+            u32 line = lineBytes / 8, xh = (u32)(frameX + xa), yt = (u32)(frameY + ya), xl, yl;
+            u64 w[2];
+            // Screen rows whose texel rows (and the next, bilinear) are in this band.
+            tyMax = ty0 + fit - 2;
+            yh = ya + (s32)(((s64)((tyMax + 1) * 32 - ta) * 128) / scaleH);
+            yh &= ~3;
+            if (yh <= ya) yh = ya + 4;
+            if (yh > frameH) yh = frameH;
+            rows = ((imageY + (yh - 1) * scaleH / 128) >> 5) - ty0 + 2;
+            if (rows > fit) rows = fit;
+            if (ty0 + rows > imageH) rows = imageH - ty0;
+            if (rows < 1) break;
+            xl = xh + (u32)xw;
+            yl = yt + (u32)(yh - ya);
+            out_rdp1(g, 0xFD000000u | (fmt << 21) | (siz << 19) | (u32)(strideW - 1), ptr);                   // SETTIMG
+            out_rdp1(g, 0xF5000000u | (fmt << 21) | (siz << 19) | (line << 9), 0x07000000u);                 // SETTILE 7
+            out_rdp1(g, 0xE6000000u, 0);                                                                     // LOADSYNC
+            out_rdp1(g, 0xF4000000u | ((u32)sx0 << 14) | ((u32)ty0 << 2),
+                     0x07000000u | ((u32)(sx0 + texW - 1) << 14) | ((u32)(ty0 + rows - 1) << 2));            // LOADTILE
+            out_rdp1(g, 0xE7000000u, 0);                                                                     // PIPESYNC
+            out_rdp1(g, 0xF5000000u | (fmt << 21) | (siz << 19) | (line << 9),
+                     ((pal & 15) << 20) | (2u << 18) | (2u << 8));                                           // SETTILE 0, clamped
+            out_rdp1(g, 0xF2000000u | ((u32)sx0 << 14) | ((u32)ty0 << 2),
+                     ((u32)(sx0 + texW - 1) << 14) | ((u32)(ty0 + rows - 1) << 2));                          // SETTILESIZE 0
+            // TEXRECT (1-cycle: exclusive lower-right corner), s/t in 10.5, steps in 5.10.
+            w[0] = ((u64)(0xE4000000u | ((xl & 0xFFF) << 12) | (yl & 0xFFF)) << 32) | (((xh & 0xFFF) << 12) | (yt & 0xFFF));
+            w[1] = ((u64)((((u32)sa & 0xFFFF) << 16) | ((u32)ta & 0xFFFF)) << 32) |
+                   (((u32)scaleW & 0xFFFF) << 16) | ((u32)scaleH & 0xFFFF);
+            out_rdp(g, w, 2);
+        }
+    }
+}
+
+static void bg_1cyc(H64Gfx *g, u32 addr)
+{
+    u32 a = seg_to_phys(g, addr);
+    s32 imageX = (u16)rd16(g, a + 0), imageW = (u16)rd16(g, a + 2) >> 2;   // 10.5, texels
+    s32 frameX = rd16(g, a + 4), frameW = (u16)rd16(g, a + 6);             // 10.2
+    s32 imageY = (u16)rd16(g, a + 8), imageH = (u16)rd16(g, a + 10) >> 2;
+    s32 frameY = rd16(g, a + 12), frameH = (u16)rd16(g, a + 14);
+    u32 ptr = seg_to_phys(g, rd32(g, a + 16));
+    u32 fmt = rd8(g, a + 22), siz = rd8(g, a + 23), pal = (u16)rd16(g, a + 24), flip = (u16)rd16(g, a + 26);
+    s32 scaleW = (u16)rd16(g, a + 28), scaleH = (u16)rd16(g, a + 30), strideW;
+    u32 bpp = 4u << siz, tmemBytes = fmt == 2 ? 2048 : 4096, cycle = (g->omH >> 20) & 3;
+    if (g->sys->options.gfxS2dex1 && scaleW > 0 && scaleH > 0)
+    {
+        // The microcode draws the picture once: a frame larger than the
+        // scaled picture is cut to it (GLideN64 BgRect1CycStripped, Aw/Ah:
+        // ((image << 10) / scale - 1) & ~3 in 10.2). Command & Conquer's
+        // logos were repeated over their frames.
+        s32 limW = (((s32)((u32)(u16)rd16(g, a + 2) << 10) / scaleW) - 1) & ~3;
+        s32 limH = (((s32)((u32)(u16)rd16(g, a + 10) << 10) / scaleH) - 1) & ~3;
+        if (limW > 0 && frameW > limW) frameW = limW;
+        if (limH > 0 && frameH > limH) frameH = limH;
+    }
+    if (flip || (siz != 1 && siz != 2) || cycle > 1 || imageW <= 0 || imageH <= 0 || scaleW <= 0 || scaleH <= 0)
+    {
+        g->abort = 1;   // not handled here: the LLE RSP draws it
+        return;
+    }
+    // A frame starting above or left of the screen: the picture moves on by
+    // as many pixels (10.2 pixels * 5.10 texels a pixel = 10.5 texels * 128).
+    if (frameX < 0) { imageX += (-frameX) * scaleW / 128; frameW += frameX; frameX = 0; }
+    if (frameY < 0) { imageY += (-frameY) * scaleH / 128; frameH += frameY; frameY = 0; }
+    if (frameW <= 0 || frameH <= 0) return;
+    imageX %= imageW * 32;
+    imageY %= imageH * 32;
+    // The microcode's lines are imageW texels rounded down to 8 bytes apart
+    // (GLideN64 BgRect1CycStripped: D2): Pokemon Puzzle League's 321-texel
+    // pictures came out sheared. Only for the S2DEX 1.x profile games.
+    strideW = imageW;
+    if (g->sys->options.gfxS2dex1 && (u32)imageW * bpp >= 64) strideW = (s32)(((u32)imageW * bpp / 64) * 64 / bpp);
+    // A picture that wraps vertically (Yoshi's Story's scrolling backgrounds)
+    // is drawn in parts, each from its own first line (only for the games
+    // whose profile turns S2DEX 1.x on, so far).
+    for (;;)
+    {
+        s32 partH = frameH;
+        if (imageY + (s32)(((s64)frameH * scaleH) / 128) > imageH * 32)
+        {
+            if (!g->sys->options.gfxS2dex1) { g->abort = 1; return; }   // other games: the LLE RSP draws it
+            partH = (s32)(((s64)(imageH * 32 - imageY) * 128) / scaleH) & ~3;   // whole pixels before the wrap
+            if (partH <= 0) partH = 4;
+            if (partH > frameH) partH = frameH;
+        }
+        bg_1cyc_part(g, ptr, fmt, siz, pal, bpp, tmemBytes, imageX, imageW, strideW, imageY, imageH, frameX, frameW, frameY, partH, scaleW, scaleH);
+        if (g->abort || partH >= frameH) break;
+        imageY = (imageY + (s32)(((s64)partH * scaleH) / 128)) % (imageH * 32);
+        frameY += partH;
+        frameH -= partH;
+    }
+}
+
+// ---- S2DEX 1.05+ (Yoshi's Story), per game (options.gfxS2dex1): 2D objects
+// drawn from TMEM. Studied in GLideN64 (uCodes/S2DEX.cpp, GPL v2: the
+// structures, G_OBJ_LOADTXTR, and the fixed-point placement of sprites
+// decoded by olivieryuyu) and rewritten; the RDP commands are the ones the
+// microcode sends (checked against the LLE RSP): a rectangle is a TEXRECT, a
+// sprite (which the 2D matrix may rotate) two texture triangles.
+// Structures in RDRAM (big-endian, gs2dex.h): uObjSprite = objX, scaleW,
+// imageW, paddingX, objY, scaleH, imageH, paddingY, imageStride, imageAdrs
+// (16 bits each), then fmt, siz, pal, flags (bytes); uObjTxtr = type, image
+// (32 bits), then 16-bit fields that depend on the type, sid, then flag and
+// mask (32 bits); uObjMtx = A, B, C, D (s15.16), X, Y (s10.2), BaseScaleX,
+// BaseScaleY (u5.10).
+#define OBJRM_SHRINK1 0x10
+#define OBJRM_SHRINK2 0x20
+#define OBJRM_WIDEN 0x40
+#define OBJRM_BILERP 0x08
+
+struct ObjSprite
+{
+    s16 objX, objY;
+    u16 scaleW, scaleH, imageW, imageH, stride, adrs;
+    u8 fmt, siz, pal, flags;
+};
+
+static void read_obj_sprite(H64Gfx *g, u32 a, ObjSprite *o)
+{
+    o->objX = rd16(g, a + 0);
+    o->scaleW = (u16)rd16(g, a + 2);
+    o->imageW = (u16)rd16(g, a + 4);
+    o->objY = rd16(g, a + 8);
+    o->scaleH = (u16)rd16(g, a + 10);
+    o->imageH = (u16)rd16(g, a + 12);
+    o->stride = (u16)rd16(g, a + 16);
+    o->adrs = (u16)rd16(g, a + 18);
+    o->fmt = rd8(g, a + 20);
+    o->siz = rd8(g, a + 21);
+    o->pal = rd8(g, a + 22);
+    o->flags = rd8(g, a + 23);
+    if (!o->scaleW) o->scaleW = 1;
+    if (!o->scaleH) o->scaleH = 1;
+}
+
+// The microcode's rounding corrections, by object render mode (the
+// CorrectorsA01/A23/B03 tables, S2DEX 1.05 and later).
+struct ObjCorr { s16 A0, A1, A2, A3, B0, B2, B3, B5, B7; };
+
+static void obj_corr(u32 rm, ObjCorr *c, int v103)
+{
+    // S2DEX 1.03's CorrectorsB03 table (8 entries per row), the row picked by
+    // render mode bits 1-3 (GLideN64 S2DEXCoordCorrector, eVer1_3).
+    static const s16 b03v103[64] = {
+        -4, 0, 0, 0, 0, 1, 0, 0,     -4, 0, 0, 0, 0, 1, -1, 1,
+        -4, 0, 3, 0, 0, 1, 0, 0,     -4, 0, 3, 0, 0, 1, -1, 0,
+        -1, 3, 0, -16, 0, 1, 0, -1,  -1, 3, 0, -16, 0, 1, -1, -1,
+        -1, 3, 0, -16, 0, 0, 0, 0,   -1, 3, 0, -16, 0, 0, -1, 0 };
+    static const s16 a01[16] = { 0, 0, 0x10, 0x20, 0x20, 0x40, 0x30, 0x60, 0, -12, 0x10, 0x14, 0x20, 0x34, 0x30, 0x54 };
+    static const s16 a23[8] = { 1, -2, -2, -2, 1, 0, 0, 0 };
+    static const s16 b03[8] = { -4, 0, 0, 1, -1, 3, -16, 0 };
+    u32 o1 = (rm & (OBJRM_SHRINK1 | OBJRM_SHRINK2 | OBJRM_WIDEN)) >> 3;
+    u32 o2 = (rm & (OBJRM_SHRINK1 | OBJRM_BILERP)) >> 2;
+    u32 o3 = (rm & OBJRM_BILERP) >> 1;
+    c->A0 = a01[o1];
+    c->A1 = a01[o1 + 1];
+    c->A2 = a23[o2];
+    c->A3 = a23[o2 + 1];
+    c->B0 = b03[o3];
+    c->B2 = b03[2 + o3];
+    c->B3 = b03[3 + o3];
+    c->B5 = c->B7 = 0;
+    if (v103)
+    {
+        const s16 *r = &b03v103[((rm << 3) & 0x70) >> 1];
+        c->B0 = r[0]; c->B2 = r[2]; c->B3 = r[3]; c->B5 = r[5]; c->B7 = r[7];
+    }
+}
+
+// Tile 0 for the sprite's texels (clamped, no mirror), as the microcode sets it.
+static void obj_tile(H64Gfx *g, const ObjSprite *o)
+{
+    u32 w = o->imageW >> 5, h = o->imageH >> 5;
+    if (!w) w = 1;
+    if (!h) h = 1;
+    out_rdp1(g, 0xE7000000u, 0);                                                                   // PIPESYNC
+    out_rdp1(g, 0xF5000000u | ((u32)(o->fmt & 7) << 21) | ((u32)(o->siz & 3) << 19) | (((u32)o->stride & 0x1FF) << 9) |
+             ((u32)o->adrs & 0x1FF), ((u32)(o->pal & 15) << 20) | (2u << 18) | (2u << 8));          // SETTILE 0
+    out_rdp1(g, 0xF2000000u, ((w - 1) << 14) | ((h - 1) << 2));                                      // SETTILESIZE 0
+}
+
+// G_OBJ_LOADTXTR: a block, a tile or a palette into TMEM through tile 7,
+// unless the status word says it is there already.
+static void obj_load(H64Gfx *g, u32 addr)
+{
+    u32 a = seg_to_phys(g, addr);
+    u32 type = rd32(g, a), image = seg_to_phys(g, rd32(g, a + 4));
+    u32 f8 = (u16)rd16(g, a + 8), f10 = (u16)rd16(g, a + 10), f12 = (u16)rd16(g, a + 12), sid = (u16)rd16(g, a + 14);
+    u32 flag = rd32(g, a + 16), mask = rd32(g, a + 20);
+    if (sid > 12) return;
+    if ((g->objStatus[sid >> 2] & mask) == flag) return;
+    if (type == 0x00001033)        // G_OBJLT_TXTRBLOCK: tmem, tsize, tline
+    {
+        out_rdp1(g, 0xFD000000u | (2u << 19) | (f10 & 0x3FF), image);                     // SETTIMG RGBA16, width tsize + 1
+        out_rdp1(g, 0xF5000000u | (2u << 19) | (f8 & 0x1FF), 0x07000000u);                // SETTILE 7
+        out_rdp1(g, 0xE6000000u, 0);                                                      // LOADSYNC
+        out_rdp1(g, 0xF3000000u, 0x07000000u | (((f10 << 2) & 0xFFF) << 12) | (f12 & 0xFFF));   // LOADBLOCK (tsize * 4, as the microcode sends it)
+    }
+    else if (type == 0x00FC1034)   // G_OBJLT_TXTRTILE: tmem, twidth, theight
+    {
+        out_rdp1(g, 0xFD000000u | (2u << 19) | (f10 & 0x3FF), image);                     // SETTIMG RGBA16, width twidth + 1
+        out_rdp1(g, 0xF5000000u | (2u << 19) | ((((f10 + 1) >> 2) & 0x1FF) << 9) | (f8 & 0x1FF), 0x07000000u);
+        out_rdp1(g, 0xE6000000u, 0);
+        out_rdp1(g, 0xF4000000u, 0x07000000u | (((f10 << 2) & 0xFFF) << 12) | (f12 & 0xFFF));   // LOADTILE
+    }
+    else if (type == 0x00000030)   // G_OBJLT_TLUT: phead, pnum
+    {
+        out_rdp1(g, 0xFD000000u | (2u << 19), image);                                     // SETTIMG RGBA16, width 1
+        out_rdp1(g, 0xF5000000u | (f8 & 0x1FF), 0x07000000u);                             // SETTILE 7 at the palette
+        out_rdp1(g, 0xE6000000u, 0);
+        out_rdp1(g, 0xF0000000u, 0x07000000u | (((f10 << 2) & 0xFFF) << 12));             // LOADTLUT
+    }
+    else
+        return;
+    g->objStatus[sid >> 2] = (g->objStatus[sid >> 2] & ~mask) | (flag & mask);
+}
+
+// G_OBJ_RECTANGLE (matrix 0) and G_OBJ_RECTANGLE_R (the 2D matrix's position
+// and base scale, no rotation): one TEXRECT.
+static void obj_rect(H64Gfx *g, u32 addr, int useMatrix)
+{
+    ObjSprite o;
+    ObjCorr cc;
+    s32 xh, xl, yh, yl, sh, th, dsdx, dtdy;
+    u32 scaleW, scaleH, cycle = (g->omH >> 20) & 3;
+    u64 w[2];
+    read_obj_sprite(g, seg_to_phys(g, addr), &o);
+    obj_corr(g->objRender, &cc, g->uc->s2v103);
+    if (useMatrix)
+    {
+        u32 bx = g->objScaleX ? g->objScaleX : 1, by = g->objScaleY ? g->objScaleY : 1;
+        s32 xhp, yhp;
+        scaleW = ((u32)g->objScaleX * 0x40 * o.scaleW) >> 16;
+        scaleH = ((u32)g->objScaleY * 0x40 * o.scaleH) >> 16;
+        if (!scaleW) scaleW = 1;
+        if (!scaleH) scaleH = 1;
+        xhp = (s32)((((s64)o.objX << 16) * 0x0800 * (s64)(0x80007FFFu / bx)) >> 32) + ((s32)(s16)((g->objX + cc.A2) & cc.B0) << 16);
+        yhp = (s32)((((s64)o.objY << 16) * 0x0800 * (s64)(0x80007FFFu / by)) >> 32) + ((s32)(s16)((g->objY + cc.A2) & cc.B0) << 16);
+        xh = (s16)(xhp >> 16);
+        yh = (s16)(yhp >> 16);
+        xl = (s16)((xhp + (s32)(((u64)(u32)((s32)o.imageW - cc.A1) << 24) * (0x80007FFFu / scaleW) >> 32)) >> 16);
+        yl = (s16)((yhp + (s32)(((u64)(u32)((s32)o.imageH - cc.A1) << 24) * (0x80007FFFu / scaleH) >> 32)) >> 16);
+        if (g->uc->s2v103)
+        {
+            // S2DEX 1.03 (GLideN64 ObjCoordinates, eVer1_3): each corner
+            // rounded by B0, the size plus B2, the texture from B3.
+            xh = (s16)((((((s64)o.objX << 27) * (s64)(0x80007FFFu / bx)) >> 48) + g->objX + cc.A2) & cc.B0);
+            yh = (s16)((((((s64)o.objY << 27) * (s64)(0x80007FFFu / by)) >> 48) + g->objY + cc.A2) & cc.B0);
+            xl = (s16)(((((((s64)o.imageW - cc.A1) << 8) * (s64)(0x80007FFFu / scaleW)) >> 32) + cc.B2) & cc.B0) + xh;
+            yl = (s16)(((((((s64)o.imageH - cc.A1) << 8) * (s64)(0x80007FFFu / scaleH)) >> 32) + cc.B2) & cc.B0) + yh;
+        }
+    }
+    else
+    {
+        scaleW = o.scaleW;
+        scaleH = o.scaleH;
+        xh = (s16)((o.objX + cc.A2) & cc.B0);
+        yh = (s16)((o.objY + cc.A2) & cc.B0);
+        xl = (s16)((((u64)(u32)((s32)o.imageW - cc.A1) << 24) * (0x80007FFFu / scaleW)) >> 48) + xh;
+        yl = (s16)((((u64)(u32)((s32)o.imageH - cc.A1) << 24) * (0x80007FFFu / scaleH)) >> 48) + yh;
+    }
+    sh = cc.A0 + (useMatrix && g->uc->s2v103 ? cc.B3 : cc.B2);
+    th = sh - (s32)((((u32)yh & 3) * 0x0200 * scaleH) >> 16);
+    dsdx = (s32)scaleW;
+    dtdy = (s32)scaleH;
+    if (o.flags & 0x01) { sh = sh + o.imageW + cc.A0 - cc.A1 - 1; dsdx = -dsdx; }   // G_BG_FLAG_FLIPS: from the right
+    if (o.flags & 0x10) { th = th + o.imageH + cc.A0 - cc.A1 - 1; dtdy = -dtdy; }   // G_BG_FLAG_FLIPT: from the bottom
+    if (cycle == 2) dsdx *= 4;   // copy mode: four pixels a step
+    // Off the top or left of the screen: the texture moves on by as much.
+    if (xh < 0) { sh += (s32)(((s64)(-xh) * dsdx) >> 7); xh = 0; }
+    if (yh < 0) { th += (s32)(((s64)(-yh) * dtdy) >> 7); yh = 0; }
+    if (xl <= xh || yl <= yh) return;
+    obj_tile(g, &o);
+    w[0] = ((u64)(0xE4000000u | (((u32)xl & 0xFFF) << 12) | ((u32)yl & 0xFFF)) << 32) | ((((u32)xh & 0xFFF) << 12) | ((u32)yh & 0xFFF));
+    w[1] = ((u64)((((u32)sh & 0xFFFF) << 16) | ((u32)th & 0xFFFF)) << 32) | ((((u32)dsdx & 0xFFFF) << 16) | ((u32)dtdy & 0xFFFF));
+    out_rdp(g, w, 2);
+}
+
+// G_OBJ_SPRITE: the sprite through the whole 2D matrix (it may turn), as two
+// texture triangles.
+static void obj_sprite(H64Gfx *g, u32 addr)
+{
+    ObjSprite o;
+    ObjCorr cc;
+    H64RenderVertex v[4];
+    s16 x0, y0, ulx, uly, lrx, lry, px[4], py[4];
+    float s0 = 0, s1, t0 = 0, t1;
+    u32 k, oldTile = g->texTile, oldLevel = g->texLevel;
+    read_obj_sprite(g, seg_to_phys(g, addr), &o);
+    obj_corr(g->objRender, &cc, g->uc->s2v103);
+    x0 = (s16)((g->objX + cc.B3) & cc.B0);
+    y0 = (s16)((g->objY + cc.B3) & cc.B0);
+    if (g->uc->s2v103)
+    {
+        x0 = (s16)(((g->objX + cc.B5) & cc.B0) + cc.B7);
+        y0 = (s16)(((g->objY + cc.B5) & cc.B0) + cc.B7);
+    }
+    ulx = (s16)(o.objX + cc.A3);
+    uly = (s16)(o.objY + cc.A3);
+    lrx = (s16)((((u64)(u32)((s32)o.imageW - cc.A1) << 8) * (0x80007FFFu / o.scaleW)) >> 32) + ulx;
+    lry = (s16)((((u64)(u32)((s32)o.imageH - cc.A1) << 8) * (0x80007FFFu / o.scaleH)) >> 32) + uly;
+    px[0] = ulx; py[0] = uly;
+    px[1] = lrx; py[1] = uly;
+    px[2] = ulx; py[2] = lry;
+    px[3] = lrx; py[3] = lry;
+    s1 = (float)o.imageW - 32.0f;   // the last texel, in 10.5
+    t1 = (float)o.imageH - 32.0f;
+    if (o.flags & 0x01) { float t = s0; s0 = s1; s1 = t; }
+    if (o.flags & 0x10) { float t = t0; t0 = t1; t1 = t; }
+    for (k = 0; k < 4; k++)
+    {
+        s16 X = (s16)(x0 + (s16)(((s32)px[k] * g->objA) >> 16) + (s16)(((s32)py[k] * g->objB) >> 16));
+        s16 Y = (s16)(y0 + (s16)(((s32)px[k] * g->objC) >> 16) + (s16)(((s32)py[k] * g->objD) >> 16));
+        memset(&v[k], 0, sizeof(v[k]));
+        v[k].x = X * 0.25f;
+        v[k].y = Y * 0.25f;
+        v[k].invw = 1.0f;
+        v[k].r = v[k].g = v[k].b = v[k].a = 255.0f;
+        v[k].s = (k & 1) ? s1 : s0;
+        v[k].t = (k & 2) ? t1 : t0;
+    }
+    obj_tile(g, &o);
+    g->texTile = 0;
+    g->texLevel = 0;
+    out_tri(g, &v[0], &v[1], &v[2], H64_TRI_TEXTURE);
+    out_tri(g, &v[1], &v[3], &v[2], H64_TRI_TEXTURE);
+    g->texTile = oldTile;
+    g->texLevel = oldLevel;
+}
+
+// G_OBJ_MOVEMEM (S2DEX 1.x and 2.x): the 2D matrix, its sub-matrix or the viewport.
+static void obj_movemem(H64Gfx *g, u32 w0, u32 w1)
+{
+    u32 a = seg_to_phys(g, w1), idx = w0 & 0xFFFF;
+    if (idx == 0)   // uObjMtx
+    {
+        g->objA = (s32)rd32(g, a);
+        g->objB = (s32)rd32(g, a + 4);
+        g->objC = (s32)rd32(g, a + 8);
+        g->objD = (s32)rd32(g, a + 12);
+        g->objX = rd16(g, a + 16);
+        g->objY = rd16(g, a + 18);
+        g->objScaleX = (u16)rd16(g, a + 20);
+        g->objScaleY = (u16)rd16(g, a + 22);
+    }
+    else if (idx == 2)   // uObjSubMtx
+    {
+        g->objX = rd16(g, a);
+        g->objY = rd16(g, a + 2);
+        g->objScaleX = (u16)rd16(g, a + 4);
+        g->objScaleY = (u16)rd16(g, a + 6);
+    }
+    else if (idx == 8) set_viewport(g, w1);
+}
+
+static void run_s2dex1(H64Gfx *g, u32 w0, u32 w1)
+{
+    u32 cmd = w0 >> 24;
+    switch (cmd)
+    {
+    case 0x00: break;                                              // G_SPNOOP
+    case 0x01: bg_1cyc(g, w1); break;                              // G_BG_1CYC
+    case 0x02: bg_copy(g, w1); break;                              // G_BG_COPY
+    case 0x03: obj_rect(g, w1, 0); break;                          // G_OBJ_RECTANGLE
+    case 0x04: obj_sprite(g, w1); break;                           // G_OBJ_SPRITE
+    case 0x05: obj_movemem(g, w0, w1); break;                     // G_OBJ_MOVEMEM
+    case 0x06: call_dl(g, w1, ((w0 >> 16) & 0xFF) == 0); break;   // G_DL
+    case 0xAF:          // G_LOAD_UCODE (Yoshi switches to F3DEX for its 3D and back)
+        if (!load_ucode(g, w1, g->half1, (w0 & 0xFFFF) + 1)) g->abort = 1;
+        break;
+    case 0xB0:          // G_SELECT_DL (after G_RDPHALF_0)
+    {
+        u32 sid = g->selSid, mask = w1, addr = g->selAddr | ((w0 & 0xFFFF) << 16);
+        if (sid >= 4 || (g->objStatus[sid] & mask) == g->selFlag) break;
+        g->objStatus[sid] = (g->objStatus[sid] & ~mask) | (g->selFlag & mask);
+        call_dl(g, addr, ((w0 >> 16) & 0xFF) == 0);
+        break;
+    }
+    case 0xB1: g->objRender = w1; break;                           // G_OBJ_RENDERMODE
+    case 0xB2: obj_rect(g, w1, 1); break;                          // G_OBJ_RECTANGLE_R
+    case 0xB3: break;                                              // G_RDPHALF_2 (read with TEXRECT)
+    case 0xB4: g->half1 = w1; break;                               // G_RDPHALF_1
+    case 0xB6: case 0xB7: case 0xBB: break;   // G_CLEARGEOMETRYMODE, G_SETGEOMETRYMODE, G_TEXTURE: no effect on 2D objects (Puzzle League, Star Soldier)
+    case 0xB8: end_dl(g); break;                                   // G_ENDDL
+    case 0xB9: set_othermode(g, 0, (w0 >> 8) & 0xFF, w0 & 0xFF, w1); break;
+    case 0xBA: set_othermode(g, 1, (w0 >> 8) & 0xFF, w0 & 0xFF, w1); break;
+    case 0xBC:          // G_MOVEWORD: G_MW_GENSTAT sets a status word
+        if ((w0 & 0xFF) == 0x08) { u32 off = (w0 >> 8) & 0xFFFF; if (off < 16) g->objStatus[off >> 2] = w1; }
+        else f3d_moveword(g, w0, w1);
+        break;
+    case 0xC1: obj_load(g, w1); break;                                       // G_OBJ_LOADTXTR
+    case 0xC2: obj_load(g, w1); obj_sprite(g, w1 + 24); break;               // G_OBJ_LDTX_SPRITE
+    case 0xC3: obj_load(g, w1); obj_rect(g, w1 + 24, 0); break;              // G_OBJ_LDTX_RECT
+    case 0xC4: obj_load(g, w1); obj_rect(g, w1 + 24, 1); break;              // G_OBJ_LDTX_RECT_R
+    case 0xE4:          // G_RDPHALF_0: G_SELECT_DL's first half, else a TEXRECT
+        if ((rd32(g, g->pc[g->pci]) >> 24) == 0xB0)
+        {
+            g->selAddr = w0 & 0xFFFF;
+            g->selSid = (w0 >> 18) & 0xFF;
+            g->selFlag = w1;
+        }
+        else rdp_passthrough(g, w0, w1);
+        break;
+    default:
+        if (cmd >= 0xC0) rdp_passthrough(g, w0, w1);
+        else
+        {
+            if (!(g->warned & 8)) { H64_INFO("[gfx] S2DEX 1.x command %02X not handled: task left to the LLE RSP", cmd); g->warned |= 8; }
+            g->abort = 1;
+        }
+        break;
+    }
+}
+
+static void run_s2dex2(H64Gfx *g, u32 w0, u32 w1)
+{
+    u32 cmd = w0 >> 24;
+    switch (cmd)
+    {
+    case 0x00: case 0xE0: break;                                   // G_NOOP, G_SPNOOP
+    case 0x09: bg_1cyc(g, w1); break;                              // G_BG_1CYC
+    case 0x0A: bg_copy(g, w1); break;                              // G_BG_COPY
+    case 0x0B: g->objRender = w1; break;                           // G_OBJ_RENDERMODE (copy mode ignores it)
+    case 0xDB:          // G_MOVEWORD
+        if (((w0 >> 16) & 0xFF) == 0x06) g->segments[((w0 & 0xFFFF) >> 2) & 0xF] = w1 & 0x00FFFFFF;
+        else if (((w0 >> 16) & 0xFF) == 0x08 && (w0 & 0xFFFF) < 16) g->objStatus[(w0 & 0xFFFF) >> 2] = w1;   // G_MW_GENSTAT
+        break;
+    // 2D objects, with the S2DEX 1.x code (same structures; GLideN64 S2DEX2.cpp
+    // maps the same handlers), only for the games whose profile asks for it.
+    case 0x01: case 0x02: case 0x04: case 0x05: case 0x06: case 0x07: case 0x08: case 0xDA: case 0xDC: case 0xE4:
+        if (!g->sys->options.gfxS2dex1)
+        {
+            if (cmd == 0xE4) { rdp_passthrough(g, w0, w1); break; }
+            if (!(g->warned & 8)) { H64_INFO("[gfx] S2DEX2 command %02X not handled: task left to the LLE RSP", cmd); g->warned |= 8; }
+            g->abort = 1;
+            break;
+        }
+        switch (cmd)
+        {
+        case 0x01: obj_rect(g, w1, 0); break;                          // G_OBJ_RECTANGLE
+        case 0x02: obj_sprite(g, w1); break;                           // G_OBJ_SPRITE
+        case 0x04:          // G_SELECT_DL (after G_RDPHALF_0)
+        {
+            u32 sid = g->selSid, mask = w1, addr = g->selAddr | ((w0 & 0xFFFF) << 16);
+            if (sid >= 4 || (g->objStatus[sid] & mask) == g->selFlag) break;
+            g->objStatus[sid] = (g->objStatus[sid] & ~mask) | (g->selFlag & mask);
+            call_dl(g, addr, ((w0 >> 16) & 0xFF) == 0);
+            break;
+        }
+        case 0x05: obj_load(g, w1); break;                             // G_OBJ_LOADTXTR
+        case 0x06: obj_load(g, w1); obj_sprite(g, w1 + 24); break;     // G_OBJ_LDTX_SPRITE
+        case 0x07: obj_load(g, w1); obj_rect(g, w1 + 24, 0); break;    // G_OBJ_LDTX_RECT
+        case 0x08: obj_load(g, w1); obj_rect(g, w1 + 24, 1); break;    // G_OBJ_LDTX_RECT_R
+        case 0xDA: obj_rect(g, w1, 1); break;                          // G_OBJ_RECTANGLE_R
+        case 0xDC: obj_movemem(g, w0, w1); break;                      // G_OBJ_MOVEMEM
+        case 0xE4:          // G_RDPHALF_0: G_SELECT_DL's first half, else a TEXRECT
+            if ((rd32(g, g->pc[g->pci]) >> 24) == 0x04)
+            {
+                g->selAddr = w0 & 0xFFFF;
+                g->selSid = (w0 >> 18) & 0xFF;
+                g->selFlag = w1;
+            }
+            else rdp_passthrough(g, w0, w1);
+            break;
+        }
+        break;
+    case 0xDD:          // G_LOAD_UCODE
+        if (!load_ucode(g, w1, g->half1, (w0 & 0xFFFF) + 1)) g->abort = 1;
+        break;
+    case 0xDE: call_dl(g, w1, ((w0 >> 16) & 0xFF) == 0); break;   // G_DL
+    case 0xDF: end_dl(g); break;                                   // G_ENDDL
+    case 0xE1: g->half1 = w1; break;                               // G_RDPHALF_1
+    case 0xE2: case 0xE3:   // G_SETOTHERMODE_L / _H
+    {
+        u32 len = (w0 & 0xFF) + 1;
+        s32 shift = 32 - (s32)((w0 >> 8) & 0xFF) - (s32)len;
+        if (shift < 0) shift = 0;
+        set_othermode(g, cmd == 0xE3, (u32)shift, len, w1);
+        break;
+    }
+    case 0xF1: break;   // G_RDPHALF_2
+    default:
+        if (cmd >= 0xC0 && cmd != 0xDA && cmd != 0xDC) rdp_passthrough(g, w0, w1);
+        else
+        {
+            if (!(g->warned & 8)) { H64_INFO("[gfx] S2DEX2 command %02X not handled: task left to the LLE RSP", cmd); g->warned |= 8; }
+            g->abort = 1;
+        }
+        break;
+    }
+}
+
+// ---- ZSort (ZSortp 0.33: Mia Hamm Soccer 64). Studied in GLideN64
+// (uCodes/ZSort.cpp, GPL v2) and rewritten. The microcode does not draw
+// vertices: G_ZS_MULT_MPMTX transforms model vertices in its DMEM into screen
+// vertices (zSortVDest), G_ZS_MOVEMEM saves them to RDRAM, the CPU sorts the
+// polygons by depth into linked object lists (zHeader: next pointer, type in
+// the low bits, then the RDP command lists the object needs and its screen
+// vertices) and G_ZS_ZOBJ draws them. DMEM addresses in the vertex and
+// lighting commands carry a 0x400 bias.
+static u8 *zs_dmem(H64Gfx *g, u32 off, u32 len)
+{
+    if (off >= sizeof(g->zdmem) || len > sizeof(g->zdmem) - off) return 0;
+    return g->zdmem + off;
+}
+
+static float (*zs_mtx(H64Gfx *g, u32 id))[4]
+{
+    if (id == 4) return g->mv[0];        // GZM_MMTX
+    if (id == 6) return g->proj;         // GZM_PMTX
+    if (id == 8) return g->combined;     // GZM_MPMTX
+    return 0;
+}
+
+// G_ZS_RDPCMD: a list of RDP commands in RDRAM up to 0xDF (and ZSort's own
+// SETOTHERMODE_L/H, 0xE2/0xE3, F3D's encoding); a TEXRECT takes three 64-bit
+// slots (its two halves in the low words of the next two).
+static void zs_rdpcmd(H64Gfx *g, u32 addr)
+{
+    u32 a = seg_to_phys(g, addr), n;
+    if (!a) return;
+    for (n = 0; n < 65536; n++)
+    {
+        u32 w0 = rd32(g, a), w1 = rd32(g, a + 4), cmd = w0 >> 24, save;
+        if (cmd == 0xDF) break;
+        save = g->pc[g->pci];
+        g->pc[g->pci] = a + 8;
+        if (cmd == 0xE2 || cmd == 0xE3) set_othermode(g, cmd == 0xE3, (w0 >> 8) & 0xFF, w0 & 0xFF, w1);   // F3D's SETOTHERMODE (ZSort's numbers)
+        else if (cmd >= 0xC0) rdp_passthrough(g, w0, w1);
+        a = g->pc[g->pci];
+        g->pc[g->pci] = save;
+    }
+}
+
+// One object: its RDP commands (each list sent only when it differs from the
+// previous object's), then its triangle or quad of screen vertices (8 bytes
+// each: x, y in 10.2, RGBA; textured ones 16: then s, t and the vertex's
+// 1/w as zSortVDest holds it).
+static u32 zs_object(H64Gfx *g, u32 zh, u32 rdp[3])
+{
+    u32 type = zh & 7, a = zh & 0x7FFFF8, nlists = (type == 1 || type == 3) ? 1 : 3, k;
+    u32 vnum = (type == 1 || type == 2) ? 3 : (type == 3 || type == 4) ? 4 : 0, vsize = (type == 1 || type == 3) ? 8 : 16;
+    int textured = type == 2 || type == 4, persp = (g->omH & 0x80000) != 0;
+    H64RenderVertex v[4];
+    if (type > 4) return 0;
+    for (k = 0; k < nlists; k++)
+    {
+        u32 w1 = rd32(g, a + 4 + k * 4);
+        if (w1 != rdp[k]) { rdp[k] = w1; zs_rdpcmd(g, w1); }
+    }
+    if (vnum)
+    {
+        u32 p = a + nlists * 4 + 4, flags = H64_TRI_SHADE | (textured ? H64_TRI_TEXTURE : 0);
+        if (nlists == 3) p = a + 16; else p = a + 8;
+        for (k = 0; k < vnum; k++, p += vsize)
+        {
+            H64RenderVertex *o = &v[k];
+            o->x = rd16(g, p) / 4.0f;
+            o->y = rd16(g, p + 2) / 4.0f;
+            o->z = 0;
+            o->r = rdf8(g, p + 4); o->g = rdf8(g, p + 5); o->b = rdf8(g, p + 6); o->a = rdf8(g, p + 7);
+            o->invw = 1.0f;
+            o->s = o->t = 0;
+            if (textured)
+            {
+                s32 iw = (s32)rd32(g, p + 12);
+                o->s = (float)rd16(g, p + 8);
+                o->t = (float)rd16(g, p + 10);
+                if (!persp) { o->s *= 0.5f; o->t *= 0.5f; }
+                // 1/w from the 0x7FFFFFFF / (31 w) the vertex carries.
+                if (iw > 0) o->invw = 31.0f * (float)iw / 2147483647.0f;
+            }
+        }
+        g->texTile = 0;
+        g->texLevel = 0;
+        out_tri(g, &v[0], &v[1], &v[2], flags);
+        if (vnum == 4) out_tri(g, &v[1], &v[2], &v[3], flags);
+        g->pTri += vnum - 2;
+    }
+    return seg_to_phys(g, rd32(g, a)) & 0x7FFFFF;
+}
+
+static void zs_obj(H64Gfx *g, u32 w0, u32 w1)
+{
+    u32 rdp[3] = { 0, 0, 0 }, list[2], i, n;
+    list[0] = w0;
+    list[1] = w1;
+    for (i = 0; i < 2; i++)
+    {
+        u32 zh = seg_to_phys(g, list[i]) & 0x7FFFFF;
+        for (n = 0; zh && n < 200000; n++) zh = zs_object(g, zh, rdp);
+        if (zh) { g->abort = 1; return; }
+    }
+}
+
+// G_ZS_MULT_MPMTX: model vertices (s16 x, y, z) through the combined matrix
+// into zSortVDest records (16 bytes: sx, sy in 10.2; 0x7FFFFFFF / (31 w);
+// x, y as integers; cc, fog; w).
+static void zs_mult_mpmtx(H64Gfx *g, u32 w1)
+{
+    u32 num = 1 + (w1 >> 24), i;
+    s32 src = (s32)((w1 >> 12) & 0xFFF) - 1024, dst = (s32)(w1 & 0xFFF) - 1024;
+    const float (*m)[4] = g->combined;
+    u8 *s, *d;
+    if (src < 0 || dst < 0) return;
+    s = zs_dmem(g, (u32)src, num * 6);
+    d = zs_dmem(g, (u32)dst, num * 16);
+    if (!s || !d) return;
+    for (i = 0; i < num; i++, s += 6, d += 16)
+    {
+        float sx = (float)(s16)h64_load_be16(s), sy = (float)(s16)h64_load_be16(s + 2), sz = (float)(s16)h64_load_be16(s + 4);
+        float x = sx * m[0][0] + sy * m[1][0] + sz * m[2][0] + m[3][0];
+        float y = sx * m[0][1] + sy * m[1][1] + sz * m[2][1] + m[3][1];
+        float z = sx * m[0][2] + sy * m[1][2] + sz * m[2][2] + m[3][2];
+        float w = sx * m[0][3] + sy * m[1][3] + sz * m[2][3] + m[3][3];
+        s32 iw = (s32)(w * 31.0f), fog;
+        u32 cc = 0;
+        float px = 0, py = 0;
+        if (w != 0) { px = g->zsTrans[0] + x / w * g->zsScale[0]; py = g->zsTrans[1] + y / w * g->zsScale[1]; }
+        if (px > 32767.0f) px = 32767.0f; else if (px < -32768.0f) px = -32768.0f;
+        if (py > 32767.0f) py = 32767.0f; else if (py < -32768.0f) py = -32768.0f;
+        h64_store_be16(d, (u16)(s16)px);
+        h64_store_be16(d + 2, (u16)(s16)py);
+        h64_store_be32(d + 4, (u32)(iw == 0 ? 0x7FFFFFFF : 0x7FFFFFFF / iw));
+        h64_store_be16(d + 8, (u16)(s16)x);
+        h64_store_be16(d + 10, (u16)(s16)y);
+        if (w < 0.0f || w == 0) fog = 0;
+        else
+        {
+            fog = (s32)(z / w * g->zsFogM + g->zsFogO);
+            if (fog > 255) fog = 255;
+            if (fog < 0) fog = 0;
+        }
+        if (x < -w) cc |= 0x10;
+        if (x > w) cc |= 0x01;
+        if (y < -w) cc |= 0x20;
+        if (y > w) cc |= 0x02;
+        if (w < 0.1f) cc |= 0x04;
+        d[12] = (u8)cc;
+        d[13] = (u8)fog;
+        h64_store_be16(d + 14, (u16)(s16)w);
+    }
+}
+
+// G_ZS_MOVEMEM: DMEM <-> RDRAM copies, matrices and the viewport.
+static void zs_movemem(H64Gfx *g, u32 w0, u32 w1)
+{
+    u32 idx = w0 & 0x0E, ofs = ((w0 >> 6) & 0x1FF) << 3, len = 1 + (((w0 >> 15) & 0x1FF) << 3);
+    u32 addr = seg_to_phys(g, w1) & 0x7FFFFF, k;
+    switch (idx)
+    {
+    case 0:   // GZF_LOAD / GZF_SAVE
+    {
+        u8 *d = zs_dmem(g, ofs, len);
+        if (!d || addr + len > H64_RDRAM_SIZE) return;
+        if (w0 & 1)
+            for (k = 0; k < len; k++) g->sys->rdram[addr + k] = d[k];   // the CPU reads the vertices once the task ends
+        else
+            for (k = 0; k < len; k++) d[k] = rd8(g, addr + k);
+        break;
+    }
+    case 4: load_matrix(g, addr, g->mv[0]); break;
+    case 6: load_matrix(g, addr, g->proj); break;
+    case 8: load_matrix(g, addr, g->combined); break;
+    case 12:  // GZM_VIEWPORT: scale and offset in 10.2, fog factors
+        g->zsScale[0] = (float)rd16(g, addr);
+        g->zsScale[1] = (float)rd16(g, addr + 2);
+        g->zsFogM = (float)rd16(g, addr + 6);
+        g->zsTrans[0] = (float)rd16(g, addr + 8);
+        g->zsTrans[1] = (float)rd16(g, addr + 10);
+        g->zsFogO = (float)rd16(g, addr + 14);
+        set_viewport(g, w1);
+        g->texTile = 0; g->texLevel = 0; g->texOn = 1;
+        break;
+    default: break;   // GZM_OTHERMODE, user areas: nothing to draw
+    }
+}
+
+// G_ZS_XFMLIGHT: the lights in DMEM (ambient colour, then 24 bytes per light,
+// then the two lookat directions).
+static void zs_xfmlight(H64Gfx *g, u32 w1)
+{
+    s32 a = (s32)(w1 & 0xFFF) - 1024;
+    int n = 1 + (int)((w1 >> 12) & 0xFF), i;
+    const u8 *d;
+    if (n > 8) n = 8;
+    if (a < 0 || !(d = zs_dmem(g, (u32)a, 8 + (n + 2) * 24 + 16))) return;
+    g->zsNumLights = n;
+    for (i = 0; i < 3; i++) g->zsLightCol[n][i] = d[i];
+    d += 8;
+    for (i = 0; i < n; i++, d += 24)
+    {
+        float x = (float)(s8)d[8], y = (float)(s8)d[9], z = (float)(s8)d[10], l = sqrtf(x * x + y * y + z * z);
+        g->zsLightCol[i][0] = d[0]; g->zsLightCol[i][1] = d[1]; g->zsLightCol[i][2] = d[2];
+        if (l > 0) { x /= l; y /= l; z /= l; }
+        g->zsLightDir[i][0] = x; g->zsLightDir[i][1] = y; g->zsLightDir[i][2] = z;
+    }
+    for (i = 0; i < 2; i++, d += 24)
+    {
+        float x = (float)(s8)d[8], y = (float)(s8)d[9], z = (float)(s8)d[10], l = sqrtf(x * x + y * y + z * z);
+        if (l > 0) { x /= l; y /= l; z /= l; }
+        g->zsLookat[i][0] = x; g->zsLookat[i][1] = y; g->zsLookat[i][2] = z;
+        if (i == 1) g->zsLookatOn = d[8] != 0 && d[9] != 0;
+    }
+}
+
+static void zs_normal(const float m[4][4], float v[3])
+{
+    float x = m[0][0] * v[0] + m[1][0] * v[1] + m[2][0] * v[2];
+    float y = m[0][1] * v[0] + m[1][1] * v[1] + m[2][1] * v[2];
+    float z = m[0][2] * v[0] + m[1][2] * v[1] + m[2][2] * v[2];
+    float l = sqrtf(x * x + y * y + z * z);
+    if (l > 0) { x /= l; y /= l; z /= l; }
+    v[0] = x; v[1] = y; v[2] = z;
+}
+
+// G_ZS_LIGHTING: per vertex, colour from the normal and the lights (times a
+// material colour unless its address is 0xFF0), and s, t for reflections from
+// the lookat directions; both written back to DMEM.
+static void zs_lighting(H64Gfx *g, u32 w0, u32 w1)
+{
+    s32 csrs = (s32)((w0 >> 12) & 0xFFF) - 1024, nsrs = (s32)(w0 & 0xFFF) - 1024;
+    s32 cdest = (s32)((w1 >> 12) & 0xFFF) - 1024, tdest = (s32)(w1 & 0xFFF) - 1024;
+    u32 num = 1 + (w1 >> 24), i;
+    int material = csrs != 0x0FF0, l;
+    u8 *n, *c = 0, *cd, *td;
+    if (nsrs < 0 || cdest < 0 || tdest < 0 || (material && csrs < 0)) return;
+    n = zs_dmem(g, (u32)nsrs, num * 3);
+    cd = zs_dmem(g, (u32)cdest, num * 4);
+    td = zs_dmem(g, (u32)tdest, num * 4);
+    if (material) c = zs_dmem(g, (u32)csrs, num * 4);
+    if (!n || !cd || !td || (material && !c)) return;
+    for (i = 0; i < num; i++)
+    {
+        float v[3], col[3], a = 255.0f, x, y;
+        v[0] = (float)(s8)n[i * 3]; v[1] = (float)(s8)n[i * 3 + 1]; v[2] = (float)(s8)n[i * 3 + 2];
+        zs_normal(g->mv[0], v);
+        for (l = 0; l < 3; l++) col[l] = g->zsLightCol[g->zsNumLights][l];
+        for (l = 0; l < g->zsNumLights; l++)
+        {
+            float d = v[0] * g->zsLightDir[l][0] + v[1] * g->zsLightDir[l][1] + v[2] * g->zsLightDir[l][2];
+            if (d > 0) { col[0] += g->zsLightCol[l][0] * d; col[1] += g->zsLightCol[l][1] * d; col[2] += g->zsLightCol[l][2] * d; }
+        }
+        for (l = 0; l < 3; l++) if (col[l] > 255.0f) col[l] = 255.0f;
+        zs_normal(g->proj, v);
+        if (g->zsLookatOn)
+        {
+            x = v[0] * g->zsLookat[0][0] + v[1] * g->zsLookat[0][1] + v[2] * g->zsLookat[0][2];
+            y = v[0] * g->zsLookat[1][0] + v[1] * g->zsLookat[1][1] + v[2] * g->zsLookat[1][2];
+        }
+        else { x = v[0]; y = v[1]; }
+        if (material)
+        {
+            for (l = 0; l < 3; l++) col[l] = col[l] * c[i * 4 + l] / 255.0f;
+            a = c[i * 4 + 3];
+        }
+        cd[i * 4] = (u8)col[0]; cd[i * 4 + 1] = (u8)col[1]; cd[i * 4 + 2] = (u8)col[2]; cd[i * 4 + 3] = (u8)a;
+        h64_store_be16(td + i * 4, (u16)(s16)((x + 1.0f) * 512.0f * 32.0f));
+        h64_store_be16(td + i * 4 + 2, (u16)(s16)((y + 1.0f) * 512.0f * 32.0f));
+    }
+}
+
+static void run_zsort(H64Gfx *g, u32 w0, u32 w1)
+{
+    u32 cmd = w0 >> 24;
+    switch (cmd)
+    {
+    case 0x00: break;                                              // G_SPNOOP
+    case 0x80: zs_obj(g, w0, w1); break;                           // G_ZS_ZOBJ
+    case 0x81: zs_rdpcmd(g, w1); break;                            // G_ZS_RDPCMD
+    case 0xBB: set_texture(g, w1, (w0 >> 11) & 7, (w0 >> 8) & 7, w0 & 0xFF); break;   // G_TEXTURE
+    case 0xB6: g->geomRaw &= ~w1; break;                           // G_CLEARGEOMETRYMODE
+    case 0xB7: g->geomRaw |= w1; break;                            // G_SETGEOMETRYMODE
+    case 0xB4: g->half1 = w1; break;                               // G_RDPHALF_1
+    case 0xB2: case 0xB3: case 0xBE: break;                        // RDPHALF_CONT/2, G_CULLDL (no vertices)
+    case 0xD0: case 0xD3: case 0xD4: case 0xD7: case 0xD8: case 0xD9: case 0xDA: break;   // ignored, as GLideN64
+    case 0xD1: zs_xfmlight(g, w1); break;                          // G_ZS_XFMLIGHT
+    case 0xD2: zs_lighting(g, w0, w1); break;                      // G_ZS_LIGHTING
+    case 0xD5:          // G_ZS_MTXCAT
+    {
+        float (*s)[4] = zs_mtx(g, w0 & 0xF), (*t)[4] = zs_mtx(g, (w1 >> 16) & 0xF), (*d)[4] = zs_mtx(g, w1 & 0xF);
+        if (s && t && d) mat_mul(d, t, s);   // GLideN64's MultMatrix(s, t) is t x s
+        break;
+    }
+    case 0xD6: zs_mult_mpmtx(g, w1); break;                        // G_ZS_MULT_MPMTX
+    case 0xDB: f3d_moveword(g, w0, w1); break;                     // G_ZS_MOVEWORD (F3D's)
+    case 0xDC: zs_movemem(g, w0, w1); break;                       // G_ZS_MOVEMEM
+    case 0xDE: call_dl(g, w1, ((w0 >> 16) & 0xFF) == 0); break;    // G_ZS_DL
+    case 0xDF: end_dl(g); break;                                   // G_ZS_ENDDL
+    case 0xE2: set_othermode(g, 0, (w0 >> 8) & 0xFF, w0 & 0xFF, w1); break;   // F3D's SETOTHERMODE_L
+    case 0xE3: set_othermode(g, 1, (w0 >> 8) & 0xFF, w0 & 0xFF, w1); break;   // and _H
+    case 0xED:          // G_SETSCISSOR: also the screen the vertices map to (GLideN64 SZort_SetScissor)
+    {
+        float wdt = (float)(((w1 >> 12) & 0xFFF) - ((w0 >> 12) & 0xFFF)) / 4.0f;
+        float hgt = (float)((w1 & 0xFFF) - (w0 & 0xFFF)) / 4.0f;
+        rdp_passthrough(g, w0, w1);
+        if (wdt > g->zsScale[0] - g->zsTrans[0])
+        {
+            g->zsScale[0] = g->zsTrans[0] = wdt / 2.0f * 4.0f;
+            g->zsScale[1] = g->zsTrans[1] = hgt / 2.0f * 4.0f;
+        }
+        break;
+    }
+    default:
+        if (cmd >= 0xC0) rdp_passthrough(g, w0, w1);
+        else
+        {
+            if (!(g->warned & 8)) { H64_INFO("[gfx] ZSort command %02X not handled: task left to the LLE RSP", cmd); g->warned |= 8; }
+            g->abort = 1;
+        }
+        break;
+    }
+}
+
+// ---------------------------------------------------------------- task
+static int gfx_loop(H64System *sys, H64Gfx *g, int *fullSync);
+static void flush_output(H64Gfx *g);
+
+// ---- Boss Game Studios' ZSort microcode (World Driver Championship, Stunt
+// Racer 64), recognised by its code CRC. Studied in GLideN64
+// (uCodes/ZSortBOSS.cpp, GPL v2) and rewritten. Like ZSortp, the RSP
+// transforms vertices in DMEM for the CPU to sort and draws the CPU's object
+// lists; it also mixes sound (the Audio commands) in the same tasks. A task
+// runs its main display list, then waits for SIG0 from the CPU before its sub
+// display list, and inside the sub list G_ZSBOSS_WAITSIGNAL sets SIG3 and
+// waits for the CPU to clear it: the parse stops there (bossWait) and goes on
+// when the CPU writes SP_STATUS (h64_gfx_resume).
+static s16 bd16(const H64Gfx *g, u32 off) { off &= 0xFFE; return (s16)h64_load_be16(g->zdmem + off); }
+static void bs16(H64Gfx *g, u32 off, s16 v) { off &= 0xFFE; h64_store_be16(g->zdmem + off, (u16)v); }
+static u32 bd32(const H64Gfx *g, u32 off) { off &= 0xFFC; return h64_load_be32(g->zdmem + off); }
+static void bs32(H64Gfx *g, u32 off, u32 v) { off &= 0xFFC; h64_store_be32(g->zdmem + off, v); }
+
+static float (*boss_mtx(H64Gfx *g, u32 off))[4]
+{
+    if (off == 0x830) return g->mv[g->mvi];
+    if (off == 0x870) return g->proj;
+    if (off == 0x8B0) return g->combined;
+    return 0;
+}
+
+// G_ZSBOSS_SETOTHERMODE_L/H: the field is w0's low 5 bits (length) and bits
+// 8-12 (shift from the top), as the microcode masks it.
+static void boss_othermode(H64Gfx *g, int high, u32 w0, u32 w1)
+{
+    u32 mask = (u32)((s32)0x80000000 >> (w0 & 0x1F));
+    mask >>= (w0 >> 8) & 0x1F;
+    if (high) g->omH = ((g->omH & ~mask) | w1) & 0x00FFFFFF;
+    else g->omL = (g->omL & ~mask) | w1;
+    out_othermode(g);
+}
+
+static void boss_rdp_command(H64Gfx *g, u32 w0, u32 w1)
+{
+    u32 cmd = w0 >> 24;
+    switch (cmd)
+    {
+    case 0xE2: boss_othermode(g, 0, w0, w1); break;
+    case 0xE3: boss_othermode(g, 1, w0, w1); break;
+    case 0xEF:          // RDP SETOTHERMODE through the update mask (G_ZSBOSS_UPDATEMASK)
+        g->omH = ((w0 & g->bossMask[0]) | (g->omH & ~g->bossMask[0])) & 0x00FFFFFF;
+        g->omL = (w1 & g->bossMask[1]) | (g->omL & ~g->bossMask[1]);
+        out_othermode(g);
+        break;
+    case 0xDD: g->bossMask[0] = w0 | 0xFF000000u; g->bossMask[1] = w1; break;   // G_ZSBOSS_UPDATEMASK
+    case 0xDE:          // G_ZSBOSS_TRIANGLECOMMAND: shaded, textured triangles with this tile
+        g->texLevel = (w1 >> 3) & 7;
+        g->texTile = w1 & 7;
+        g->texOn = 1;
+        break;
+    case 0xE1: g->half1 = w1; break;
+    case 0xF1: case 0xDF: break;
+    default:
+        if (cmd >= 0xC0) rdp_passthrough(g, w0, w1);
+        break;
+    }
+}
+
+// G_ZSBOSS_RDPCMD and the object lists: RDP commands in RDRAM up to 0xDF.
+static void boss_rdpcmd(H64Gfx *g, u32 addr)
+{
+    u32 a = seg_to_phys(g, addr) & 0x7FFFFF, n;
+    if (!a) return;
+    for (n = 0; n < 65536; n++)
+    {
+        u32 w0 = rd32(g, a), w1 = rd32(g, a + 4), save;
+        if ((w0 >> 24) == 0xDF) break;
+        save = g->pc[g->pci];
+        g->pc[g->pci] = a + 8;
+        boss_rdp_command(g, w0, w1);
+        a = g->pc[g->pci];
+        g->pc[g->pci] = save;
+    }
+}
+
+static u32 boss_object(H64Gfx *g, u32 zh)
+{
+    u32 type = zh & 7, a = zh & 0x7FFFF8, k;
+    for (k = 0; k < 3; k++)
+    {
+        u32 w1 = rd32(g, a + 4 + k * 4);
+        if (w1 != g->bossRdp[k]) { g->bossRdp[k] = w1; boss_rdpcmd(g, w1); }
+    }
+    if (type == 2 || type == 4)   // textured triangle, textured quad (16-byte vertices)
+    {
+        H64RenderVertex v[4];
+        u32 vnum = type == 2 ? 3 : 4, p = a + 16, flags = H64_TRI_SHADE | H64_TRI_TEXTURE;
+        int persp = (g->omH & 0x80000) != 0;
+        for (k = 0; k < vnum; k++, p += 16)
+        {
+            H64RenderVertex *o = &v[k];
+            s32 iw = (s32)rd32(g, p + 12), rgba = (s32)rd32(g, p + 4);
+            o->x = rd16(g, p) / 4.0f;
+            o->y = rd16(g, p + 2) / 4.0f;
+            o->z = 0;
+            o->r = rdf8(g, p + 4); o->g = rdf8(g, p + 5); o->b = rdf8(g, p + 6); o->a = rdf8(g, p + 7);
+            o->s = (float)rd16(g, p + 8);
+            o->t = (float)rd16(g, p + 10);
+            if (!persp) { o->s *= 0.5f; o->t *= 0.5f; }
+            // w from 0x7FFFFFFF / (w * invw factor); 1 when the field is unset.
+            o->invw = (iw == rgba || iw <= 0) ? 1.0f : g->bossInvw * (float)iw / 2147483647.0f;
+        }
+        out_tri(g, &v[0], &v[1], &v[2], flags);
+        if (vnum == 4) out_tri(g, &v[1], &v[2], &v[3], flags);
+    }
+    return seg_to_phys(g, rd32(g, a)) & 0x7FFFFF;
+}
+
+static void boss_movemem(H64Gfx *g, u32 w0, u32 w1)
+{
+    u32 flag = (w0 >> 23) & 1, len = 1 + ((w0 >> 12) & 0x7FF), off = w0 & 0xFFF;
+    u32 addr = seg_to_phys(g, w1) & 0x7FFFFF, k;
+    float (*m)[4] = boss_mtx(g, off);
+    if (m)
+    {
+        if (!flag) { load_matrix(g, addr, m); if (m != g->combined) g->combinedValid = 0; }
+        else if (m == g->combined)
+            for (k = 0; k < 16; k++)   // the combined matrix back to RDRAM, N64 fixed point
+            {
+                double v = m[k >> 2][k & 3] * 65536.0;
+                s32 fx = (s32)(v < 0 ? v - 0.5 : v + 0.5);
+                h64_store_be16(g->sys->rdram + ((addr + k * 2) & 0x7FFFFE), (u16)(fx >> 16));
+                h64_store_be16(g->sys->rdram + ((addr + 32 + k * 2) & 0x7FFFFE), (u16)fx);
+            }
+        return;
+    }
+    if (off == 0)   // the viewport
+    {
+        g->bossVS[0] = (float)rd16(g, addr);
+        g->bossVS[1] = (float)rd16(g, addr + 2);
+        g->bossFogM = (float)rd16(g, addr + 6);
+        g->bossVT[0] = (float)rd16(g, addr + 8);
+        g->bossVT[1] = (float)rd16(g, addr + 10);
+        g->bossFogO = (float)rd16(g, addr + 14);
+        set_viewport(g, w1);
+        return;
+    }
+    if (off + len > sizeof(g->zdmem) || addr + len > H64_RDRAM_SIZE) return;
+    if (off == 0x730)   // the fog table (also kept in DMEM)
+        for (k = 0; k < len && k < 256; k++) g->bossFog[k] = rd8(g, addr + k);
+    if (!flag)
+        for (k = 0; k < len; k++) g->zdmem[off + k] = rd8(g, addr + k);
+    else
+        for (k = 0; k < len; k++) g->sys->rdram[addr + k] = g->zdmem[off + k];
+}
+
+static void boss_mult_mpmtx(H64Gfx *g, u32 w1)
+{
+    u32 num = 1 + (w1 >> 24), src = (w1 >> 12) & 0xFFF, dst = w1 & 0xFFF, i;
+    const float (*m)[4] = g->combined;
+    float f = g->bossInvw;
+    if (src + num * 6 > sizeof(g->zdmem) || dst + num * 16 > sizeof(g->zdmem)) return;
+    for (i = 0; i < num; i++, src += 6, dst += 16)
+    {
+        float sx = (float)bd16(g, src), sy = (float)bd16(g, src + 2), sz = (float)bd16(g, src + 4);
+        float x = sx * m[0][0] + sy * m[1][0] + sz * m[2][0] + m[3][0];
+        float y = sx * m[0][1] + sy * m[1][1] + sz * m[2][1] + m[3][1];
+        float z = sx * m[0][2] + sy * m[1][2] + sz * m[2][2] + m[3][2];
+        float w = sx * m[0][3] + sy * m[1][3] + sz * m[2][3] + m[3][3];
+        float iw = w <= 0.0f ? f : 1.0f / w, xw = x * iw, yw = y * iw, px, py;
+        s32 wi = (s32)(w * f), fog;
+        u32 cc = 0;
+        if (xw > f) xw = f; else if (xw < -f) xw = -f;
+        if (yw > f) yw = f; else if (yw < -f) yw = -f;
+        px = g->bossVT[0] + xw * g->bossVS[0];
+        py = g->bossVT[1] + yw * g->bossVS[1];
+        bs16(g, dst, (s16)px);
+        bs16(g, dst + 2, (s16)py);
+        bs32(g, dst + 4, (u32)(wi == 0 ? 0x7FFFFFFF : 0x7FFFFFFF / wi));
+        bs16(g, dst + 8, (s16)x);
+        bs16(g, dst + 10, (s16)y);
+        fog = (s32)(w * (g->bossFogM / 65536.0f) + g->bossFogO);
+        if (fog > 127) fog = 127; else if (fog < -128) fog = -128;
+        if (x >= w) cc |= 0x10;
+        if (y >= w) cc |= 0x20;
+        if (z >= w) cc |= 0x40;
+        if (x <= -w) cc |= 0x01;
+        if (y <= -w) cc |= 0x02;
+        if (z <= -w) cc |= 0x04;
+        g->zdmem[dst + 12] = (u8)cc;
+        g->zdmem[dst + 13] = g->bossFog[fog + 128];
+        bs16(g, dst + 14, (s16)w);
+    }
+}
+
+// Normal or light direction times the matrix's 3x3, normalised (recipro-
+// cal of the length at most 256, as the microcode).
+static void boss_normalize(const float m[4][4], float v[3])
+{
+    float x = m[0][0] * v[0] + m[1][0] * v[1] + m[2][0] * v[2];
+    float y = m[0][1] * v[0] + m[1][1] * v[1] + m[2][1] * v[2];
+    float z = m[0][2] * v[0] + m[1][2] * v[1] + m[2][2] * v[2];
+    float len = x * x + y * y + z * z, r = 256.0f;
+    if (len != 0) r = 1.0f / sqrtf(len);
+    if (r > 256.0f) r = 256.0f;
+    v[0] = x * r; v[1] = y * r; v[2] = z * r;
+}
+
+static void boss_audio2(H64Gfx *g, u32 w0, u32 w1)
+{
+    int len = (int)(w1 >> 24), i, j, k;
+    u32 dst = bd32(g, 0x10);
+    float f1 = (float)((w0 >> 16) & 0xFF) + (float)(w0 & 0xFFFF) / 65536.0f;
+    float f2 = (float)((w1 >> 16) & 0xFF) + (float)(w1 & 0xFFFF) / 65536.0f;
+    u16 v11[2];
+    v11[0] = (u16)bd16(g, 0x904);
+    v11[1] = (u16)bd16(g, 0x906);
+    for (i = 0; i < len; i += 4)
+        for (j = 0; j < 4; j++)
+        {
+            float val = i * f1 + j * f1 + f2, fr;
+            double ip;
+            s32 index;
+            s16 v9, v10, v12, v13;
+            fr = (float)fabs(modf((double)val, &ip));
+            index = ((s32)ip) << 1;
+            v9 = bd16(g, 0x30 + index);
+            v10 = bd16(g, 0x32 + index);
+            v12 = (s16)(v10 - v9);
+            v13 = bd16(g, dst);
+            for (k = 0; k < 2; k++)
+            {
+                s32 r1 = v12 * (s32)(u16)(fr * 65536.0f), r2 = (s32)v9 << 16;
+                s16 r3 = (s16)((r2 + r1) >> 16);
+                r1 = (s32)v11[k] * r3;
+                r2 = (s32)v13 << 16;
+                r3 = (s16)((r2 + r1) >> 16);
+                bs16(g, dst, r3);
+                dst += 2;
+            }
+        }
+}
+
+static void boss_audio4(H64Gfx *g, u32 w0, u32 w1)
+{
+    u32 addr = seg_to_phys(g, w1) & 0x7FFFFF, src = ((w0 & 0xF000) >> 12) + addr, dst = 0x30;
+    s32 l1 = (s32)(w0 & 0xFFF), l2, i, j, k;
+    s16 v1 = bd16(g, 0), v2 = bd16(g, 2);
+    for (; l1 > 0; l1 -= 9)
+    {
+        u32 r9 = rd8(g, src++);
+        s32 index = (s32)(r9 & 0xF) << 1;
+        s16 c1 = (s16)(1 << ((r9 >> 4) & 0x1F)), c2 = 0x20;
+        if (index > 6) break;
+        for (l2 = 0; l2 < 2; l2++)
+        {
+            s32 a = (s8)rd8(g, src), b = (s8)rd8(g, src + 1), c = (s8)rd8(g, src + 2), d = (s8)rd8(g, src + 3);
+            s16 coeff[8];
+            src += 4;
+            coeff[0] = (s16)(a >> 4); coeff[1] = (s16)((s32)((u32)a << 28) >> 28);
+            coeff[2] = (s16)(b >> 4); coeff[3] = (s16)((s32)((u32)b << 28) >> 28);
+            coeff[4] = (s16)(c >> 4); coeff[5] = (s16)((s32)((u32)c << 28) >> 28);
+            coeff[6] = (s16)(d >> 4); coeff[7] = (s16)((s32)((u32)d << 28) >> 28);
+            if (dst + 16 > sizeof(g->zdmem)) return;
+            for (i = 0; i < 8; i++)
+            {
+                s32 r1 = 0, r2;
+                for (j = 0, k = i; j < i; j++, k--) r1 += g->bossTable[index + 1][k - 1] * coeff[j];
+                r1 += coeff[i] * (s16)0x0800;
+                r1 *= c1;
+                r2 = v1 * g->bossTable[index][i] + v2 * g->bossTable[index + 1][i];
+                bs16(g, dst + i * 2, (s16)((r1 * c2 + r2 * c2) >> 16));
+            }
+            v1 = bd16(g, dst + 12);
+            v2 = bd16(g, dst + 14);
+            dst += 16;
+        }
+    }
+}
+
+static void boss_wait(H64Gfx *g)
+{
+    g->pc[g->pci] -= 8;   // the command runs again when the parse goes on
+    g->bossWait = 1;
+    g->halt = 1;
+}
+
+static void run_boss(H64Gfx *g, u32 w0, u32 w1)
+{
+    u32 cmd = w0 >> 24, *status = &g->sys->rsp.status;
+    switch (cmd)
+    {
+    case 0x00: break;
+    case 0x02:          // G_ZSBOSS_ENDMAINDL: the sub list once the CPU gives SIG0
+        if (g->bossSub) { g->halt = 1; g->bossMain = g->bossSub = 0; break; }
+        g->bossMain = 1;
+        if (!(*status & 0x80)) boss_wait(g);
+        else { g->pci = 1; *status &= ~0x80u; }
+        break;
+    case 0x1A:          // G_ZSBOSS_ENDSUBDL
+        if (g->bossMain) { g->halt = 1; g->bossMain = g->bossSub = 0; }
+        else { g->pci = 0; g->bossSub = 1; }
+        break;
+    case 0x12:          // G_ZSBOSS_WAITSIGNAL: SIG3 set, wait until the CPU clears it
+        if (!g->bossWaiting)
+        {
+            // The CPU learns of it through an SP interrupt (the game idles
+            // until then; GLideN64 under mupen64plus gets one from rsp_break).
+            *status &= ~0x300u;
+            *status |= 0x400u;
+            h64_mi_raise(g->sys, MI_INTR_SP);
+        }
+        if (*status & 0x400) { g->bossWaiting = 1; boss_wait(g); }
+        else g->bossWaiting = 0;
+        break;
+    case 0x04: boss_movemem(g, w0, w1); break;
+    case 0x06:          // G_ZSBOSS_MOVEWORD: a word into DMEM (0x10 before a MOVEMEM: the 1/w factor)
+        if ((w0 & 0xFFF) == 0x10 && (rd32(g, g->pc[g->pci]) >> 24) == 0x04) g->bossInvw = (float)w1;
+        bs32(g, w0 & 0xFFF, w1);
+        break;
+    case 0x08:          // G_ZSBOSS_TRANSPOSEMTX: the 3x3 part
+    {
+        float (*m)[4] = boss_mtx(g, w1 & 0xFFF), t;
+        int i, j;
+        if (!m) break;
+        for (i = 0; i < 3; i++)
+            for (j = i + 1; j < 3; j++) { t = m[i][j]; m[i][j] = m[j][i]; m[j][i] = t; }
+        g->combinedValid = 0;
+        break;
+    }
+    case 0x0A:          // G_ZSBOSS_MTXCAT
+    {
+        float (*s)[4] = boss_mtx(g, (w1 >> 16) & 0xFFF), (*t)[4] = boss_mtx(g, w0 & 0xFFF), (*d)[4] = boss_mtx(g, w1 & 0xFFF);
+        if (s && t && d) mat_mul(d, t, s);   // GLideN64's MultMatrix(s, t) is t x s
+        break;
+    }
+    case 0x0C: boss_mult_mpmtx(g, w1); break;
+    case 0x0E: boss_rdpcmd(g, w1); break;
+    case 0x10:          // G_ZSBOSS_OBJ: two object lists
+    {
+        u32 list[2], i, n;
+        list[0] = w0;
+        list[1] = w1;
+        for (i = 0; i < 2; i++)
+        {
+            u32 zh = seg_to_phys(g, list[i]) & 0x7FFFFF;
+            for (n = 0; zh && n < 200000; n++) zh = boss_object(g, zh);
+        }
+        break;
+    }
+    case 0x14:          // G_ZSBOSS_LIGHTING: s, t for reflections from the normals and the lookat
+    {
+        u32 num = 1 + (w1 >> 24), nsrs = w0 & 0xFFF, tdest = w1 & 0xFFF, i;
+        if (nsrs + num * 3 > sizeof(g->zdmem) || tdest + num * 4 > sizeof(g->zdmem)) break;
+        for (i = 0; i < num; i++, nsrs += 3, tdest += 4)
+        {
+            float n0 = (s8)g->zdmem[nsrs] / 256.0f, n1 = (s8)g->zdmem[nsrs + 1] / 256.0f, n2 = (s8)g->zdmem[nsrs + 2] / 256.0f;
+            float x = g->bossLookat[0][0] * n0 + g->bossLookat[0][1] * n1 + g->bossLookat[0][2] * n2;
+            float y = g->bossLookat[1][0] * n0 + g->bossLookat[1][1] * n1 + g->bossLookat[1][2] * n2;
+            bs16(g, tdest, (s16)((x + 0.5f) * 1024.0f));
+            bs16(g, tdest + 2, (s16)((y + 0.5f) * 1024.0f));
+        }
+        break;
+    }
+    case 0x18:          // G_ZSBOSS_TRANSFORMLIGHTS: the two lookat directions (no lights)
+    {
+        u32 a = w1 & 0xFFF, i;
+        s32 nl = 1 - (s32)(w1 >> 12);
+        if (nl < 0 || nl >= 12) break;
+        a += (u32)nl * 24;
+        for (i = 0; i < 2; i++, a += 24)
+        {
+            if (a + 19 > sizeof(g->zdmem)) break;
+            g->bossLookat[i][0] = (s8)g->zdmem[a + 16] / 256.0f;
+            g->bossLookat[i][1] = (s8)g->zdmem[a + 17] / 256.0f;
+            g->bossLookat[i][2] = (s8)g->zdmem[a + 18] / 256.0f;
+            boss_normalize(g->mv[g->mvi], g->bossLookat[i]);
+        }
+        break;
+    }
+    case 0x1C: boss_audio2(g, w0, w1); break;
+    case 0x1E: memset(g->zdmem + 0xC20, 0, 512); break;   // G_ZSBOSS_CLEARBUFFER
+    case 0x22:          // G_ZSBOSS_AUDIO3: the ADPCM table, then 8 bytes and the address into DMEM
+    {
+        u32 a = seg_to_phys(g, w0) & 0x7FFFFF, i, j;
+        for (i = 0; i < 8; i++)
+            for (j = 0; j < 8; j++) g->bossTable[i][j] = rd16(g, a + (i << 4) + (j << 1));
+        a = seg_to_phys(g, w1) & 0x7FFFFF;
+        for (i = 0; i < 8; i++) g->zdmem[i] = rd8(g, a + i);
+        bs32(g, 8, a);
+        break;
+    }
+    case 0x24: boss_audio4(g, w0, w1); break;
+    case 0x26:          // G_ZSBOSS_AUDIO1: a DMEM word to DMEM 0, then 8 bytes to RDRAM
+    {
+        u32 a = seg_to_phys(g, w1) & 0x7FFFFF, i;
+        bs32(g, 0, bd32(g, w0 & 0xFFF));
+        for (i = 0; i < 8; i++) g->sys->rdram[(a + i) & 0x7FFFFF] = g->zdmem[i];
+        break;
+    }
+    case 0x16: case 0x20: break;   // reserved
+    default:
+        boss_rdp_command(g, w0, w1);
+        break;
+    }
+}
+
+int h64_gfx_waiting(const H64Gfx *g)
+{
+    return g->bossWait;
+}
+
+int h64_gfx_resume(H64System *sys, H64Gfx *g, int *fullSync)
+{
+    if (!g->bossWait) return 1;
+    g->bossWait = 0;
+    g->halt = 0;
+    g->words.clear();
+    g->tris.clear();
+    g->ops.clear();
+    if (!gfx_loop(sys, g, fullSync)) return 0;
+    if (g->bossWait) g->fullSync = 0;
+    flush_output(g);
+    return 1;
+}
+
+int h64_gfx_task_sync(H64System *sys, H64Gfx *g)
+{
+    const u8 *dmem = sys->spMem;
+    u32 ucStart = h64_load_be32(dmem + 0xFD0), ucData = h64_load_be32(dmem + 0xFD8);
+    u32 ucDataSize = h64_load_be32(dmem + 0xFDC);
+    return find_ucode(g, ucStart & 0x7FFFFF, ucData & 0x7FFFFF, ucDataSize)->type == UC_BOSS;
+}
+
+H64Gfx *h64_gfx_create(H64System *sys)
+{
+    init_tables();
+    H64Gfx *g = new H64Gfx;
+    int i;
+    g->sys = sys;
+    g->ucodeCount = g->ucodeNext = 0;
+    g->uc = 0;
+    g->noFlush = 0;
+    memset(g->segments, 0, sizeof(g->segments));
+    g->dmaIo = 0;
+    for (i = 0; i < GFX_STACK_MAX; i++) mat_identity(g->mv[i]);
+    mat_identity(g->proj);
+    mat_identity(g->combined);
+    g->mvi = 0;
+    g->stackSize = GFX_STACK_MAX;
+    g->combinedValid = 0;
+    g->forcedCombined = 0;
+    memset(g->vtx, 0, sizeof(g->vtx));
+    g->geomRaw = 0;
+    g->omH = 0;
+    g->omL = 0;
+    memset(g->lightCol, 0, sizeof(g->lightCol));
+    memset(g->lightDir, 0, sizeof(g->lightDir));
+    g->numLights = 0;
+    memset(g->lookat, 0, sizeof(g->lookat));
+    memset(g->vscale, 0, sizeof(g->vscale));
+    g->vpGen = 1;
+    g->pTri = g->pNtri = g->pVtx = g->pNvtx = g->pNlight = 0;
+    memset(g->vtrans, 0, sizeof(g->vtrans));
+    g->clipRatio = 2.0f;   // the microcodes' default (FRUSTRATIO_2)
+    g->texScaleS = g->texScaleT = 1.0f;
+    g->texLevel = g->texTile = 0;
+    g->texOn = 0;
+    g->fogMul = g->fogOff = 0;
+    g->half1 = 0;
+    g->pci = 0;
+    g->halt = g->abort = 0;
+    g->fullSync = 0;
+    g->commands = 0;
+    g->nVerts = g->nTris = 0;
+    g->warned = 0;
+    g->timgAddr = g->timgWidth = g->timgSize = 0;
+    memset(g->cimg, 0, sizeof(g->cimg));
+    g->cimgNext = 0;
+    g->texFromCimg = 0;
+    for (i = 0; i < 8; i++) g->cimgSig[i].rows = g->cimgSig[i].use = 0;
+    g->cimgUse = 0;
+    memset(g->zdmem, 0, sizeof(g->zdmem));
+    g->zsScale[0] = g->zsScale[1] = g->zsTrans[0] = g->zsTrans[1] = 0;
+    g->zsFogM = g->zsFogO = 0;
+    memset(g->zsLightCol, 0, sizeof(g->zsLightCol));
+    memset(g->zsLightDir, 0, sizeof(g->zsLightDir));
+    memset(g->zsLookat, 0, sizeof(g->zsLookat));
+    g->zsNumLights = 0;
+    g->zsLookatOn = 0;
+    g->bossWait = g->bossMain = g->bossSub = g->bossWaiting = 0;
+    g->bossRdp[0] = g->bossRdp[1] = g->bossRdp[2] = 0;
+    g->bossMask[0] = g->bossMask[1] = 0;
+    g->bossVS[0] = g->bossVS[1] = g->bossVT[0] = g->bossVT[1] = 0;
+    g->bossInvw = 10.0f;
+    g->bossFogM = g->bossFogO = 0;
+    memset(g->bossLookat, 0, sizeof(g->bossLookat));
+    memset(g->bossFog, 0, sizeof(g->bossFog));
+    memset(g->bossTable, 0, sizeof(g->bossTable));
+    return g;
+}
+
+void h64_gfx_free(H64Gfx *g)
+{
+    delete g;
+}
+
+H64GfxOut *h64_gfx_out_create(void)
+{
+    H64GfxOut *o = new H64GfxOut;
+    o->snapshot = 0;
+    return o;
+}
+
+void h64_gfx_out_free(H64GfxOut *o)
+{
+    if (!o) return;
+    h64_big_free(o->snapshot);
+    delete o;
+}
+
+static void flush_lists(H64System *sys, const PodVec<u64> &words, const PodVec<GfxTri> &tris, const PodVec<GfxOp> &ops)
+{
+    u64 t0 = h64_prof_now(sys);
+    H64Renderer *r = sys->renderer;
+    u32 i;
+    for (i = 0; i < ops.size(); i++)
+    {
+        const GfxOp *op = &ops[i];
+        if (op->kind == 0)
+        {
+            if (r) r->rdp(r->user, &words[op->index], op->count);
+            else h64_rdp_command(sys, &words[op->index], op->count);
+            sys->dpCommands++;
+        }
+        else
+        {
+            const GfxTri *t = &tris[op->index];
+            if (r) r->triangle(r->user, &t->v[0], &t->v[1], &t->v[2], t->flags, t->tile, t->levels);
+            else
+            {
+                u64 w[22];
+                u32 n = h64_rdp_build_triangle(&t->v[0], &t->v[1], &t->v[2], t->flags, t->tile, t->levels, w);
+                h64_rdp_command(sys, w, n);
+            }
+            sys->dpCommands++;
+        }
+    }
+    sys->prof[H64_PROF_RENDER] += h64_prof_now(sys) - t0;
+}
+
+static void flush_output(H64Gfx *g)
+{
+    flush_lists(g->sys, g->words, g->tris, g->ops);
+}
+
+int h64_gfx_task_known(H64System *sys, H64Gfx *g)
+{
+    const u8 *dmem = sys->spMem;
+    u32 ucStart = h64_load_be32(dmem + 0xFD0), ucData = h64_load_be32(dmem + 0xFD8);
+    u32 ucDataSize = h64_load_be32(dmem + 0xFDC);
+    return find_ucode(g, ucStart & 0x7FFFFF, ucData & 0x7FFFFF, ucDataSize)->type != UC_NONE;
+}
+
+static int parse_task(H64System *sys, H64Gfx *g, int *fullSync);
+static int parse_task_lists(H64System *sys, H64Gfx *g, int *fullSync);
+static int gfx_loop(H64System *sys, H64Gfx *g, int *fullSync);
+
+// How long the real microcode would keep the RSP busy, in CPU cycles: 130 RCP
+// cycles per vertex and 230 per triangle, fitted on the LLE RSP's timing
+// (h64test --gfx-cost-log: DK64, SM64, MK64 average 0.5-0.7 M RCP cycles a
+// task). Experimental (--gfx-timing): DK64's intro running twice as fast
+// with the HLE came from the DP interrupt ignoring DPC_STATUS.FREEZE
+// (h64_rdp_hle_full_sync), not from the task time.
+u32 h64_gfx_cost(const H64Gfx *g)
+{
+    return (130u * g->nVerts + 230u * g->nTris) * 3u / 2u;
+}
+
+int h64_gfx_measure(H64System *sys, H64Gfx *g, u32 *verts, u32 *tris, u32 *commands)
+{
+    int fullSync;
+    if (!parse_task(sys, g, &fullSync)) return 0;
+    *verts = g->nVerts;
+    *tris = g->nTris;
+    *commands = g->commands;
+    g->words.clear();
+    g->tris.clear();
+    g->ops.clear();
+    return 1;
+}
+
+int h64_gfx_run_task(H64System *sys, H64Gfx *g, int *fullSync)
+{
+    if (!parse_task(sys, g, fullSync)) return 0;
+    if (g->bossWait) g->fullSync = 0;   // the caller raises it now
+    if (!g->noFlush) flush_output(g);
+    return 1;
+}
+
+void h64_gfx_set_no_flush(H64Gfx *g, int on)
+{
+    // A part packaged by h64_gfx_package starts with no loads of its own.
+    if (on) g->loadRanges.clear();
+    g->noFlush = on;
+}
+
+int h64_gfx_stream_waiting(const H64Gfx *g)
+{
+    return g->streamWait;
+}
+
+int h64_gfx_stream_resume(H64System *sys, H64Gfx *g, int *fullSync)
+{
+    if (!g->streamWait) return 0;
+    if (rd32(g, g->streamAddr) == g->streamW0 && rd32(g, g->streamAddr + 4) == g->streamW1) return -1;
+    g->streamWait = 0;
+    g->halt = g->abort = 0;
+    g->fullSync = 0;
+    g->commands = 0;
+    g->words.clear();
+    g->tris.clear();
+    g->ops.clear();
+    if (!gfx_loop(sys, g, fullSync)) { g->streamWait = 0; return 0; }   // cannot go back to the LLE RSP now: ends
+    if (!g->noFlush) flush_output(g);
+    return 1;
+}
+
+int h64_gfx_parse_task(H64System *sys, H64Gfx *g, H64GfxOut *out, int *fullSync, int *mustSync)
+{
+    g->loadRanges.clear();
+    g->texFromCimg = 0;
+    if (!parse_task(sys, g, fullSync)) return 0;
+    *mustSync = h64_gfx_package(sys, g, out);
+    return 1;
+}
+
+int h64_gfx_package(H64System *sys, H64Gfx *g, H64GfxOut *out)
+{
+    size_t k;
+    int mustSync;
+    // The lists go to `out` (O(1) swaps: g keeps out's old buffers for the next task).
+    g->words.swap(out->words);
+    g->tris.swap(out->tris);
+    g->ops.swap(out->ops);
+    // A task that reads a colour image as a texture renders from the snapshot
+    // too: the renderer copies the image back into both (h64_gfx_render).
+    // Profile gfxFrameToRdram: the renderer writes the frame into RDRAM at the
+    // full sync; the task ends only once that is done.
+    mustSync = sys->options.gfxFrameToRdram != 0;
+    out->cpuRanges.clear();
+    if (!out->snapshot) out->snapshot = (u8 *)h64_big_alloc(H64_RDRAM_SIZE);
+    if (!out->snapshot) { g->loadRanges.clear(); return 1; }
+    {
+        // Ranges sorted and merged first: a display list loads the same
+        // texels many times (Conker's cutscenes: thousands of loads a frame).
+        u64 t0 = h64_prof_now(sys);
+        std::vector<u64> &r = g->rangeSort;
+        size_t n = 0;
+        r.clear();
+        for (k = 0; k + 1 < g->loadRanges.size(); k += 2) r.push_back((u64)g->loadRanges[k] << 32 | g->loadRanges[k + 1]);
+        std::sort(r.begin(), r.end());
+        while (n < r.size())
+        {
+            u32 lo = (u32)(r[n] >> 32), hi = (u32)r[n];
+            for (n++; n < r.size() && (u32)(r[n] >> 32) <= hi; n++)
+                if ((u32)r[n] > hi) hi = (u32)r[n];
+            memcpy(out->snapshot + lo, sys->rdram + lo, hi - lo);
+            cimg_check(g, lo, hi, out->cpuRanges);
+            sys->prof[H64_PROF_SNAP_BYTES] += hi - lo;
+        }
+        sys->prof[H64_PROF_GFX_SNAPSHOT] += h64_prof_now(sys) - t0;
+    }
+    g->loadRanges.clear();   // a streamed task's next part starts its own
+    return mustSync;
+}
+
+void h64_gfx_render(H64System *sys, H64Gfx *g, H64GfxOut *out)
+{
+    H64RdpState *st = h64_rdp_state(sys);
+    // Texture loads read the snapshot taken when the display list was parsed.
+    // A colour image the GPU drew and the task reads as a texture (OoT's Link
+    // on the pause screen, Perfect Dark's cutscene blur) is copied back into
+    // the snapshot as well as RDRAM, so the task need not finish rendering
+    // before the CPU goes on (PD's cutscenes: the CPU waited ~12 ms a frame).
+    (void)g;
+    st->loadRam = out->snapshot;
+    st->loadRamGen++;
+    st->cpuRanges = out->cpuRanges.empty() ? 0 : &out->cpuRanges[0];
+    st->cpuRangeCount = (u32)out->cpuRanges.size() / 2;
+    flush_lists(sys, out->words, out->tris, out->ops);
+    st->loadRam = 0;
+    st->cpuRanges = 0;
+    st->cpuRangeCount = 0;
+}
+
+#include "h64_gfx_f5.inc"
+#include "h64_gfx_turbo3d.inc"
+
+// Profile gfxCpuSprites: the RDRAM of the 16-bit frames (at least 256 pixels
+// wide) this task drew, as it is now. The CPU draws its sprites there once the
+// task is done; the renderer shows the pixels that changed since.
+static void cpu_sprite_base(H64System *sys, H64Gfx *g, u32 cimgFirst)
+{
+    u32 n, k;
+    for (n = cimgFirst; n != g->cimgNext && n - cimgFirst < 8; n++)
+    {
+        u32 start = g->cimg[n & 7][0], bytes = g->cimg[n & 7][1] - start;
+        H64CpuSprite *c = 0;
+        if (bytes < 256 * 240 * 2 || bytes > H64_CPU_SPRITE_MAX || start + bytes > H64_RDRAM_SIZE) continue;
+        for (k = 0; k < 4 && !c; k++)
+            if (sys->cpuSprite[k].bytes && sys->cpuSprite[k].addr == start) c = &sys->cpuSprite[k];
+        if (!c) c = &sys->cpuSprite[sys->cpuSpriteNext++ & 3];
+        if (!c->data) c->data = (u8 *)malloc(H64_CPU_SPRITE_MAX);
+        if (!c->data) { c->bytes = 0; continue; }
+        c->bytes = 0;   // not valid while it is written
+        // The frame's memory gets a mark the CPU's drawings will differ from
+        // (the GPU never writes it). Comparing with what the memory held
+        // instead missed the pixels of a capsule drawn over the same colours
+        // two frames earlier in that buffer: half capsules.
+        {
+            u32 i;
+            for (i = 0; i + 1 < bytes; i += 2)
+            {
+                c->data[i] = sys->rdram[start + i] = (u8)(H64_CPU_SPRITE_MARK >> 8);
+                c->data[i + 1] = sys->rdram[start + i + 1] = (u8)H64_CPU_SPRITE_MARK;
+            }
+        }
+        c->addr = start;
+        c->bytes = bytes;
+    }
+}
+
+static int parse_task(H64System *sys, H64Gfx *g, int *fullSync)
+{
+    u32 cimgFirst = g->cimgNext;
+    int r = parse_task_lists(sys, g, fullSync);
+    if (r && sys->options.gfxCpuSprites) cpu_sprite_base(sys, g, cimgFirst);
+    return r;
+}
+
+static int parse_task_lists(H64System *sys, H64Gfx *g, int *fullSync)
+{
+    const u8 *dmem = sys->spMem;
+    u32 ucStart = h64_load_be32(dmem + 0xFD0), ucData = h64_load_be32(dmem + 0xFD8);
+    u32 ucDataSize = h64_load_be32(dmem + 0xFDC);
+    u32 stack = h64_load_be32(dmem + 0xFE4) >> 6;
+    const GfxUcode *u = find_ucode(g, ucStart & 0x7FFFFF, ucData & 0x7FFFFF, ucDataSize);
+    if (u->type == UC_NONE)
+        return 0;
+    g->clipRatio = 2.0f;   // the microcode's data is loaded again with each task
+    g->objA = g->objD = 1 << 16;   // S2DEX: identity 2D matrix, no render mode, status cleared
+    g->objB = g->objC = 0;
+    g->objX = g->objY = 0;
+    g->objScaleX = g->objScaleY = 1 << 10;
+    g->objRender = 0;
+    memset(g->objStatus, 0, sizeof(g->objStatus));
+    g->selAddr = g->selSid = g->selFlag = 0;
+    // ... and with it the other modes' default (F3DEX2: perspective, texture
+    // filter, dithers). Mario Golf never sets the texture conversion and
+    // relies on it: from 0 its textures were read as YUV (grey courses).
+    if (g->sys->options.gfxOtherModeInit || u->omInit) { g->omH = 0x080CFF; g->omL = 0; }
+    g->uc = u;
+    if (u->type == UC_ZSORT || u->type == UC_BOSS)   // the task loads the microcode's data into DMEM
+    {
+        u32 k, n = ucDataSize < sizeof(g->zdmem) ? ucDataSize : (u32)sizeof(g->zdmem);
+        for (k = 0; k < n; k++) g->zdmem[k] = rd8(g, (ucData & 0x7FFFFF) + k);
+        g->texTile = 0; g->texLevel = 0; g->texOn = 1;
+    }
+
+    // Per-task state, as the microcode starts each task (GLideN64 RSP_ProcessDList).
+    g->pc[0] = h64_load_be32(dmem + 0xFF0) & 0x7FFFFF;
+    g->pci = 0;
+    g->halt = g->abort = 0;
+    g->fullSync = 0;
+    g->commands = 0;
+    g->nVerts = g->nTris = 0;
+    g->stackSize = stack == 0 || stack > GFX_STACK_MAX ? GFX_STACK_MAX : (int)stack;
+    g->mvi = 0;
+    g->combinedValid = 0;
+    g->forcedCombined = 0;
+    g->geomRaw = 0;
+    g->dmaMtx = g->dmaVtx = g->colorBase = 0;
+    g->texOffset = g->texShift = g->texCount = 0;
+    g->billboard = g->vertexi = 0;
+    g->dlCount = -1;
+    g->normalBase = 0;
+    g->advLighting = 0;   // GLideN64 resets it with each display list
+    memset(g->lightCol, 0, sizeof(g->lightCol));
+    memset(g->lightDir, 0, sizeof(g->lightDir));
+    g->numLights = 0;
+    memset(g->lookat, 0, sizeof(g->lookat));
+    g->lookat[0][1] = 1.0f;
+    g->lookat[1][0] = 1.0f;
+    g->words.clear();
+    g->tris.clear();
+    g->ops.clear();
+    if (u->type == UC_F5ROGUE)
+    {
+        g->f5ColorBase = g->f5VpAddr = g->f5PerspAddr = 0;
+        g->f5TexScale[0] = g->f5TexScale[1] = 0;
+        f5_enter(g);   // the task's list starts with its link word too
+    }
+    if (u->type == UC_F5INDI)
+    {
+        // The task header, and the words the microcode clears when it starts
+        // (GLideN64 _ProcessDListFactor5).
+        static const u16 clr[7] = { 0x11C, 0x120, 0x124, 0x37C, 0x58C, 0x5B0, 0x5B4 };
+        u32 k;
+        for (k = 0xFC0; k < 0x1000; k++) g->f5dm[k ^ 3] = dmem[k];
+        for (k = 0; k < 7; k++) dmw_set(g, clr[k], 0);
+        g->f5Mtx = 0;
+        g->f5Restore = 0;
+        f5_enter(g);
+    }
+    g->bossWait = 0;
+    if (u->type == UC_BOSS)
+    {
+        // The sub display list (yield_data_ptr); signals as the microcode
+        // leaves them at its start (GLideN64 RSP_ProcessDList).
+        g->pc[1] = h64_load_be32(dmem + 0xFF8) & 0x7FFFFF;
+        g->bossMain = g->bossSub = g->bossWaiting = 0;
+        g->bossRdp[0] = g->bossRdp[1] = g->bossRdp[2] = 0;
+        sys->rsp.status = (sys->rsp.status & ~0x300u) | 0x800u;   // clear SIG1/SIG2, set SIG4
+    }
+    g->streamWait = 0;
+    return gfx_loop(sys, g, fullSync);
+}
+
+// The display list from where it stands (a Boss task resumes here after a
+// wait for the CPU).
+static int gfx_loop(H64System *sys, H64Gfx *g, int *fullSync)
+{
+    while (!g->halt && !g->abort)
+    {
+        if (g->uc->type == UC_TURBO3D)
+        {
+            t3d_step(g);
+            if (++g->commands > GFX_MAX_COMMANDS) g->abort = 1;
+            continue;
+        }
+        u32 a = g->pc[g->pci];
+        u32 w0 = rd32(g, a), w1 = rd32(g, a + 4);
+        g->pc[g->pci] = a + 8;
+        if (g->uc->type == UC_F3DEX2) run_f3dex2(g, w0, w1);
+        else if (g->uc->type == UC_S2DEX2) run_s2dex2(g, w0, w1);
+        else if (g->uc->type == UC_S2DEX1) run_s2dex1(g, w0, w1);
+        else if (g->uc->type == UC_ZSORT) run_zsort(g, w0, w1);
+        else if (g->uc->type == UC_BOSS) run_boss(g, w0, w1);
+        else if (g->uc->type == UC_F5ROGUE) run_f5rogue(g, w0, w1);
+        else if (g->uc->type == UC_F5INDI) run_f5indi(g, w0, w1);
+        else run_f3d(g, w0, w1);
+        if (g->dlCount > 0 && --g->dlCount == 0)
+        {
+            // G_DMA_DL: its commands are done (GLideN64 RSP_CheckDLCounter).
+            g->dlCount = -1;
+            if (g->pci > 0) g->pci--;
+        }
+        if (++g->commands > GFX_MAX_COMMANDS)
+        {
+            H64_WARN("[gfx] display list too long (loop?): task left to the LLE RSP");
+            g->abort = 1;
+        }
+    }
+    {
+        u64 *pr = sys->prof;
+        pr[H64_PROF_GFX_TRI] += g->pTri;
+        pr[H64_PROF_GFX_NTRI] += g->pNtri;
+        pr[H64_PROF_GFX_VTX] += g->pVtx;
+        pr[H64_PROF_GFX_NVTX] += g->pNvtx;
+        pr[H64_PROF_GFX_NLIGHT] += g->pNlight;
+        g->pTri = g->pNtri = g->pVtx = g->pNvtx = g->pNlight = 0;
+    }
+    if (g->abort)
+        return 0;
+    *fullSync = g->fullSync;
+    return 1;
+}

@@ -1,0 +1,765 @@
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
+ *   Mupen64plus-rsp-hle - hle.c                                           *
+ *   Mupen64Plus homepage: https://mupen64plus.org/                        *
+ *   Copyright (C) 2012 Bobby Smiles                                       *
+ *   Copyright (C) 2009 Richard Goedeken                                   *
+ *   Copyright (C) 2002 Hacktarux                                          *
+ *                                                                         *
+ *   This program is free software; you can redistribute it and/or modify  *
+ *   it under the terms of the GNU General Public License as published by  *
+ *   the Free Software Foundation; either version 2 of the License, or     *
+ *   (at your option) any later version.                                   *
+ *                                                                         *
+ *   This program is distributed in the hope that it will be useful,       *
+ *   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
+ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the         *
+ *   GNU General Public License for more details.                          *
+ *                                                                         *
+ *   You should have received a copy of the GNU General Public License     *
+ *   along with this program; if not, write to the                         *
+ *   Free Software Foundation, Inc.,                                       *
+ *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.          *
+ * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+// Harissa64 V2: task detection from mupen64plus-rsp-hle's hle.c (audio
+// tasks only; everything else goes to the LLE RSP), plus the memory helpers
+// of its memory.c rewritten for guest memory in N64 byte order.
+#include <stdarg.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#include "h64_hle_internal.h"
+#include "h64_hle.h"
+#include "h64_gfx.h"
+#include "../common/h64_log.h"
+#include "../rdp/h64_rdp.h"
+#include "../system/h64_system.h"
+
+#if defined(_MSC_VER) && _MSC_VER < 1900
+#define vsnprintf _vsnprintf
+#endif
+
+
+// ---- messages ----
+void HleWarnMessage(void *UNUSED(user_defined), const char *message, ...)
+{
+    char line[256];
+    va_list ap;
+    va_start(ap, message);
+    vsnprintf(line, sizeof(line), message, ap);
+    va_end(ap);
+    line[sizeof(line) - 1] = 0;
+    H64_WARN("[hle] %s", line);
+}
+
+void HleVerboseMessage(void *UNUSED(user_defined), const char *UNUSED(message), ...)
+{
+}
+
+// ---- memory (memory.c) ----
+void load_u8(uint8_t *dst, const unsigned char *buffer, unsigned mask, unsigned address, size_t count)
+{
+    while (count != 0) { *(dst++) = buffer[address & mask]; address += 1; --count; }
+}
+
+void load_u16(uint16_t *dst, const unsigned char *buffer, unsigned mask, unsigned address, size_t count)
+{
+    while (count != 0) { *(dst++) = h64_load_be16(buffer + (address & mask & ~1u)); address += 2; --count; }
+}
+
+void load_u32(uint32_t *dst, const unsigned char *buffer, unsigned mask, unsigned address, size_t count)
+{
+    while (count != 0) { *(dst++) = h64_load_be32(buffer + (address & mask & ~3u)); address += 4; --count; }
+}
+
+void store_u8(unsigned char *buffer, unsigned mask, unsigned address, const uint8_t *src, size_t count)
+{
+    while (count != 0) { buffer[address & mask] = *(src++); address += 1; --count; }
+}
+
+void store_u16(unsigned char *buffer, unsigned mask, unsigned address, const uint16_t *src, size_t count)
+{
+    while (count != 0) { h64_store_be16(buffer + (address & mask & ~1u), *(src++)); address += 2; --count; }
+}
+
+void store_u32(unsigned char *buffer, unsigned mask, unsigned address, const uint32_t *src, size_t count)
+{
+    while (count != 0) { h64_store_be32(buffer + (address & mask & ~3u), *(src++)); address += 4; --count; }
+}
+
+void hle_dram_dirty(struct hle_t *hle, u32 address, size_t count)
+{
+    u32 end = address + (u32)count, i, best = 0, bestGap = 0xFFFFFFFFu;
+    if (end > H64_RDRAM_SIZE) { address = 0; end = H64_RDRAM_SIZE; }   // wrapped: be safe
+    if (hle->checkMask && hle->dram == hle->checkRam) memset(hle->checkMask + address, 1, end - address);
+    if (hle->dirtyLo >= hle->dirtyHi) { hle->dirtyLo = address; hle->dirtyHi = end; }
+    else
+    {
+        if (address < hle->dirtyLo) hle->dirtyLo = address;
+        if (end > hle->dirtyHi) hle->dirtyHi = end;
+    }
+    // The separate ranges: joined to one it touches (or lies within 4 KB of),
+    // else a new one; with all eight in use, joined to the nearest.
+    for (i = 0; i < hle->dirtyCount; i++)
+    {
+        u32 *r = hle->dirtyRange[i];
+        u32 gap = end < r[0] ? r[0] - end : address > r[1] ? address - r[1] : 0;
+        if (gap < bestGap) { bestGap = gap; best = i; }
+    }
+    if (bestGap > 4096 && hle->dirtyCount < 8)
+    {
+        hle->dirtyRange[hle->dirtyCount][0] = address;
+        hle->dirtyRange[hle->dirtyCount][1] = end;
+        hle->dirtyCount++;
+        return;
+    }
+    if (address < hle->dirtyRange[best][0]) hle->dirtyRange[best][0] = address;
+    if (end > hle->dirtyRange[best][1]) hle->dirtyRange[best][1] = end;
+}
+
+// Tells the recompiler about each RDRAM range the task wrote, then forgets them.
+static void hle_notify_dirty(H64System *sys, struct hle_t *hle)
+{
+    u32 i;
+    for (i = 0; i < hle->dirtyCount; i++)
+        if (hle->dirtyRange[i][1] > hle->dirtyRange[i][0])
+            h64_jit_notify_write(sys, hle->dirtyRange[i][0], hle->dirtyRange[i][1] - hle->dirtyRange[i][0]);
+    hle->dirtyCount = 0;
+}
+
+// HLE buffers are 0x1000 bytes in upstream's native-word layout: the guest
+// byte at offset o of the buffer lives at (o ^ HLE_S8).
+void hle_dram_to_buffer(struct hle_t *hle, uint8_t *buffer, unsigned offset, uint32_t address, size_t count)
+{
+    size_t i;
+    for (i = 0; i < count; ++i)
+        buffer[((offset + i) ^ HLE_S8) & 0xfff] = hle->dram[(address + i) & HLE_DRAM_MASK];
+}
+
+void hle_buffer_to_dram(struct hle_t *hle, uint32_t address, const uint8_t *buffer, unsigned offset, size_t count)
+{
+    size_t i;
+    for (i = 0; i < count; ++i)
+        hle->dram[(address + i) & HLE_DRAM_MASK] = buffer[((offset + i) ^ HLE_S8) & 0xfff];
+    hle_dram_dirty(hle, address & HLE_DRAM_MASK, count);
+}
+
+// ---- task detection (hle.c) ----
+void rsp_break(struct hle_t *hle, unsigned int setbits)
+{
+    hle->sp_status |= setbits | SP_STATUS_BROKE | SP_STATUS_HALT;
+}
+
+int HleForwardTask(void *user_defined)
+{
+    ((struct hle_t *)user_defined)->forwarded = 1;
+    return 0;
+}
+
+static void forward_task(struct hle_t *hle)
+{
+    hle->forwarded = 1;
+}
+
+static int is_task(struct hle_t *hle)
+{
+    return (*dmem_u32(hle, TASK_UCODE_BOOT_SIZE) <= 0x1000);
+}
+
+static ucode_func_t try_audio_task_detection(struct hle_t *hle)
+{
+    /* identify audio ucode by using the content of ucode_data */
+    uint32_t ucode_data = *dmem_u32(hle, TASK_UCODE_DATA);
+    uint32_t v;
+
+    if (*dram_u32(hle, ucode_data) == 0x00000001) {
+        if (*dram_u32(hle, ucode_data + 0x30) == 0xf0000f00) {
+            v = *dram_u32(hle, ucode_data + 0x28);
+            switch(v)
+            {
+            case 0x1e24138c: /* audio ABI (most common) */
+                return &alist_process_audio;
+            case 0x1dc8138c: /* GoldenEye */
+                return &alist_process_audio_ge;
+            case 0x1e3c1390: /* BlastCorp, DiddyKongRacing */
+                return &alist_process_audio_bc;
+            default:
+                HleWarnMessage(hle->user_defined, "ABI1 identification regression: v=%08x", v);
+            }
+        } else {
+            v = *dram_u32(hle, ucode_data + 0x10);
+            switch(v)
+            {
+            case 0x11181350: /* MarioKart, WaveRace (E) */
+                return &alist_process_nead_mk;
+            case 0x111812e0: /* StarFox (J) */
+                return &alist_process_nead_sfj;
+            case 0x110412ac: /* WaveRace (J RevB) */
+                return &alist_process_nead_wrjb;
+            case 0x110412cc: /* StarFox/LylatWars (except J) */
+                return &alist_process_nead_sf;
+            case 0x1cd01250: /* FZeroX */
+                return &alist_process_nead_fz;
+            case 0x1f08122c: /* YoshisStory */
+                return &alist_process_nead_ys;
+            case 0x1f38122c: /* 1080° Snowboarding */
+                return &alist_process_nead_1080;
+            case 0x1f681230: /* Zelda OoT / Zelda MM (J, J RevA) */
+                return &alist_process_nead_oot;
+            case 0x1f801250: /* Zelda MM (except J, J RevA, E Beta), PokemonStadium 2 */
+                return &alist_process_nead_mm;
+            case 0x109411f8: /* Zelda MM (E Beta) */
+                return &alist_process_nead_mmb;
+            case 0x1eac11b8: /* AnimalCrossing */
+                return &alist_process_nead_ac;
+            case 0x00010010: /* MusyX v2 (IndianaJones, BattleForNaboo) */
+                return &musyx_v2_task;
+            case 0x1f701238: /* Mario Artist Talent Studio */
+                return &alist_process_nead_mats;
+            case 0x1f4c1230: /* FZeroX Expansion */
+                return &alist_process_nead_efz;
+            default:
+                HleWarnMessage(hle->user_defined, "ABI2 identification regression: v=%08x", v);
+            }
+        }
+    } else {
+        v = *dram_u32(hle, ucode_data + 0x10);
+        switch(v)
+        {
+        case 0x00000001: /* MusyX v1
+            RogueSquadron, ResidentEvil2, PolarisSnoCross,
+            TheWorldIsNotEnough, RugratsInParis, NBAShowTime,
+            HydroThunder, Tarzan, GauntletLegend, Rush2049 */
+            return &musyx_v1_task;
+        case 0x0000127c: /* naudio (many games) */
+            return &alist_process_naudio;
+        case 0x00001280: /* BanjoKazooie */
+            return &alist_process_naudio_bk;
+        case 0x1c58126c: /* DonkeyKong */
+            return &alist_process_naudio_dk;
+        case 0x1ae8143c: /* BanjoTooie, JetForceGemini, MickeySpeedWayUSA, PerfectDark */
+            return &alist_process_naudio_mp3;
+        case 0x1ab0140c: /* ConkerBadFurDay */
+            return &alist_process_naudio_cbfd;
+
+        default:
+            HleWarnMessage(hle->user_defined, "ABI3 identification regression: v=%08x", v);
+        }
+    }
+
+    return NULL;
+}
+
+static void task_done(struct hle_t *hle)
+{
+    rsp_break(hle, SP_STATUS_TASKDONE);
+}
+
+// Other tasks by the byte sum of their microcode (hle.c's
+// try_normal_task_detection): the JPEG decoders, and OoT's StoreVe12, which
+// has nothing to emulate. Graphics tasks never get here.
+static ucode_func_t try_normal_task_detection(struct hle_t *hle)
+{
+    uint32_t uc = *dmem_u32(hle, TASK_UCODE), size = *dmem_u32(hle, TASK_UCODE_SIZE), n, i, sum = 0;
+    n = (size < 0xf80 ? size : 0xf80) >> 1;
+    for (i = 0; i < n; i++) sum += hle->dram[(uc + i) & HLE_DRAM_MASK];
+    switch (sum)
+    {
+    case 0x278: return &task_done;           // StoreVe12 (Ocarina of Time)
+    case 0x2c85a: return &jpeg_decode_PS0;   // Pokemon Stadium (J)
+    case 0x2caa6: return &jpeg_decode_PS;    // Ocarina of Time, Pokemon Stadium 1 and 2
+    case 0x130de: case 0x278b0: return &jpeg_decode_OB;   // Ogre Battle 64, Bottom of the 9th
+    }
+    return NULL;
+}
+
+static ucode_func_t task_detection(struct hle_t *hle)
+{
+    if (is_task(hle) && *dmem_u32(hle, TASK_TYPE) == 2) {
+        ucode_func_t f = try_audio_task_detection(hle);
+        if (f)
+            return f;
+    }
+    if (is_task(hle) && *dmem_u32(hle, TASK_TYPE) != 1) {
+        ucode_func_t f = try_normal_task_detection(hle);
+        if (f)
+            return f;
+    }
+    return &forward_task;
+}
+
+// ---- V2 entry points ----
+struct hle_t *h64_hle_create(H64System *sys)
+{
+    struct hle_t *hle = new hle_t;
+    memset(hle, 0, sizeof(*hle));
+    hle->sys = sys;
+    hle->user_defined = hle;
+    hle->dram = sys->rdram;
+    hle->dmem = sys->spMem;
+    hle->imem = sys->spMem + 0x1000;
+    return hle;
+}
+
+void h64_hle_free(struct hle_t *hle)
+{
+    if (hle->checkRam)
+    {
+        H64_INFO("[hle] audio check: %u tasks compared, %u with differences; differing halfwords by size: "
+                 "1: %u, 2-16: %u, 17-256: %u, 257-4096: %u, more: %u", hle->checkTasks, hle->checkBad,
+                 hle->checkHist[0], hle->checkHist[1], hle->checkHist[2], hle->checkHist[3], hle->checkHist[4]);
+        free(hle->checkRam);
+        free(hle->checkMask);
+    }
+    if (hle->gfx) h64_gfx_free(hle->gfx);
+    h64_gfx_out_free(hle->gfxSlot[0].out);
+    h64_gfx_out_free(hle->gfxSlot[1].out);
+    delete hle;
+}
+
+void h64_hle_check_end(H64System *sys)
+{
+    struct hle_t *hle = sys->hle;
+    u32 a, runs = 0, bad = 0;
+    char line[512];
+    size_t len = 0;
+    if (!hle || !hle->checkPending)
+        return;
+    hle->checkPending = 0;
+    hle->checkTasks++;
+    line[0] = 0;
+    for (a = hle->checkLo & ~1u; a + 1 < hle->checkHi; a += 2)
+    {
+        int d;
+        if (!(hle->checkMask[a] | hle->checkMask[a + 1])) continue;
+        d = (int)(s16)h64_load_be16(sys->rdram + a) - (int)(s16)h64_load_be16(hle->checkRam + a);
+        if (d < 0) d = -d;
+        if (d) hle->checkHist[d == 1 ? 0 : d <= 16 ? 1 : d <= 256 ? 2 : d <= 4096 ? 3 : 4]++;
+    }
+    for (a = hle->checkLo; a < hle->checkHi; a++)
+    {
+        if (!hle->checkMask[a] || sys->rdram[a] == hle->checkRam[a])
+            continue;
+        u32 start = a;
+        while (a < hle->checkHi && hle->checkMask[a] && sys->rdram[a] != hle->checkRam[a]) a++;
+        bad += a - start;
+        if (runs++ < 8 && len < sizeof(line) - 64)
+        {
+            u32 h = start & ~1u;
+            len += sprintf(line + len, " %06X+%X(lle %04X hle %04X)", start, a - start, h64_load_be16(sys->rdram + h),
+                           h64_load_be16(hle->checkRam + h));
+        }
+    }
+    if (bad)
+    {
+        hle->checkBad++;
+        if (hle->checkBad <= 40)
+            H64_INFO("[hle] audio check: task %u (frame %u) differs in %u bytes, %u runs:%s", hle->checkTasks,
+                     sys->vi.frames, bad, runs, line);
+    }
+}
+
+// Worker job 1: the display list (reads RDRAM, snapshots what texture loads
+// read). On the second graphics worker when there is one, so that it runs
+// while the first renders the previous task (Conker's cutscenes: ~12 ms of
+// each a frame, one after the other on one worker).
+static void gfx_parse_job(void *arg)
+{
+    struct hle_t::HleGfxSlot *s = (struct hle_t::HleGfxSlot *)arg;
+    H64System *sys = s->sys;
+    int fullSync = 0, mustSync = 0, ran;
+    u64 t0 = h64_prof_now(sys);
+    ran = h64_gfx_parse_task(sys, sys->hle->gfx, s->out, &fullSync, &mustSync);
+    sys->prof[H64_PROF_GFX_PARSE] += h64_prof_now(sys) - t0;
+    s->ran = ran;
+    s->fullSync = fullSync;
+    s->mustSync = mustSync;
+}
+
+// Worker job 2: the rendering, which may still run after the task ended.
+static void gfx_render_job(void *arg)
+{
+    struct hle_t::HleGfxSlot *s = (struct hle_t::HleGfxSlot *)arg;
+    H64System *sys = s->sys;
+    u64 t0;
+    if (s->parseOnSecond) sys->asyncParseWaitTicket(sys->asyncUser, s->parseTicket, 1);
+    if (!s->ran) return;   // fell back to LLE: nothing to draw
+    t0 = h64_prof_now(sys);
+    h64_gfx_render(sys, sys->hle->gfx, s->out);
+    sys->prof[H64_PROF_GFX_HLE] += h64_prof_now(sys) - t0;
+}
+
+void h64_hle_async_wait(H64System *sys)
+{
+    // Every queued job (presents too): the renderer is the worker's until then.
+    if (sys->asyncWait)
+    {
+        u64 t0 = h64_prof_now(sys);
+        sys->asyncWait(sys->asyncUser);
+        sys->prof[H64_PROF_ASYNC_WAIT] += h64_prof_now(sys) - t0;
+    }
+}
+
+int h64_hle_idle(H64System *sys)
+{
+    struct hle_t *hle = sys->hle;
+    return !hle || (!hle->gfxAsyncPending && !hle->audioAsyncPending);
+}
+
+static void audio_async_job(void *arg)
+{
+    H64System *sys = (H64System *)arg;
+    struct hle_t *hle = sys->hle;
+    u64 t0 = h64_prof_now(sys);
+    hle->audioAsyncFunc(hle);
+    sys->prof[H64_PROF_AUDIO_HLE] += h64_prof_now(sys) - t0;
+}
+
+int h64_hle_async_finish(H64System *sys, int *ran, int *fullSync, u32 *statusBits)
+{
+    struct hle_t *hle = sys->hle;
+    if (!hle) return 0;
+    if (hle->audioAsyncPending)
+    {
+        u64 t0 = h64_prof_now(sys);
+        if (sys->asyncAudioWait) sys->asyncAudioWait(sys->asyncUser);
+        sys->prof[H64_PROF_ASYNC_WAIT] += h64_prof_now(sys) - t0;
+        hle->audioAsyncPending = 0;
+        *fullSync = 0;
+        *statusBits = hle->sp_status;
+        *ran = !hle->forwarded;
+        // RDRAM written by the task: the recompiler hears of it here, on the CPU thread.
+        if (*ran) hle_notify_dirty(sys, hle);
+        hle->dirtyCount = 0;
+        return 2;
+    }
+    if (!hle->gfxAsyncPending) return 0;
+    {
+        // The task ends once its display list ran; its rendering may go on,
+        // except when it reads a colour image as a texture.
+        struct hle_t::HleGfxSlot *s = hle->gfxCur;
+        u64 t0 = h64_prof_now(sys);
+        if (sys->options.gfxLateParse && hle->gfxGuessValid && s->parseOnSecond)
+        {
+            // Late parse: the task ends now with the last task's flags; its
+            // parse is waited for when the next task starts (a whole frame
+            // later instead of gfxCycles: Conker's CPU waited ~7 ms a frame).
+            hle->gfxLate = s;
+            hle->gfxAsyncPending = 0;
+            *ran = 1;
+            *fullSync = hle->gfxGuessFullSync;
+            return 1;
+        }
+        if (s->parseOnSecond) sys->asyncParseWaitTicket(sys->asyncUser, s->parseTicket, 0);
+        else sys->asyncWaitTicket(sys->asyncUser, s->parseTicket);
+        if (s->mustSync || !s->ran) sys->asyncWaitTicket(sys->asyncUser, s->renderTicket);
+        sys->prof[H64_PROF_ASYNC_WAIT] += h64_prof_now(sys) - t0;
+        sys->prof[H64_PROF_WAIT_TASK] += h64_prof_now(sys) - t0;
+        hle->gfxAsyncPending = 0;
+        *ran = s->ran;
+        *fullSync = s->fullSync;
+        if (s->ran)
+        {
+            hle->gfxGuessValid = 1;
+            hle->gfxGuessFullSync = s->fullSync;
+        }
+    }
+    return 1;
+}
+
+// A streamed task's part parsed on the CPU thread (Gauntlet Legends, profile
+// gfxStream): with the graphics worker its lists and the snapshot their loads
+// read go to a slot rendered there, in order, while the CPU goes on.
+static void stream_submit(H64System *sys)
+{
+    struct hle_t *hle = sys->hle;
+    struct hle_t::HleGfxSlot *s = &hle->gfxSlot[hle->gfxSlotNext];
+    int mustSync;
+    hle->gfxSlotNext ^= 1;
+    if (!s->out) s->out = h64_gfx_out_create();
+    if (s->used)
+    {
+        // Its part from two submits ago must be drawn: its buffers are reused.
+        u64 t0 = h64_prof_now(sys);
+        sys->asyncWaitTicket(sys->asyncUser, s->renderTicket);
+        sys->prof[H64_PROF_WAIT_START] += h64_prof_now(sys) - t0;
+    }
+    s->sys = sys;
+    s->used = 1;
+    s->ran = 1;
+    s->fullSync = s->mustSync = 0;
+    s->parseOnSecond = 0;
+    mustSync = h64_gfx_package(sys, hle->gfx, s->out);
+    s->renderTicket = sys->asyncStart(sys->asyncUser, gfx_render_job, s);
+    if (mustSync) h64_hle_async_wait(sys);
+}
+
+int h64_hle_stream_poll(H64System *sys, u32 *busyCycles, int *dpInterrupt)
+{
+    struct hle_t *hle = sys->hle;
+    int fullSync = 0, r;
+    u64 t0;
+    if (!hle || !hle->gfx || !h64_gfx_stream_waiting(hle->gfx)) return 0;
+    t0 = h64_prof_now(sys);
+    if (sys->asyncStart) h64_gfx_set_no_flush(hle->gfx, 1);
+    r = h64_gfx_stream_resume(sys, hle->gfx, &fullSync);
+    if (sys->asyncStart)
+    {
+        h64_gfx_set_no_flush(hle->gfx, 0);
+        if (r > 0) stream_submit(sys);
+    }
+    sys->prof[H64_PROF_GFX_HLE] += h64_prof_now(sys) - t0;
+    hle->streamFullSync |= fullSync;
+    if (r < 0 || (r > 0 && h64_gfx_stream_waiting(hle->gfx)))
+    {
+        *busyCycles = H64_HLE_STREAM_POLL;
+        return 1;
+    }
+    *dpInterrupt = hle->streamFullSync;
+    hle->streamFullSync = 0;
+    return 0;
+}
+
+u32 h64_hle_gfx_cost(H64System *sys)
+{
+    struct hle_t *hle = sys->hle;
+    if (!hle || !hle->gfx || !sys->options.gfxTiming) return 0;
+    return h64_gfx_cost(hle->gfx);
+}
+
+int h64_hle_gfx_measure(H64System *sys, u32 *verts, u32 *tris, u32 *commands)
+{
+    struct hle_t *hle = sys->hle;
+    if (!hle || !is_task(hle) || *dmem_u32(hle, TASK_TYPE) != 1) return 0;
+    if (!hle->gfx) hle->gfx = h64_gfx_create(sys);
+    if (!h64_gfx_task_known(sys, hle->gfx)) return 0;
+    return h64_gfx_measure(sys, hle->gfx, verts, tris, commands);
+}
+
+int h64_hle_resume(H64System *sys, int *dpInterrupt)
+{
+    struct hle_t *hle = sys->hle;
+    int fullSync = 0;
+    u64 t0 = h64_prof_now(sys);
+    *dpInterrupt = 0;
+    if (!hle || !hle->gfx) return 1;
+    h64_gfx_resume(sys, hle->gfx, &fullSync);
+    sys->prof[H64_PROF_GFX_HLE] += h64_prof_now(sys) - t0;
+    if (h64_gfx_waiting(hle->gfx))
+    {
+        if (fullSync) h64_rdp_hle_full_sync(sys);
+        return 0;
+    }
+    *dpInterrupt = fullSync;
+    return 1;
+}
+
+int h64_hle_try_task(H64System *sys, u32 *statusBits, u32 *busyCycles, int *dpInterrupt)
+{
+    struct hle_t *hle = sys->hle;
+    uint32_t uc_start, uc_dstart, uc_dsize;
+    struct cached_ucodes_t *cached_ucodes;
+    struct ucode_info_t *info = NULL;
+    int i, match = 0;
+
+    *dpInterrupt = 0;
+    if (!hle || !(sys->options.hleAudio || sys->options.hleAudioCheck || sys->options.hleGfx))
+        return 0;
+    // A task always starts at the boot microcode (osSpTaskStartGo sets PC 0).
+    if (sys->rsp.pc != 0)
+        return 0;
+
+    if (is_task(hle) && *dmem_u32(hle, TASK_TYPE) == 1 && sys->options.hleGfx)
+    {
+        // Resident Evil 2's picture and movie tasks (graphics type, no
+        // display list): run here, as mupen64plus-rsp-hle does.
+        hle->dirtyLo = hle->dirtyHi = 0;
+        hle->dirtyCount = 0;
+        if (h64_hle_re2_task(hle, *dmem_u32(hle, TASK_UCODE), *dmem_u32(hle, TASK_UCODE_DATA)))
+        {
+            hle_notify_dirty(sys, hle);
+            *statusBits = SP_STATUS_TASKDONE | SP_STATUS_BROKE | SP_STATUS_HALT;
+            *busyCycles = H64_HLE_GFX_CYCLES;
+            return 1;
+        }
+    }
+    if (is_task(hle) && *dmem_u32(hle, TASK_TYPE) == 1)
+    {
+        int fullSync = 0;
+        if (!sys->options.hleGfx)
+            return 0;
+        if (!hle->gfx) hle->gfx = h64_gfx_create(sys);
+        if (h64_gfx_task_sync(sys, hle->gfx))
+        {
+            // Boss's ZSort waits for the CPU inside its tasks: run here, on the
+            // CPU thread (after the workers), in parts.
+            u64 t0;
+            h64_hle_async_wait(sys);
+            t0 = h64_prof_now(sys);
+            if (!h64_gfx_run_task(sys, hle->gfx, &fullSync)) return 0;
+            sys->prof[H64_PROF_GFX_HLE] += h64_prof_now(sys) - t0;
+            *statusBits = SP_STATUS_TASKDONE | SP_STATUS_BROKE | SP_STATUS_HALT;
+            *busyCycles = H64_HLE_GFX_CYCLES;
+            if (h64_gfx_waiting(hle->gfx))
+            {
+                sys->rsp.hleWait = 1;
+                if (fullSync) h64_rdp_hle_full_sync(sys);
+            }
+            else *dpInterrupt = fullSync;
+            return 1;
+        }
+        if (sys->asyncStart && !sys->options.gfxStream)
+        {
+            // On the worker: the CPU goes on; the task ends (or falls back
+            // to LLE) after asyncGfxCycles, where the CPU waits for it.
+            if (!h64_gfx_task_known(sys, hle->gfx)) return 0;
+            struct hle_t::HleGfxSlot *s;
+            if (hle->gfxLate)
+            {
+                // The previous task ended before its parse (late parse): done now,
+                // and what it really ended with checked against the guess.
+                struct hle_t::HleGfxSlot *l = hle->gfxLate;
+                u64 t0 = h64_prof_now(sys);
+                sys->asyncParseWaitTicket(sys->asyncUser, l->parseTicket, 0);
+                sys->prof[H64_PROF_ASYNC_WAIT] += h64_prof_now(sys) - t0;
+                sys->prof[H64_PROF_WAIT_TASK] += h64_prof_now(sys) - t0;
+                hle->gfxLate = 0;
+                if (!l->ran || l->fullSync != hle->gfxGuessFullSync)
+                {
+                    if (hle->gfxGuessWarned++ < 8)
+                        H64_WARN("[hle] late parse: the task ended as if %s, it %s (frame %u)",
+                                 hle->gfxGuessFullSync ? "with a full sync" : "without a full sync",
+                                 !l->ran ? "fell back to the LLE RSP" : l->fullSync ? "had a full sync" : "had none", sys->vi.frames);
+                    hle->gfxGuessValid = 0;   // the next task ends the normal way
+                }
+            }
+            s = &hle->gfxSlot[hle->gfxSlotNext];
+            hle->gfxSlotNext ^= 1;
+            if (!s->out) s->out = h64_gfx_out_create();
+            {
+                // The slot's previous task (two tasks ago) must be rendered:
+                // its lists and snapshot are reused. The previous task may
+                // still render while this one is parsed.
+                u64 t0 = h64_prof_now(sys);
+                if (s->used) sys->asyncWaitTicket(sys->asyncUser, s->renderTicket);
+                if (!sys->asyncParseStart) h64_hle_async_wait(sys);   // one worker: in order anyway
+                sys->prof[H64_PROF_WAIT_START] += h64_prof_now(sys) - t0;
+            }
+            s->sys = sys;
+            s->used = 1;
+            s->ran = s->fullSync = s->mustSync = 0;
+            s->parseOnSecond = sys->asyncParseStart != NULL && sys->asyncParseWaitTicket != NULL;
+            hle->gfxCur = s;
+            hle->gfxAsyncPending = 1;
+            if (s->parseOnSecond) s->parseTicket = sys->asyncParseStart(sys->asyncUser, gfx_parse_job, s);
+            else s->parseTicket = sys->asyncStart(sys->asyncUser, gfx_parse_job, s);
+            s->renderTicket = sys->asyncStart(sys->asyncUser, gfx_render_job, s);
+            *statusBits = SP_STATUS_TASKDONE | SP_STATUS_BROKE | SP_STATUS_HALT;
+            *busyCycles = sys->asyncGfxCycles ? sys->asyncGfxCycles : H64_HLE_GFX_CYCLES;
+            if (sys->options.gfxShortTask && *busyCycles > H64_HLE_GFX_CYCLES) *busyCycles = H64_HLE_GFX_CYCLES;
+            return 1;
+        }
+        u64 t0 = h64_prof_now(sys);
+        int ran, deferred = sys->asyncStart && sys->options.gfxStream;
+        // Profile gfxStream with the graphics worker: parsed here (the list is
+        // written while it runs), drawn there (stream_submit).
+        if (deferred) h64_gfx_set_no_flush(hle->gfx, 1);
+        ran = h64_gfx_run_task(sys, hle->gfx, &fullSync);
+        if (deferred)
+        {
+            h64_gfx_set_no_flush(hle->gfx, 0);
+            if (ran) stream_submit(sys);
+        }
+        sys->prof[H64_PROF_GFX_HLE] += h64_prof_now(sys) - t0;
+        if (!ran)
+            return 0;
+        *statusBits = SP_STATUS_TASKDONE | SP_STATUS_BROKE | SP_STATUS_HALT;
+        *busyCycles = H64_HLE_GFX_CYCLES;
+        if (h64_hle_gfx_cost(sys) > *busyCycles) *busyCycles = h64_hle_gfx_cost(sys);
+        *dpInterrupt = fullSync;
+        if (h64_gfx_stream_waiting(hle->gfx))
+        {
+            // Waits for the CPU to write more of the list (h64_hle_stream_poll).
+            hle->streamFullSync = fullSync;
+            *dpInterrupt = 0;
+            *busyCycles = H64_HLE_STREAM_POLL;
+        }
+        return 1;
+    }
+    if (!(sys->options.hleAudio || sys->options.hleAudioCheck))
+        return 0;
+
+    uc_start = *dmem_u32(hle, TASK_UCODE);
+    uc_dstart = *dmem_u32(hle, TASK_UCODE_DATA);
+    uc_dsize = *dmem_u32(hle, TASK_UCODE_DATA_SIZE);
+
+    cached_ucodes = &hle->cached_ucodes;
+    for (i = 0; i < cached_ucodes->count; i++)
+    {
+        info = &cached_ucodes->infos[i];
+        if (info->uc_start == uc_start && info->uc_dstart == uc_dstart && info->uc_dsize == (uint16_t)uc_dsize)
+        {
+            match = 1;
+            break;
+        }
+    }
+    if (!match)
+    {
+        if (cached_ucodes->count >= CACHED_UCODES_MAX_SIZE)
+            cached_ucodes->count = 0;
+        info = &cached_ucodes->infos[cached_ucodes->count++];
+        info->uc_start = uc_start;
+        info->uc_dstart = uc_dstart;
+        info->uc_dsize = (uint16_t)uc_dsize;
+        info->uc_pfunc = task_detection(hle);
+    }
+
+    hle->forwarded = 0;
+    hle->sp_status = 0;
+    hle->dirtyLo = hle->dirtyHi = 0;
+    hle->dirtyCount = 0;
+    if (sys->asyncAudioStart && !sys->options.hleAudioCheck && info->uc_pfunc != &forward_task)
+    {
+        // On the audio worker; the end (status bits, RDRAM output) is taken at
+        // the end of the busy time, where the CPU waits for it.
+        hle->audioAsyncPending = 1;
+        hle->audioAsyncFunc = info->uc_pfunc;
+        sys->asyncAudioStart(sys->asyncUser, audio_async_job, sys);
+        *statusBits = 0;
+        *busyCycles = sys->asyncAudioCycles ? sys->asyncAudioCycles : H64_HLE_AUDIO_CYCLES;
+        return 1;
+    }
+    if (sys->options.hleAudioCheck)
+    {
+        // Run the HLE on a copy of RDRAM, then let the LLE run the task.
+        if (!hle->checkRam) hle->checkRam = (u8 *)malloc(H64_RDRAM_SIZE);
+        if (!hle->checkMask) hle->checkMask = (u8 *)calloc(1, H64_RDRAM_SIZE);
+        if (!hle->checkRam || !hle->checkMask) return 0;
+        if (hle->checkPending) h64_hle_check_end(sys);
+        if (hle->checkHi > hle->checkLo) memset(hle->checkMask + hle->checkLo, 0, hle->checkHi - hle->checkLo);
+        memcpy(hle->checkRam, sys->rdram, H64_RDRAM_SIZE);
+        hle->dram = hle->checkRam;
+        info->uc_pfunc(hle);
+        hle->dram = sys->rdram;
+        if (!hle->forwarded && hle->dirtyHi > hle->dirtyLo)
+        {
+            hle->checkPending = 1;
+            hle->checkLo = hle->dirtyLo;
+            hle->checkHi = hle->dirtyHi;
+        }
+        return 0;
+    }
+    {
+        u64 t0 = h64_prof_now(sys);
+        info->uc_pfunc(hle);
+        sys->prof[H64_PROF_AUDIO_HLE] += h64_prof_now(sys) - t0;
+    }
+    if (hle->forwarded)
+        return 0;
+
+    hle_notify_dirty(sys, hle);
+    *statusBits = hle->sp_status;
+    *busyCycles = H64_HLE_AUDIO_CYCLES;
+    return 1;
+}
