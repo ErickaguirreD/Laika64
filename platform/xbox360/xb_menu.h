@@ -19,9 +19,15 @@ struct UiMenu
     int page;                      // UI_PAGE_*: how UiMenuDraw shows it
     unsigned char icon[UI_MENU_MAX];   // UI_ICON_*: a small white symbol left of the label (0: none)
 };
-enum { UI_PAGE_LIST = 0, UI_PAGE_CONTROLS, UI_PAGE_VOLUME, UI_PAGE_CALIB };
+enum { UI_PAGE_LIST = 0, UI_PAGE_CONTROLS, UI_PAGE_VOLUME, UI_PAGE_CALIB, UI_PAGE_FX, UI_PAGE_WALL, UI_PAGE_BORDER };
 enum { UI_ICON_NONE = 0, UI_ICON_SYSTEM, UI_ICON_GRAPHICS, UI_ICON_SCREEN, UI_ICON_SOUND, UI_ICON_CONTROLS,
-       UI_ICON_INTERFACE, UI_ICON_SAVE };
+       UI_ICON_INTERFACE, UI_ICON_SAVE, UI_ICON_PLAY, UI_ICON_STATES, UI_ICON_GEAR, UI_ICON_RESET, UI_ICON_LIST,
+       UI_ICON_POWER, UI_ICON_SLOT, UI_ICON_LOAD, UI_ICON_BATTERY, UI_ICON_SLIDERS, UI_ICON_TEXTURE, UI_ICON_HD,
+       UI_ICON_SMOOTH, UI_ICON_SHARP, UI_ICON_BLUR, UI_ICON_CHART, UI_ICON_STRETCH, UI_ICON_CROSSHAIR, UI_ICON_SUN,
+       UI_ICON_VSYNC, UI_ICON_EYE, UI_ICON_SCANLINES, UI_ICON_FRAME, UI_ICON_ARROWS_H, UI_ICON_ARROWS_V, UI_ICON_CLOCK,
+       UI_ICON_PALETTE, UI_ICON_GLOBE, UI_ICON_LAYOUT, UI_ICON_MUSIC, UI_ICON_SPEAKERS, UI_ICON_PLUS, UI_ICON_TRASH };
+// Sets the icons of a menu's rows in order (n of them, from row 0).
+void UiMenuIcons(UiMenu *m, const unsigned char *icons, int n);
 
 void UiMenuClear(UiMenu *m, const char *title, const char *footer);
 int UiMenuAdd(UiMenu *m, const char *label, const char *value);   // returns the item's index
@@ -32,9 +38,14 @@ void UiMenuDraw(const UiMenu *m);   // between UiBegin and UiEnd
 void UiMenuThumb(const UiMenu *m, IDirect3DTexture9 *tex, const char *emptyText);
 // Up/down move the selection (wrapping).
 void UiMenuNavigate(UiMenu *m, WORD down);
+// A button was pressed on the selected row: its highlight shows it for a moment.
+void UiMenuPress(void);
+// A yes/no question over what is drawn (the in-game menu's): `title` (T_*, -1:
+// none), the question and its prompts, centred. Between UiBegin and UiEnd.
+void UiConfirmDraw(int title, int question, int footer);
 
 // ---- Settings (cpu, hle, audio margin, FPS display, the Graphics and Controls pages) ----
-enum { SET_NONE = 0, SET_CHANGED, SET_BACK, SET_SAVE_ALL, SET_SAVE_GAME, SET_ART_ASK, SET_LANGUAGE, SET_PREVIEW };
+enum { SET_NONE = 0, SET_CHANGED, SET_BACK, SET_SAVE_ALL, SET_SAVE_GAME, SET_ART_ASK, SET_LANGUAGE, SET_PREVIEW, SET_SAVER };
 // Fills the menu from *c; `perGame` adds "Save for this game".
 void SettingsBuild(UiMenu *m, const Config *c, int perGame);
 // Applies one input to *c and the menu; returns SET_*. The Language row

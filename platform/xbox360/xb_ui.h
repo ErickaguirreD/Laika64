@@ -23,7 +23,7 @@
 #define UI_SAFE_X 64
 #define UI_SAFE_Y 36
 
-// ---- Palette: dark neutrals and one accent (harissa red) ----
+// ---- Palette: dark neutrals and one accent (light blue) ----
 #define UI_COL_BG_TOP     D3DCOLOR_ARGB(255, 18, 19, 26)
 #define UI_COL_BG_BOTTOM  D3DCOLOR_ARGB(255, 10, 11, 15)
 #define UI_COL_PANEL      D3DCOLOR_ARGB(179, 27, 29, 38)   // 70% opaque: every menu panel lets the background show through
@@ -33,9 +33,9 @@
 #define UI_COL_TEXT       D3DCOLOR_ARGB(255, 243, 244, 247)
 #define UI_COL_TEXT2      D3DCOLOR_ARGB(255, 164, 168, 182)
 #define UI_COL_TEXT3      D3DCOLOR_ARGB(255, 112, 116, 132)
-#define UI_COL_ACCENT     D3DCOLOR_ARGB(255, 234, 76, 58)
-#define UI_COL_ACCENT_HI  D3DCOLOR_ARGB(255, 255, 112, 84)
-#define UI_COL_SELECT     D3DCOLOR_ARGB(64, 234, 76, 58)
+#define UI_COL_ACCENT     D3DCOLOR_ARGB(255, 70, 160, 240)    // light blue, like the selection's ring (was harissa red)
+#define UI_COL_ACCENT_HI  D3DCOLOR_ARGB(255, 120, 205, 255)
+#define UI_COL_SELECT     D3DCOLOR_ARGB(64, 70, 160, 240)
 #define UI_COL_SHADOW     D3DCOLOR_ARGB(150, 0, 0, 0)
 #define UI_COL_DIM        D3DCOLOR_ARGB(150, 4, 5, 8)
 
@@ -59,13 +59,23 @@ void UiRoundRing(float x, float y, float w, float h, float r, float thick, D3DCO
 // A soft shadow of a rounded rectangle, `blur` pixels wide.
 void UiShadow(float x, float y, float w, float h, float r, float blur, D3DCOLOR color);
 void UiCircle(float cx, float cy, float r, D3DCOLOR color);
+// An anti-aliased segment `thick` pixels wide (square ends: polylines join cleanly).
+void UiLine(float x0, float y0, float x1, float y1, float thick, D3DCOLOR color);
+// A slanted strip from x0 to x1, its top and bottom at the heights given at
+// each end; top colour ct, bottom cb (a slice of a wave).
+void UiStrip(float x0, float top0, float bot0, float x1, float top1, float bot1, D3DCOLOR ct, D3DCOLOR cb);
 // Full-screen backdrop of the menus (gradient and a warm glow), or a skin's
 // background.png over the whole screen when one is set (see UiSetSkinWant).
 void UiBackdrop(void);
 // The translucent veil over the frozen game frame.
 void UiDim(void);
-// A panel: shadow, translucent body, a fine light edge.
+// A panel: shadow, translucent body, a fine light edge (as UiSetPanelStyle says).
 void UiPanel(float x, float y, float w, float h, float r);
+// The panels' look: the edge's colour (its alpha too) and width (0: none),
+// the body's opacity in percent, a factor on every panel's corner radius.
+void UiSetPanelStyle(D3DCOLOR edge, float edgeWidth, int bodyPercent, float roundness);
+// A panel's corner radius `r` as the panels are drawn now.
+float UiPanelRadius(float r);
 // `c` with its alpha multiplied by `a` (0..1): fades.
 D3DCOLOR UiAlpha(D3DCOLOR c, float a);
 
@@ -92,6 +102,9 @@ float UiText(int font, float size, float x, float cy, D3DCOLOR color, const char
 // The same with a soft drop shadow under it.
 float UiTextShadowed(int font, float size, float x, float cy, D3DCOLOR color, const char *text, int align);
 float UiTextWidth(int font, float size, const char *text);
+// `in` in capitals (ASCII, Latin-1 accented letters, Cyrillic); a letter whose
+// capital the atlas lacks stays as it is (no '?'). Arabic has no case.
+void UiUpper(int font, const char *in, char *out, int size);
 // Copies `text` into `out`, cut with an ellipsis to fit `maxW` pixels.
 void UiTextFit(int font, float size, float maxW, const char *text, char *out, int outSize);
 // Word-wraps `text` into `out` ("\n" between lines) to fit `maxW`; at most
@@ -109,6 +122,41 @@ float UiLogo(float x, float y, float size);
 // and vertical middle, `size` the old title's size (the logo is 1.9x as
 // high). Returns the width.
 float UiBrand(float x, float cy, float size);
+
+// ---- Wallpapers (game:\wallpapers\<folder>\, over a skin's background) ----
+// The transitions between two wallpapers (Config::wallTransition).
+enum { UI_TRANS_FADE = 0, UI_TRANS_SLIDE, UI_TRANS_ZOOM, UI_TRANS_WIPE, UI_TRANS_BLINDS, UI_TRANS_RANDOM, UI_TRANS_COUNT };
+// How a wallpaper is laid out (Config::wallFit): filling the screen (cut to
+// fit), all of it inside the screen, stretched to it, at its own size in the
+// middle, repeated as tiles.
+enum { UI_FIT_FILL = 0, UI_FIT_FIT, UI_FIT_STRETCH, UI_FIT_CENTER, UI_FIT_TILE, UI_FIT_COUNT };
+// The pictures UiBackdrop shows: `folder` "" for none, anything else for
+// those of game:\wallpapers\ and its folders; `pick` the one to show (a name
+// from UiWallpaperName; "": the first), then the others in turn, each for
+// `seconds` (0: never changes), darkened by `dim` percent, laid out by `fit`,
+// in name order or at random (shuffle). Cheap to call every frame: the folder
+// is read again only when the choice changes (or after UiWallpaperRescan).
+void UiSetWallpapers(const char *folder, const char *pick, int seconds, int transition, int dim, int fit, int shuffle);
+// The i-th picture's name ("pic.jpg", "folder\pic.jpg"; "" past the end), and a name's place (-1: not there).
+const char *UiWallpaperName(int i);
+int UiWallpaperFind(const char *name);
+// The wallpaper shown now over the whole screen (kenBurns: slowly zooming in,
+// the screen saver's); 0 when there is none.
+int UiWallpaperDraw(int kenBurns);
+// How many pictures the wallpapers have to show (0: none, or they are off).
+int UiWallpaperCount(void);
+// Read the wallpapers folder again (the settings page opening: pictures may have been copied in).
+void UiWallpaperRescan(void);
+// The backdrop's wallpaper as it is now (layout, transition, darkening) in a
+// box at the screen's proportions; 0 when there is none.
+int UiWallpaperPreview(float x, float y, float w, float h);
+// The wallpaper shown now in a small box at the screen's proportions, laid
+// out by `fit` (the settings' previews); 0 when there is none.
+int UiWallpaperThumb(float x, float y, float w, float h, int fit);
+// 1 when `name` is a picture the wallpapers can show (.jpg, .jpeg, .png, .bmp).
+int UiWallpaperIsImage(const char *name);
+// Part (u0..u1, v0..v1, 0..1) of a picture stretched over (x, y, w, h).
+void UiImagePart(IDirect3DTexture9 *tex, float x, float y, float w, float h, float u0, float v0, float u1, float v1, D3DCOLOR color);
 
 // ---- Skins (background.png override - see xb_menu.h SkinScan) ----
 // Remembers which skin's background UiBackdrop should show ("": none,

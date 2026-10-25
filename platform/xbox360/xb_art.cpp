@@ -742,6 +742,25 @@ void ArtBulkStart(const char *const *paths, int count, int retry)
     LeaveCriticalSection(&s_lock);
 }
 
+int ArtReadInfo(const char *romPath, H64GameInfo *info)
+{
+    H64Rom rom;
+    char key[16], path[128];
+    u8 *data;
+    u32 len;
+    int ok;
+    h64_gameinfo_clear(info);
+    // Its own header read and file read: nothing of the worker's is touched.
+    if (!s_started || !RomReadHeader(romPath, &rom)) return 0;
+    h64_gameinfo_key(rom.gameCode, rom.crc1, key);
+    h64_rom_free(&rom);
+    art_path(key, "txt", path, sizeof(path));
+    if (!file_read(path, &data, &len, 64 * 1024)) return 0;
+    ok = h64_gameinfo_parse(info, (const char *)data, len) && info->found;
+    free(data);
+    return ok;
+}
+
 void ArtGetStatus(ArtStatus *s)
 {
     if (!s_started) { memset(s, 0, sizeof(*s)); return; }

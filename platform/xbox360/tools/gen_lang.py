@@ -237,12 +237,35 @@ def main():
             "settings": [("SYSTEM", [], 1), ("GRAPHICS", [], 1), ("SCREEN", [], 1), ("SOUND", [], 1),
                          ("CONTROLS", [t["CUSTOM"], t["DEFAULT"]], 0),
                          ("INTERFACE", [], 1), ("SAVE_ALL", [], 1), ("SAVE_GAME", [], 1)],
+            "categories": [("CAT_NEW", [], 1), ("CAT_FIELD", [t[k] for k in ("CAT_GENRE", "CAT_REGION", "CAT_PLAYERS", "CAT_DEVELOPER",
+                                                                                 "CAT_PUBLISHER", "CAT_YEAR")], 1),
+                           # a value is cut to 260 pixels (catedit_values)
+                           ("CAT_VALUE", [t["CAT_NO_DATA"], "W" * 11], 1), ("CAT_SAVE", [], 1), ("CAT_DELETE", [], 1)],
             "interface": [("DESIGN", [t["DESIGN_DETAILED"], t["DESIGN_COVERS"], t["DESIGN_BIG"], t["DESIGN_CAROUSEL"]], 1), ("SKINS", [t["SKIN_NONE"]], 1),
-                          ("LANGUAGE", names, 1), ("ART_DOWNLOADS", onoff, 1)],
+                          ("BG_EFFECT", [t[k] for k in ("OFF", "FX_WAVES", "FX_PULSE", "FX_RAIN", "FX_VORTEX", "FX_RIPPLES", "FX_SILK",
+                                                        "FX_EMBERS", "FX_GRID", "FX_UNDERWATER", "FX_ENERGY", "FX_AURORA",
+                                                        "FX_LIQUID", "FX_PARTICLES", "FX_SMOKE", "FX_XMB", "FX_PS4_FLOW",
+                                                        "FX_PS4_BOKEH",
+                                 "FX_NEBULA", "FX_FIRE_DUST", "FX_LAVA", "FX_PRISM", "FX_TOPO", "FX_HEX", "FX_SPIRAL", "FX_INK", "FX_HOLO", "FX_FRACTAL", "FX_BURST", "FX_WARP")], 1),
+                          ("LANGUAGE", names, 1), ("ART_DOWNLOADS", onoff, 1),
+                          ("SEL_COLOR", [t[k] for k in ("COL_BLUE", "COL_RED", "COL_ORANGE", "COL_YELLOW", "COL_GREEN", "COL_TEAL",
+                                                        "COL_PURPLE", "COL_PINK", "COL_WHITE")], 1),
+                          # a folder's name is cut to 230 pixels (settings_values)
+                          ("WALLPAPERS", [t["OFF"], t["WALL_NONE_FOUND"], "W" * 6 + " (99/99)"], 1),
+                          ("SAVER", [t[k] for k in ("OFF", "BG_EFFECT", "WALLPAPERS", "SAVER_LOGO", "SAVER_CLOCK")], 1),
+                          ("BORDERS", [], 1)],
+            "saver": [("SAVER_MODE", [t[k] for k in ("OFF", "BG_EFFECT", "WALLPAPERS", "SAVER_LOGO", "SAVER_CLOCK")], 1),
+                      ("SAVER_TIME", ["30 min"], 1), ("SAVER_PREVIEW", [], 1)],
             "system": [("CPU_NEXT", [t["RECOMPILER"], t["INTERPRETER"]], 1), ("RSP_NEXT", ["HLE"], 1),
                        ("PAD_LOSS", [t["OFF"], t["PAD_LOSS_SAVE"], t["PAD_LOSS_PAUSE"]], 1), ("AUTOSAVE_SLOT", ["9"], 1),
-                       ("BATTERY_WARN", [t["OFF"], "50%"], 1)],
-            "sound": [("VOLUME", [], 1), ("AUDIO_MARGIN", ["500 ms"], 1)],
+                       ("BATTERY_WARN", [t["OFF"], "50%"], 1),
+                       # a game's name is cut to 230 pixels (start_rom_text)
+                       ("START_ROM", [t["OFF"], t["START_LAST"], "W" * 10], 1)],
+            "sound": [("VOLUME", [], 1), ("AUDIO_MARGIN", ["500 ms"], 1), ("UI_SOUNDS", onoff, 1),
+                      ("SFX_STYLE", [t[k] for k in ("STYLE_GLASS", "STYLE_SOFT", "STYLE_RETRO", "STYLE_DIGITAL")], 1),
+                      # a track's name is cut to 220 pixels (settings_values)
+                      ("MUSIC", [t["MUSIC_ORDER"], t["MUSIC_RANDOM"], t["MUSIC_NONE"], "W" * 9], 1),
+                      ("AUDIO_OUTPUT", [t["AUDIO_STEREO"], t["AUDIO_MONO"]], 1)],
             "graphics": [("PRESET", [t["PRESET_ORIGINAL"], t["PRESET_ENHANCED"], t["PRESET_SMOOTH"], t["PRESET_CRT"], t["CUSTOM"]], 1),
                          ("TEXFILTER", [t["FILTER_3POINT"], t["FILTER_BILINEAR"], t["FILTER_NEAREST"]], 1), ("FXAA", onoff, 1),
                          ("SHARPEN", [t["OFF"], t["LOW"], t["HIGH"]], 1), ("BLUR", [t["OFF"], t["SOFT"], t["STRONG"]], 1),
@@ -255,21 +278,53 @@ def main():
                       ("RESET_GAME", [], 1), ("BACK_TO_LIST", [], 1), ("QUIT_DASHBOARD", [], 1)],
             "states": [("STATE_SLOT", ["9", "9 · " + t["AUTO_TAG"]], 1), ("LOAD_STATE", [], 1), ("SAVE_STATE", [], 1)],
         }
-        # UiMenuDraw: the 690-pixel side bar, labels 66 pixels in (102 on the main Settings page, after
-        # the symbols), values 40 from the right, some room between.
+        # UiMenuDraw: the 690-pixel side bar, labels 102 pixels in (after the rows' symbols), values 40
+        # from the right, some room between; the page's title centred under the logo, in capitals.
         for menu, rows in menus.items():
             for key, values, chev in rows:
                 lw = width(t[key], 22, True)
                 vw = max([value_width(v) if chev else width(v, 21, False) for v in values] + [0])
-                check(code, "%s row %s with its widest value" % (menu, key), lw + vw + (24 if values else 0),
-                      690 - (102 if menu == "settings" else 66) - 40)
+                check(code, "%s row %s with its widest value" % (menu, key), lw + vw + (24 if values else 0), 690 - 102 - 40)
         for key in ("SETTINGS", "GRAPHICS", "SCREEN", "PIC_CAL", "SOUND", "SYSTEM", "CONTROLS", "PAUSED", "INTERFACE", "SKINS",
-                    "VOLUME", "STATES"):
-            check(code, "title " + key, width(t[key], 30, True), 660 - 80)
+                    "VOLUME", "STATES", "WALLPAPERS", "SAVER", "BORDERS"):
+            check(code, "title " + key + " in capitals", width(t[key].upper(), 30, True), 690 - 80)
         # Volumen page (volume_draw): each bar's label and its own "100%" at
         # the row's two ends, 660 - 2*44 wide.
-        for key in ("VOLUME_GAME", "VOLUME_MUSIC"):
+        for key in ("VOLUME_GAME", "VOLUME_MUSIC", "UI_SOUNDS"):
             check(code, "volume row " + key, width(t[key], 20, True) + width("100%", 20, True) + 24, 660 - 88)
+        # Background effect page (fxpage_draw): a 600-pixel panel, each row's label at
+        # its left (20, bold) and its value or "100%" at its right, 600 - 2*44 wide.
+        fxvals = [t[k] for k in ("OFF", "FX_WAVES", "FX_PULSE", "FX_RAIN", "FX_VORTEX", "FX_RIPPLES", "FX_SILK", "FX_EMBERS",
+                                 "FX_GRID", "FX_UNDERWATER", "FX_ENERGY", "FX_AURORA", "FX_LIQUID", "FX_PARTICLES",
+                                 "FX_SMOKE", "FX_XMB", "FX_PS4_FLOW", "FX_PS4_BOKEH",
+                                 "FX_NEBULA", "FX_FIRE_DUST", "FX_LAVA", "FX_PRISM", "FX_TOPO", "FX_HEX", "FX_SPIRAL", "FX_INK", "FX_HOLO", "FX_FRACTAL", "FX_BURST", "FX_WARP")]
+        check(code, "effect page row FX_EFFECT", width(t["FX_EFFECT"], 20, True) + max(width(v, 20, True) for v in fxvals) + 60, 600 - 88)
+        for key, values in (("FX_COLOR", [t["FX_ORIGINAL"], t["OFF"]]), ("FX_OPACITY", ["200%"]), ("FX_SPEED", ["300%"]), ("FX_RESET", [])):
+            check(code, "effect page row " + key, width(t[key].replace("%d", "3"), 20, True) + max([width(v, 20, True) for v in values] + [0]) + 24, 600 - 88)
+        check(code, "title BG_EFFECT in capitals", width(t["BG_EFFECT"].upper(), 30, True), 600 - 80)
+        # Wallpapers and Borders pages (wallpage_draw, borderpage_draw): the same
+        # 600-pixel panel, a row's label (20, bold) and its "< value >" at its ends.
+        def chev(v):
+            return width("< " + v + " >", 20, True)
+        panel_rows = [
+            # a picture's name and "(99/99)" are cut to 300 pixels (wall_choice_text)
+            ("WALL_CUSTOM", [t["OFF"], t["WALL_NONE_FOUND"], "W" * 11 + " (99/99)"]),
+            ("WALL_FIT", [t[k] for k in ("FIT_FILL", "FIT_FIT", "FIT_STRETCH", "FIT_CENTER", "FIT_TILE")]),
+            ("WALL_INTERVAL", ["10 min", t["WALL_NEVER"]]),
+            ("WALL_TRANSITION", [t[k] for k in ("TR_FADE", "TR_SLIDE", "TR_ZOOM", "TR_WIPE", "TR_BLINDS", "TR_RANDOM")]),
+            ("WALL_ORDER", [t["ORDER_NAME"], t["ORDER_RANDOM"]]),
+            ("BORDER_WIDTH", [t["OFF"], "4 px"]),
+            ("BORDER_GLOW", [t["GLOW_PULSE"], t["GLOW_STEADY"], t["OFF"]]),
+            ("PANEL_CORNERS", [t[k] for k in ("CORNER_SQUARE", "CORNER_SOFT", "CORNER_ROUND", "CORNER_ROUNDER")]),
+        ]
+        for key, values in panel_rows:
+            check(code, "panel row " + key, width(t[key], 20, True) + max(chev(v) for v in values) + 24, 600 - 88)
+        # the wallpapers' preview: its hints wrapped in 3 lines of the 578-pixel box less 60
+        for key in ("WALL_HINT", "WALL_OFF_HINT"):
+            check(code, key + " in 3 lines", width(t[key], 19, False), 3 * (578 - 60) * 0.9)
+        check(code, "panel row BORDER_COLOR", width(t["BORDER_COLOR"], 20, True) + width(t["COL_SELECTION"], 19, False) + 24, 600 - 88)
+        for key in ("WALL_DIM", "BORDER_OPACITY", "PANEL_OPACITY"):
+            check(code, "panel bar " + key, width(t[key], 20, True) + width("100%", 20, True) + 24, 600 - 88)
         for key in ("FOOT_SELECT", "FOOT_PAUSED"):
             check(code, key, footer_width(t[key]), 660 - 80)
         # Controls page: 352-pixel columns, text 24 in, prompts 18 from the right.
@@ -353,11 +408,15 @@ def main():
         check(code, "QUIT_TITLE", width(t["QUIT_TITLE"], 30, True), 1000)
         check(code, "QUIT_ASK", width(t["QUIT_ASK"], 22, False), 1000)
         check(code, "ART_ASK", width(t["ART_ASK"], 30, True), 1000)
+        check(code, "LIST_ASK", width(t["LIST_ASK"], 30, True), 1000)
+        check(code, "RESET_ASK", width(t["RESET_ASK"], 30, True), 1000)
+        check(code, "FOOT_RESET_ASK", footer_width(t["FOOT_RESET_ASK"]), 1000)
         # The States page's empty picture box (UiMenuThumb: 4:3, about 315 wide under 3 rows).
         check(code, "NO_STATE in the empty picture box", width(t["NO_STATE"] % 9, 18, False), 300)
         check(code, "FOOT_ART_ASK", footer_width(t["FOOT_ART_ASK"]), 640 - 96)
-        check(code, "FOOT_BROWSER and the box art progress", footer_width(t["FOOT_BROWSER"]) + 40 + width(t["ART_PROGRESS"] % (888, 888), 17, False) + 16 + 150,
-              1280 - 128)
+        check(code, "FOOT_BROWSER", footer_width(t["FOOT_BROWSER"]), 1280 - 128)
+        # The box art progress: at the tab row's right end (300 pixels), text then a 120-pixel bar.
+        check(code, "ART_PROGRESS and its bar", width(t["ART_PROGRESS"] % (888, 888), 17, False) + 16 + 120, 300)
         check(code, "DOWNLOADING", width(t["DOWNLOADING"], 15, False), 300)
         check(code, "GAME_CODE", width(t["GAME_CODE"], 13, True), 90)
         check(code, "SIZE", width(t["SIZE"], 13, True), 70)
@@ -369,7 +428,11 @@ def main():
         for key in ("COPY_ROMS", "INTO_ROMS"):
             check(code, key, width(t[key], 21, False), 540)
         check(code, "WIKI_TEXT", width(t["WIKI_TEXT"], 13, False), 520)
-        for key in ("UPDATE_AVAILABLE", "ART_DONE_LOST", "AUTOSAVED", "PAD_UNPLUGGED", "SLOT_RESERVED", "BATTERY_LOW", "STATE_SAVED", "STATE_WRITE_FAILED", "NO_STATE",
+        # The ROM list's empty tab (browser_draw: the list panel, 556 wide).
+        check(code, "CAT_EMPTY", width(t["CAT_EMPTY"], 24, True), 520)
+        for key in ("FAV_HINT", "CAT_HINT"):
+            check(code, key, width(t[key], 19, False), 540)
+        for key in ("UPDATE_AVAILABLE", "ART_DONE_LOST", "AUTOSAVED", "PAD_UNPLUGGED", "SLOT_RESERVED", "BATTERY_LOW", "FAV_ADDED", "FAV_REMOVED", "STATE_SAVED", "STATE_WRITE_FAILED", "NO_STATE",
                     "STATE_LOAD_FAILED", "STATE_LOADED", "KEEP_HOLDING", "NOT_SAVED_SCRIPT", "SAVED_ALL", "SAVED_GAME",
                     "SETTINGS_WRITE_FAILED", "GAME_RESET", "SCREENSHOT_SAVED", "SCREENSHOT_FAILED"):
             check(code, "toast " + key, width(t[key], 21, False) + 72, 1280 - 128)

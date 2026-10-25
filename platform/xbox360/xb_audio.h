@@ -33,14 +33,50 @@ int xb_audio_queued_ms(void);
 struct XbAudioStats { u32 buffers, underruns, fillMs, ratioPermille, playedHz, submittedHz, dropped; };
 void xb_audio_stats(XbAudioStats *out, int reset);
 
-// ---- Menu music (skins - see xb_menu.h SkinScan) ----
-// Loads and loops game:\skins\<skinName>\music.wav (PCM, 16-bit, mono or
-// stereo) on its own XAudio2 voice, independent of the game's. Empty name,
-// a missing file or an unsupported WAV just stop whatever was playing.
-// Needs xb_audio_init() already called (the ROM browser calls it once,
-// before any skin music; a game's own xb_audio_init call is then a no-op).
-int xb_audio_music_play(const char *skinName);
+// ---- Menu music (game:\music\) ----
+// The .mp3 and .wav (PCM 16-bit, mono or stereo) files of `folder`, on their
+// own XAudio2 voice, independent of the game's: in name order or at random,
+// one after the other (xb_audio_music_tick, called by every menu loop through
+// UiInputPoll, moves on when a track ends), or one chosen track over and
+// over. No tracks, or an empty folder name, just stop whatever was playing.
+// Needs xb_audio_init() already called (the ROM browser calls it once; a
+// game's own xb_audio_init call is then a no-op). A call that changes nothing
+// (same folder, mode and track, still playing) keeps the music going.
+enum { XB_MUSIC_ORDER = 0, XB_MUSIC_RANDOM, XB_MUSIC_TRACK, XB_MUSIC_OFF };   // OFF: no music at all
+int xb_audio_music_start(const char *folder, int mode, const char *track);
+void xb_audio_music_tick(void);
 void xb_audio_music_stop(void);
+// The folder's tracks, for the menu: their number (sorted by name), each one's file name.
+int xb_audio_music_scan(const char *folder);
+const char *xb_audio_music_track(int i);
+
+// ---- Interface sounds (Settings > Sound > Interface sounds) ----
+// Short tones made here (no sound files), a different one per kind of press,
+// in the spirit of the console's own menus. Played on their own voices, at
+// their own volume (xb_audio_set_sfx_volume); nothing happens before
+// xb_audio_init or when off.
+enum { XB_SFX_MOVE = 0, XB_SFX_SELECT, XB_SFX_BACK, XB_SFX_ACTION, XB_SFX_PAGE, XB_SFX_OPEN,
+       XB_SFX_TAB,        // the ROM list's tabs (LT/RT)
+       XB_SFX_VALUE_UP,   // a setting moved on (right) ...
+       XB_SFX_VALUE_DOWN, // ... or back (left)
+       XB_SFX_FAV_ON,     // a game into the favourites ...
+       XB_SFX_FAV_OFF,    // ... and out
+       XB_SFX_LAUNCH,     // a game starts
+       XB_SFX_SAVE,       // settings saved
+       XB_SFX_NOTIFY,     // a message (an update, box art, the battery)
+       XB_SFX_ERROR,      // something that cannot be done
+       XB_SFX_SAVER,      // the screen saver comes on
+       XB_SFX_COUNT };
+// The sounds' style (Settings > Sound > Sound style): glass (the first ones),
+// soft, retro (8-bit square waves), digital.
+enum { XB_SFX_STYLE_GLASS = 0, XB_SFX_STYLE_SOFT, XB_SFX_STYLE_RETRO, XB_SFX_STYLE_DIGITAL, XB_SFX_STYLE_COUNT };
+void xb_audio_ui_sound(int kind);
+// The same in place of the sound a press started a moment ago (UiInputPoll
+// plays one per button: B's "back" becomes "out of the favourites").
+void xb_audio_ui_sound_instead(int kind);
+void xb_audio_ui_enable(int on);
+// Every sound made again in another style (the next sound plays in it).
+void xb_audio_ui_style(int style);
 
 // ---- Volume (Settings > Volumen) ----
 // 0..100, applied at once to whichever voice is live and remembered for the
@@ -48,5 +84,9 @@ void xb_audio_music_stop(void);
 // create_voice - and the music voice every time xb_audio_music_play runs).
 void xb_audio_set_game_volume(int percent);
 void xb_audio_set_music_volume(int percent);
+void xb_audio_set_sfx_volume(int percent);   // the interface sounds
+// Settings > Sound > Audio output: 1 mixes the game's and the music's two
+// channels into both speakers (mono), 0 keeps them apart (stereo).
+void xb_audio_set_mono(int on);
 
 #endif

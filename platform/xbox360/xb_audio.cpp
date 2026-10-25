@@ -19,7 +19,7 @@
 
 #include "../../core/common/h64_log.h"
 
-// minimp3 (public domain, see third_party/minimp3) - skin music in .mp3.
+// minimp3 (public domain, see third_party/minimp3) - the menu music's .mp3 tracks (game:\music\).
 // MINIMP3_NO_STDIO: its own file-loading functions pull in <windows.h> and
 // POSIX mmap headers this console's XDK doesn't have; this file never calls
 // them anyway (mp3dec_load_buf decodes a buffer this file already read with
@@ -51,7 +51,30 @@ static int s_playing;
 static float s_ratio, s_ratioApplied;
 static u64 s_periodFrames;   // frames submitted since the last stats reset
 static float s_gameVolume = 1.0f;   // Settings > Volumen - reapplied to each new game voice (create_voice)
-static float s_musicVolume = 1.0f;  // reapplied to each new music voice (xb_audio_music_play)
+static float s_musicVolume = 1.0f;  // reapplied to each new music voice (music_play_file)
+static float s_sfxVolume = 1.0f;    // the interface sounds (xb_audio_ui_sound)
+static int s_mono;                  // Settings > Sound > Audio output: mono
+
+// A stereo voice's way to the speakers: its two channels apart (stereo) or
+// mixed into both (mono). The mastering voice may have more channels than
+// two (5.1): only its front left and right get anything.
+static void apply_output_matrix(IXAudio2SourceVoice *v, int sourceChannels)
+{
+    XAUDIO2_VOICE_DETAILS md;
+    float m[2 * 8];
+    int d;
+    if (!v || !s_master || sourceChannels != 2) return;
+    s_master->GetVoiceDetails(&md);
+    if (md.InputChannels < 2 || md.InputChannels > 8) return;
+    memset(m, 0, sizeof(m));
+    for (d = 0; d < 2; d++)
+    {
+        // pLevelMatrix[SourceChannels * d + s]: source channel s into destination channel d.
+        m[2 * d + 0] = s_mono ? 0.5f : (d == 0 ? 1.0f : 0.0f);
+        m[2 * d + 1] = s_mono ? 0.5f : (d == 1 ? 1.0f : 0.0f);
+    }
+    v->SetOutputMatrix(NULL, 2, md.InputChannels, m);
+}
 
 int xb_audio_init(void)
 {
@@ -83,11 +106,13 @@ static void destroy_voice(void)
 }
 
 static void music_stop_internal(void);
+static void sfx_stop_internal(void);
 
 void xb_audio_shutdown(void)
 {
     destroy_voice();
     music_stop_internal();
+    sfx_stop_internal();
     if (s_master) { s_master->DestroyVoice(); s_master = NULL; }
     if (s_xa) { s_xa->Release(); s_xa = NULL; }
 }
@@ -112,6 +137,7 @@ static int create_voice(u32 rate)
         return -1;
     }
     s_voice->SetVolume(s_gameVolume);
+    apply_output_matrix(s_voice, 2);
     // Not started: playback begins once START_MS is queued.
     s_rate = rate;
     s_framesSubmitted = 0;
@@ -236,13 +262,18 @@ int xb_audio_target_ms(void) { return s_targetMs; }
 
 // ---- Menu music (skins) ----
 // A second, independent source voice on the same mastering voice as the
-// game's (see xb_audio_init/game_stop above) - looping game:\skins\<name>\
-// music.wav. WAV is always little-endian; the console's PowerPC core is
-// big-endian, so every multi-byte field is read one byte at a time (never
-// through a pointer cast).
+// game's (see xb_audio_init/game_stop above) - the tracks of game:\music\
+// (.wav or .mp3) one after the other, round and round (xb_audio_music_tick
+// moves on when one ends; a single track just loops). WAV is always
+// little-endian; the console's PowerPC core is big-endian, so every
+// multi-byte field is read one byte at a time (never through a pointer cast).
+#define MUSIC_MAX_TRACKS 64
 static IXAudio2SourceVoice *s_musicVoice;
-static u8 *s_musicData;         // the whole file, kept alive while the voice reads from it
-static char s_musicSkin[64];    // which skin's music is loaded now ("": none)
+static u8 *s_musicData;         // the whole track, kept alive while the voice reads from it
+static char s_musicFolder[96];  // the folder playing now ("": none)
+static char s_musicTracks[MUSIC_MAX_TRACKS][96];   // its tracks' file names, sorted
+static int s_musicCount, s_musicIndex, s_musicMode;
+static char s_musicPick[96];    // XB_MUSIC_TRACK: the track chosen
 
 static u32 rd_le32(const u8 *p) { return (u32)p[0] | (u32)p[1] << 8 | (u32)p[2] << 16 | (u32)p[3] << 24; }
 static u16 rd_le16(const u8 *p) { return (u16)((u32)p[0] | (u32)p[1] << 8); }
@@ -280,7 +311,7 @@ static int wav_parse(const u8 *buf, u32 size, WavInfo *out)
     return haveFmt && haveData ? 0 : -1;
 }
 
-static void music_stop_internal(void)
+static void music_voice_stop(void)
 {
     if (s_musicVoice)
     {
@@ -291,46 +322,46 @@ static void music_stop_internal(void)
     }
     free(s_musicData);
     s_musicData = NULL;
-    s_musicSkin[0] = 0;
+}
+
+static void music_stop_internal(void)
+{
+    music_voice_stop();
+    s_musicFolder[0] = 0;
+    s_musicCount = 0;
 }
 
 void xb_audio_music_stop(void) { music_stop_internal(); }
 
-// Tries music.wav first (the original, still the simplest choice for a
-// skin), then music.mp3 (minimp3, see the include above) - whichever the
-// skin actually has. Either way the result ends up in s_musicData as plain
-// PCM16 ready for XAudio2, at (pcmData, pcmBytes), rate and channels.
-int xb_audio_music_play(const char *skinName)
+static int ends_with(const char *s, const char *ext)
 {
-    char path[160];
+    size_t n = strlen(s), e = strlen(ext);
+    return n > e && !_stricmp(s + n - e, ext);
+}
+
+// One track (.wav, or .mp3 through minimp3 - see the include above) on a
+// fresh voice: decoded into s_musicData as plain PCM16 ready for XAudio2, at
+// (pcmData, pcmBytes), rate and channels. `loop`: round and round (a folder
+// of one track); otherwise it plays once and xb_audio_music_tick moves on.
+static int music_play_file(const char *path, int loop)
+{
     FILE *f;
     long size;
     u8 *fileData;
-    int isMp3 = 0;
+    int isMp3 = ends_with(path, ".mp3");
     WAVEFORMATEX wf;
     XAUDIO2_BUFFER b;
     const void *pcmData;
     u32 pcmBytes, rate;
     int channels;
 
-    if (!skinName || !skinName[0]) { music_stop_internal(); return 0; }
-    if (!strcmp(skinName, s_musicSkin) && s_musicVoice) return 0;   // already playing it
     if (!s_xa || !s_master) return -1;
-    _snprintf(path, sizeof(path) - 1, "game:\\skins\\%s\\music.wav", skinName);
-    path[sizeof(path) - 1] = 0;
     f = fopen(path, "rb");
-    if (!f)
-    {
-        _snprintf(path, sizeof(path) - 1, "game:\\skins\\%s\\music.mp3", skinName);
-        path[sizeof(path) - 1] = 0;
-        f = fopen(path, "rb");
-        isMp3 = 1;
-    }
-    if (!f) { music_stop_internal(); return -1; }
+    if (!f) return -1;
     fseek(f, 0, SEEK_END);
     size = ftell(f);
     fseek(f, 0, SEEK_SET);
-    if (size <= 0 || size > 32 * 1024 * 1024) { fclose(f); music_stop_internal(); return -1; }
+    if (size <= 0 || size > 32 * 1024 * 1024) { fclose(f); return -1; }
     fileData = (u8 *)malloc((size_t)size);
     if (!fileData || fread(fileData, 1, (size_t)size, f) != (size_t)size)
     {
@@ -339,7 +370,7 @@ int xb_audio_music_play(const char *skinName)
         return -1;
     }
     fclose(f);
-    music_stop_internal();   // the new file read fine - now drop whatever was playing
+    music_voice_stop();   // the new file read fine - now drop whatever was playing
 
     if (isMp3)
     {
@@ -353,7 +384,7 @@ int xb_audio_music_play(const char *skinName)
         if (mp3dec_load_buf(&dec, fileData, (size_t)size, &info, NULL, NULL) || !info.buffer || !info.samples ||
             (info.channels != 1 && info.channels != 2))
         {
-            H64_WARN("[audio] skin music %s: MP3 decode failed", path);
+            H64_WARN("[audio] music %s: MP3 decode failed", path);
             free(fileData);
             free(info.buffer);
             return -1;
@@ -371,7 +402,7 @@ int xb_audio_music_play(const char *skinName)
         if (wav_parse(fileData, (u32)size, &wav) || wav.format != 1 /* PCM */ || wav.bits != 16 ||
             (wav.channels != 1 && wav.channels != 2))
         {
-            H64_WARN("[audio] skin music %s: not a supported WAV (PCM 16-bit mono/stereo)", path);
+            H64_WARN("[audio] music %s: not a supported WAV (PCM 16-bit mono/stereo)", path);
             free(fileData);
             return -1;
         }
@@ -406,23 +437,110 @@ int xb_audio_music_play(const char *skinName)
     wf.nAvgBytesPerSec = rate * wf.nBlockAlign;
     if (FAILED(s_xa->CreateSourceVoice(&s_musicVoice, &wf, 0, XAUDIO2_DEFAULT_FREQ_RATIO, NULL, NULL, NULL)))
     {
-        H64_ERROR("[audio] skin music %s: CreateSourceVoice failed", path);
+        H64_ERROR("[audio] music %s: CreateSourceVoice failed", path);
         free(s_musicData);
         s_musicData = NULL;
         s_musicVoice = NULL;
         return -1;
     }
     s_musicVoice->SetVolume(s_musicVolume);
+    apply_output_matrix(s_musicVoice, channels);
     memset(&b, 0, sizeof(b));
     b.AudioBytes = pcmBytes;
     b.pAudioData = (const BYTE *)pcmData;
-    b.LoopCount = XAUDIO2_LOOP_INFINITE;   // LoopBegin/LoopLength left 0: loops the whole buffer
+    if (loop) b.LoopCount = XAUDIO2_LOOP_INFINITE;   // LoopBegin/LoopLength left 0: loops the whole buffer
+    else b.Flags = XAUDIO2_END_OF_STREAM;
     s_musicVoice->SubmitSourceBuffer(&b, NULL);
     s_musicVoice->Start(0, XAUDIO2_COMMIT_NOW);
-    strncpy(s_musicSkin, skinName, sizeof(s_musicSkin) - 1);
-    s_musicSkin[sizeof(s_musicSkin) - 1] = 0;
-    H64_INFO("[audio] skin music: %s (%u Hz, %d ch)", path, rate, channels);
+    H64_INFO("[audio] music: %s (%u Hz, %d ch)", path, rate, channels);
     return 0;
+}
+
+// The next track that plays (past any that cannot be played): the following
+// one in name order, a different one at random, or the chosen one again.
+static void music_next(void)
+{
+    int tries;
+    for (tries = 0; tries < s_musicCount; tries++)
+    {
+        char path[200];
+        if (s_musicMode == XB_MUSIC_RANDOM && s_musicCount > 1)
+        {
+            int k = rand() % (s_musicCount - 1);
+            s_musicIndex = s_musicIndex < 0 || k < s_musicIndex ? k : k + 1;   // never the same one twice in a row
+        }
+        else if (s_musicMode != XB_MUSIC_TRACK || s_musicIndex < 0) s_musicIndex = (s_musicIndex + 1) % s_musicCount;
+        _snprintf(path, sizeof(path) - 1, "%s\\%s", s_musicFolder, s_musicTracks[s_musicIndex]);
+        path[sizeof(path) - 1] = 0;
+        if (!music_play_file(path, s_musicCount == 1 || s_musicMode == XB_MUSIC_TRACK)) return;
+        if (s_musicMode == XB_MUSIC_TRACK) s_musicMode = XB_MUSIC_ORDER;   // the chosen one does not play: the others instead
+    }
+    music_voice_stop();   // none of them plays
+}
+
+static int track_cmp(const void *a, const void *b) { return _stricmp((const char *)a, (const char *)b); }
+
+int xb_audio_music_scan(const char *folder)
+{
+    WIN32_FIND_DATAA fd;
+    HANDLE h;
+    char pattern[128];
+    s_musicCount = 0;
+    if (!folder || !folder[0]) return 0;
+    _snprintf(pattern, sizeof(pattern) - 1, "%s\\*", folder);
+    pattern[sizeof(pattern) - 1] = 0;
+    h = FindFirstFileA(pattern, &fd);
+    if (h != INVALID_HANDLE_VALUE)
+    {
+        do
+        {
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || s_musicCount >= MUSIC_MAX_TRACKS) continue;
+            if (!ends_with(fd.cFileName, ".mp3") && !ends_with(fd.cFileName, ".wav")) continue;
+            strncpy(s_musicTracks[s_musicCount], fd.cFileName, sizeof(s_musicTracks[0]) - 1);
+            s_musicTracks[s_musicCount][sizeof(s_musicTracks[0]) - 1] = 0;
+            s_musicCount++;
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+    qsort(s_musicTracks, s_musicCount, sizeof(s_musicTracks[0]), track_cmp);
+    return s_musicCount;
+}
+
+const char *xb_audio_music_track(int i) { return i >= 0 && i < s_musicCount ? s_musicTracks[i] : ""; }
+
+int xb_audio_music_start(const char *folder, int mode, const char *track)
+{
+    int i;
+    if (!track) track = "";
+    if (!folder || !folder[0] || mode == XB_MUSIC_OFF) { music_stop_internal(); return 0; }
+    if (s_musicVoice && !strcmp(folder, s_musicFolder) && mode == s_musicMode && (mode != XB_MUSIC_TRACK || !_stricmp(track, s_musicPick)))
+        return 0;   // already playing that
+    if (!s_xa || !s_master) return -1;
+    music_stop_internal();
+    if (!xb_audio_music_scan(folder)) { H64_INFO("[audio] music: no .mp3/.wav in %s", folder); return -1; }
+    strncpy(s_musicFolder, folder, sizeof(s_musicFolder) - 1);
+    s_musicFolder[sizeof(s_musicFolder) - 1] = 0;
+    strncpy(s_musicPick, track, sizeof(s_musicPick) - 1);
+    s_musicPick[sizeof(s_musicPick) - 1] = 0;
+    s_musicMode = mode;
+    s_musicIndex = -1;
+    if (mode == XB_MUSIC_TRACK)
+    {
+        for (i = 0; i < s_musicCount; i++)
+            if (!_stricmp(s_musicTracks[i], track)) s_musicIndex = i;
+        if (s_musicIndex < 0) s_musicMode = XB_MUSIC_ORDER;   // gone from the folder: in order instead
+    }
+    else if (mode == XB_MUSIC_RANDOM) srand(GetTickCount());
+    music_next();
+    return s_musicVoice ? 0 : -1;
+}
+
+void xb_audio_music_tick(void)
+{
+    XAUDIO2_VOICE_STATE st;
+    if (!s_musicVoice || s_musicCount < 2 || s_musicMode == XB_MUSIC_TRACK) return;
+    s_musicVoice->GetState(&st);
+    if (!st.BuffersQueued) music_next();   // the track ended
 }
 
 static float volume_from_percent(int percent)
@@ -443,3 +561,237 @@ void xb_audio_set_music_volume(int percent)
     s_musicVolume = volume_from_percent(percent);
     if (s_musicVoice) s_musicVoice->SetVolume(s_musicVolume);
 }
+
+void xb_audio_set_sfx_volume(int percent) { s_sfxVolume = volume_from_percent(percent); }
+
+void xb_audio_set_mono(int on)
+{
+    XAUDIO2_VOICE_DETAILS d;
+    s_mono = on ? 1 : 0;
+    apply_output_matrix(s_voice, 2);
+    if (s_musicVoice)
+    {
+        s_musicVoice->GetVoiceDetails(&d);
+        apply_output_matrix(s_musicVoice, (int)d.InputChannels);
+    }
+}
+
+// ---- Interface sounds ----
+// Each one is a few sine partials with a soft attack and an exponential
+// decay (a short, clean "glass" tone), mixed into a mono 48 kHz buffer once,
+// the first time a sound is wanted. Native 16-bit PCM (big-endian here, as
+// the game's buffers). Four voices take turns, so quick presses overlap
+// instead of cutting each other.
+#define SFX_RATE 48000
+#define SFX_VOICES 4
+#define SFX_GAIN 0.55f   // under the interface music's volume
+
+static s16 *s_sfx[XB_SFX_COUNT];
+static u32 s_sfxLen[XB_SFX_COUNT];
+static IXAudio2SourceVoice *s_sfxVoice[SFX_VOICES];
+static int s_sfxNext, s_sfxOn = 1, s_sfxStyle, s_sfxLastVoice = -1;
+static DWORD s_sfxLastAt;
+
+// Each style's pitch, length and loudness against the glass sounds'.
+static const float s_styleFreq[XB_SFX_STYLE_COUNT] = { 1.0f, 0.55f, 0.75f, 1.35f };
+static const float s_styleTime[XB_SFX_STYLE_COUNT] = { 1.0f, 1.6f, 1.15f, 0.55f };
+static const float s_styleAmp[XB_SFX_STYLE_COUNT] = { 1.0f, 0.95f, 0.42f, 0.8f };
+
+// Adds one partial to `buf`: from `t0` ms, `f0` gliding to `f1` Hz over `ms`,
+// `amp` at most, rising in `attack` ms then dying away with time constant `tau` ms.
+// The style sets its wave (sine; a softer sine; square; triangle) and scales
+// its pitch, times and loudness.
+static void sfx_tone(float *buf, u32 len, float t0, float ms, float f0, float f1, float amp, float attack, float tau)
+{
+    const float kf = s_styleFreq[s_sfxStyle], kt = s_styleTime[s_sfxStyle];
+    u32 start, n, i;
+    double phase = 0;
+    t0 *= kt; ms *= kt; tau *= kt; f0 *= kf; f1 *= kf;
+    amp *= s_styleAmp[s_sfxStyle];
+    if (s_sfxStyle == XB_SFX_STYLE_SOFT) attack *= 3.0f;
+    start = (u32)(t0 * SFX_RATE / 1000.0f);
+    n = (u32)(ms * SFX_RATE / 1000.0f);
+    for (i = 0; i < n && start + i < len; i++)
+    {
+        float t = i * 1000.0f / SFX_RATE, f = f0 + (f1 - f0) * (i / (float)n), w;
+        float env = (t < attack ? t / attack : 1.0f) * expf(-t / tau);
+        phase += 2.0 * 3.14159265358979 * f / SFX_RATE;
+        w = (float)sin(phase);
+        if (s_sfxStyle == XB_SFX_STYLE_RETRO) w = w >= 0 ? 1.0f : -1.0f;
+        else if (s_sfxStyle == XB_SFX_STYLE_DIGITAL) w = (float)(asin(w) * 0.63661977);   // a triangle
+        buf[start + i] += amp * env * w;
+    }
+}
+
+static void sfx_make(void)
+{
+    static const float lengthMs[XB_SFX_COUNT] = { 40, 190, 120, 90, 80, 300, 130, 50, 50, 260, 190, 600, 330, 420, 230, 650 };
+    int k;
+    for (k = 0; k < XB_SFX_COUNT; k++)
+    {
+        u32 len = (u32)(lengthMs[k] * s_styleTime[s_sfxStyle] * SFX_RATE / 1000.0f), i;
+        float *mix = (float *)calloc(len, sizeof(float));
+        if (!mix) return;
+        switch (k)
+        {
+        case XB_SFX_MOVE:     // a soft, high tick
+            sfx_tone(mix, len, 0, 40, 2300, 2050, 0.30f, 0.8f, 7);
+            sfx_tone(mix, len, 0, 40, 4600, 4100, 0.06f, 0.8f, 5);
+            break;
+        case XB_SFX_SELECT:   // two rising notes (C6, G6), glassy
+            sfx_tone(mix, len, 0, 90, 1046.5f, 1046.5f, 0.34f, 2, 35);
+            sfx_tone(mix, len, 0, 90, 3139.5f, 3139.5f, 0.05f, 2, 20);
+            sfx_tone(mix, len, 45, 145, 1568.0f, 1568.0f, 0.36f, 2, 45);
+            sfx_tone(mix, len, 45, 145, 4704.0f, 4704.0f, 0.05f, 2, 25);
+            break;
+        case XB_SFX_BACK:     // falling, a little lower and softer
+            sfx_tone(mix, len, 0, 120, 880, 587, 0.32f, 2, 45);
+            sfx_tone(mix, len, 0, 120, 1760, 1174, 0.06f, 2, 30);
+            break;
+        case XB_SFX_ACTION:   // a round "pop" (X, Y)
+            sfx_tone(mix, len, 0, 90, 1318.5f, 1240, 0.32f, 1.5f, 28);
+            sfx_tone(mix, len, 0, 90, 1975.5f, 1975.5f, 0.10f, 1.5f, 18);
+            break;
+        case XB_SFX_PAGE:     // a quick upward sweep (LB, RB)
+            sfx_tone(mix, len, 0, 80, 650, 1700, 0.24f, 4, 30);
+            sfx_tone(mix, len, 0, 80, 1300, 3400, 0.05f, 4, 20);
+            break;
+        case XB_SFX_TAB:      // a swoosh and a light second note
+            sfx_tone(mix, len, 0, 70, 900, 1400, 0.22f, 3, 30);
+            sfx_tone(mix, len, 45, 85, 1864.7f, 1864.7f, 0.20f, 2, 30);
+            break;
+        case XB_SFX_VALUE_UP:   // a short tick going up ...
+            sfx_tone(mix, len, 0, 50, 1500, 1900, 0.26f, 0.8f, 14);
+            break;
+        case XB_SFX_VALUE_DOWN: // ... and going down
+            sfx_tone(mix, len, 0, 50, 1500, 1150, 0.26f, 0.8f, 14);
+            break;
+        case XB_SFX_FAV_ON:   // a sparkle: three quick high notes (E6, G6, C7)
+            sfx_tone(mix, len, 0, 120, 1318.5f, 1318.5f, 0.22f, 1.5f, 40);
+            sfx_tone(mix, len, 40, 130, 1568.0f, 1568.0f, 0.22f, 1.5f, 45);
+            sfx_tone(mix, len, 80, 180, 2093.0f, 2093.0f, 0.26f, 1.5f, 60);
+            sfx_tone(mix, len, 80, 180, 4186.0f, 4186.0f, 0.04f, 1.5f, 40);
+            break;
+        case XB_SFX_FAV_OFF:  // two notes falling (G6, C6)
+            sfx_tone(mix, len, 0, 90, 1568.0f, 1568.0f, 0.24f, 2, 35);
+            sfx_tone(mix, len, 60, 130, 1046.5f, 1046.5f, 0.26f, 2, 50);
+            break;
+        case XB_SFX_LAUNCH:   // a rising sweep into a bright chord (C6, E6, G6)
+            sfx_tone(mix, len, 0, 260, 400, 1600, 0.18f, 10, 200);
+            sfx_tone(mix, len, 200, 400, 1046.5f, 1046.5f, 0.18f, 3, 140);
+            sfx_tone(mix, len, 200, 400, 1318.5f, 1318.5f, 0.16f, 3, 140);
+            sfx_tone(mix, len, 200, 400, 1568.0f, 1568.0f, 0.16f, 3, 150);
+            sfx_tone(mix, len, 200, 300, 3136.0f, 3136.0f, 0.04f, 3, 80);
+            break;
+        case XB_SFX_SAVE:     // a confirmation: G5 then a longer C6 with a shimmer
+            sfx_tone(mix, len, 0, 110, 784.0f, 784.0f, 0.26f, 2, 45);
+            sfx_tone(mix, len, 90, 240, 1046.5f, 1046.5f, 0.30f, 2, 90);
+            sfx_tone(mix, len, 90, 240, 2093.0f, 2093.0f, 0.06f, 2, 70);
+            break;
+        case XB_SFX_NOTIFY:   // a bell (A6 and its overtones)
+            sfx_tone(mix, len, 0, 420, 1760.0f, 1760.0f, 0.24f, 1, 130);
+            sfx_tone(mix, len, 0, 300, 3520.0f, 3520.0f, 0.07f, 1, 80);
+            sfx_tone(mix, len, 0, 200, 5280.0f, 5280.0f, 0.03f, 1, 50);
+            break;
+        case XB_SFX_ERROR:    // two low, slightly sour buzzes
+            sfx_tone(mix, len, 0, 90, 220, 210, 0.30f, 2, 60);
+            sfx_tone(mix, len, 0, 90, 233, 222, 0.22f, 2, 60);
+            sfx_tone(mix, len, 120, 110, 220, 205, 0.30f, 2, 60);
+            sfx_tone(mix, len, 120, 110, 233, 217, 0.22f, 2, 60);
+            break;
+        case XB_SFX_SAVER:    // a soft falling pad (G5 to C5, over E5)
+            sfx_tone(mix, len, 0, 650, 784, 523, 0.16f, 60, 260);
+            sfx_tone(mix, len, 0, 650, 659.3f, 659.3f, 0.10f, 80, 260);
+            break;
+        default:              // open (START): a bright arpeggio (G5, D6, G6)
+            sfx_tone(mix, len, 0, 300, 784.0f, 784.0f, 0.22f, 3, 90);
+            sfx_tone(mix, len, 35, 265, 1174.7f, 1174.7f, 0.22f, 3, 90);
+            sfx_tone(mix, len, 70, 230, 1568.0f, 1568.0f, 0.24f, 3, 100);
+            sfx_tone(mix, len, 70, 230, 3136.0f, 3136.0f, 0.04f, 3, 60);
+            break;
+        }
+        s_sfx[k] = (s16 *)malloc(len * sizeof(s16));
+        if (s_sfx[k])
+            for (i = 0; i < len; i++)
+            {
+                float v = mix[i];
+                if (i + 48 > len) v *= (len - i) / 48.0f;   // no click at the very end
+                v = v > 1.0f ? 1.0f : v < -1.0f ? -1.0f : v;
+                s_sfx[k][i] = (s16)(v * 32000.0f);
+            }
+        s_sfxLen[k] = s_sfx[k] ? len : 0;
+        free(mix);
+    }
+}
+
+static void sfx_stop_internal(void)
+{
+    int i;
+    for (i = 0; i < SFX_VOICES; i++)
+        if (s_sfxVoice[i])
+        {
+            s_sfxVoice[i]->Stop(0);
+            s_sfxVoice[i]->FlushSourceBuffers();
+            s_sfxVoice[i]->DestroyVoice();
+            s_sfxVoice[i] = NULL;
+        }
+}
+
+void xb_audio_ui_enable(int on) { s_sfxOn = on ? 1 : 0; }
+
+void xb_audio_ui_style(int style)
+{
+    int k;
+    if (style < 0 || style >= XB_SFX_STYLE_COUNT) style = 0;
+    if (style == s_sfxStyle && s_sfx[0]) return;
+    sfx_stop_internal();   // nothing may still play the buffers about to go
+    for (k = 0; k < XB_SFX_COUNT; k++)
+    {
+        free(s_sfx[k]);
+        s_sfx[k] = NULL;
+        s_sfxLen[k] = 0;
+    }
+    s_sfxStyle = style;
+    s_sfxLastVoice = -1;
+}
+
+static void sfx_play(int kind, int instead)
+{
+    IXAudio2SourceVoice **v;
+    XAUDIO2_BUFFER b;
+    if (!s_sfxOn || !s_xa || !s_master || kind < 0 || kind >= XB_SFX_COUNT || s_sfxVolume <= 0.0f) return;
+    if (!s_sfx[0]) sfx_make();
+    if (!s_sfx[kind]) return;
+    if (instead && s_sfxLastVoice >= 0 && GetTickCount() - s_sfxLastAt < 80) v = &s_sfxVoice[s_sfxLastVoice];   // over the press's own sound
+    else
+    {
+        s_sfxLastVoice = s_sfxNext;
+        v = &s_sfxVoice[s_sfxNext];
+        s_sfxNext = (s_sfxNext + 1) % SFX_VOICES;
+    }
+    s_sfxLastAt = GetTickCount();
+    if (!*v)
+    {
+        WAVEFORMATEX wf;
+        memset(&wf, 0, sizeof(wf));
+        wf.wFormatTag = WAVE_FORMAT_PCM;
+        wf.nChannels = 1;
+        wf.nSamplesPerSec = SFX_RATE;
+        wf.wBitsPerSample = 16;
+        wf.nBlockAlign = 2;
+        wf.nAvgBytesPerSec = SFX_RATE * 2;
+        if (FAILED(s_xa->CreateSourceVoice(v, &wf, 0, XAUDIO2_DEFAULT_FREQ_RATIO, NULL, NULL, NULL))) { *v = NULL; return; }
+    }
+    (*v)->Stop(0);
+    (*v)->FlushSourceBuffers();
+    memset(&b, 0, sizeof(b));
+    b.AudioBytes = s_sfxLen[kind] * 2;
+    b.pAudioData = (const BYTE *)s_sfx[kind];
+    b.Flags = XAUDIO2_END_OF_STREAM;
+    (*v)->SetVolume(SFX_GAIN * s_sfxVolume);
+    if (SUCCEEDED((*v)->SubmitSourceBuffer(&b, NULL))) (*v)->Start(0, XAUDIO2_COMMIT_NOW);
+}
+
+void xb_audio_ui_sound(int kind) { sfx_play(kind, 0); }
+
+void xb_audio_ui_sound_instead(int kind) { sfx_play(kind, 1); }

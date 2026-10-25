@@ -1,12 +1,14 @@
 // Harissa64 V2 - front-end menus (see xb_menu.h).
 #include "xb_menu.h"
 
+#include <ctype.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include <algorithm>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -60,8 +62,27 @@ static float anim_step(UiAnim *a, float target, int restart) { return anim_step_
 // (list rows, menus, the covers grid, the language cards); never quite gone,
 // so the selection stays easy to find.
 static float selection_pulse(void) { return 0.25f + 0.75f * (0.5f + 0.5f * sinf(UiTime() * 4.0f)); }
-#define SEL_RING(a) D3DCOLOR_ARGB((int)(255 * (a)), 120, 205, 255)
-#define SEL_GLOW(a) D3DCOLOR_ARGB((int)(150 * (a)), 90, 190, 255)
+// Its colour (Settings > Interface > Selection colour, Config::selColor): a
+// bright tone for the ring and the arrows, a deeper one for the glow and fill.
+#define SEL_COLORS 9
+static const unsigned char s_selColors[SEL_COLORS][2][3] = {
+    { { 120, 205, 255 }, { 90, 170, 240 } },    // light blue
+    { { 255, 120, 120 }, { 235, 70, 80 } },     // red
+    { { 255, 175, 95 }, { 240, 125, 45 } },     // orange
+    { { 255, 225, 110 }, { 225, 185, 40 } },    // yellow
+    { { 135, 240, 140 }, { 60, 200, 95 } },     // green
+    { { 110, 240, 220 }, { 40, 200, 180 } },    // teal
+    { { 195, 155, 255 }, { 145, 95, 240 } },    // purple
+    { { 255, 145, 210 }, { 235, 85, 170 } },    // pink
+    { { 245, 245, 250 }, { 185, 190, 205 } },   // white
+};
+static const int s_selLabels[SEL_COLORS] = { T_COL_BLUE, T_COL_RED, T_COL_ORANGE, T_COL_YELLOW, T_COL_GREEN, T_COL_TEAL, T_COL_PURPLE,
+                                             T_COL_PINK, T_COL_WHITE };
+static int s_sel;   // the colour in use (ui_from_config)
+#define SEL_HI(a) D3DCOLOR_ARGB((int)(a), s_selColors[s_sel][0][0], s_selColors[s_sel][0][1], s_selColors[s_sel][0][2])
+#define SEL_LO(a) D3DCOLOR_ARGB((int)(a), s_selColors[s_sel][1][0], s_selColors[s_sel][1][1], s_selColors[s_sel][1][2])
+#define SEL_RING(a) SEL_HI(255 * (a))
+#define SEL_GLOW(a) SEL_LO(150 * (a))
 
 // The pulsing outer glow around a selection's ring (the same on every border):
 // a wide soft halo and a brighter one close to the edge.
@@ -71,15 +92,53 @@ static void selection_glow(float x, float y, float w, float h, float r, float a)
     UiShadow(x, y, w, h, r, 14, SEL_GLOW(a));
 }
 
-// The selection highlight of a list row: a blue-tinted pill, its pulsing ring
-// and a bar on its left (on its right in a right-to-left menu).
+// A button press in a menu (UiMenuPress): the selection sinks in and lights up
+// for a moment, then springs back.
+#define PRESS_S 0.20f
+static float s_pressAt = -1.0f;
+
+void UiMenuPress(void) { s_pressAt = UiTime(); }
+
+// 0..1..0 over PRESS_S after a press (1 at its deepest), else 0.
+static float press_amount(void)
+{
+    float t = s_pressAt < 0 ? 1.0f : (UiTime() - s_pressAt) / PRESS_S;
+    if (t < 0 || t >= 1) return 0;
+    return t < 0.3f ? t / 0.3f : 1.0f - (t - 0.3f) / 0.7f;
+}
+
+// The selection highlight of a list row: a blue-tinted pill and its pulsing
+// ring (`right` kept for the callers' right-to-left menus).
 static void selection_bar_side(float x, float y, float w, float h, int right)
 {
-    float a = selection_pulse();
+    float a = selection_pulse(), p = press_amount(), in = p * 3.0f;
+    (void)right;
+    x += in; y += in * 0.5f; w -= in * 2; h -= in;
     selection_glow(x, y, w, h, 12, a);
-    UiRoundRect(x, y, w, h, 12, D3DCOLOR_ARGB(60, 90, 170, 240), D3DCOLOR_ARGB(38, 90, 170, 240));
-    UiRoundRing(x, y, w, h, 12, 2.0f, SEL_RING(a));
-    UiRoundRect(right ? x + w - 11 : x + 7, y + h * 0.25f, 4, h * 0.5f, 2, D3DCOLOR_ARGB(255, 150, 220, 255), D3DCOLOR_ARGB(255, 90, 180, 250));
+    UiRoundRect(x, y, w, h, 12, SEL_LO(60 + (int)(70 * p)), SEL_LO(38 + (int)(70 * p)));
+    UiRoundRing(x, y, w, h, 12, 2.0f, SEL_RING(a + (1.0f - a) * p));
+}
+
+// The menus' edges (Settings > Interface > Borders and panels): their colour
+// (the selection's unless one is chosen), strength and glow (ui_from_config).
+static int s_edgeRgb[3] = { 120, 205, 255 }, s_edgeOp = 100, s_edgeGlow;   // s_edgeGlow: 0 pulsing, 1 steady, 2 none
+#define EDGE_COL(a) D3DCOLOR_ARGB((int)(a), s_edgeRgb[0], s_edgeRgb[1], s_edgeRgb[2])
+
+// The glow around a panel's edge (menus, dialogs): soft rings outside it,
+// fading outwards, and a fine ring on the edge - nothing inside, so the
+// panel's own colour stays as it is. Pulsing, steady or none, as chosen.
+static void edge_glow(float x, float y, float w, float h, float r)
+{
+    float a = (s_edgeGlow == 0 ? 0.35f + 0.65f * selection_pulse() : 0.75f) * s_edgeOp / 100.0f;
+    int i;
+    if (s_edgeGlow == 2 || a <= 0.0f) return;
+    r = UiPanelRadius(r);
+    for (i = 1; i <= 12; i++)
+    {
+        float f = 1.0f - i / 13.0f;
+        UiRoundRing(x - i, y - i, w + i * 2, h + i * 2, r + i, 1.5f, EDGE_COL(70 * a * f * f));
+    }
+    UiRoundRing(x, y, w, h, r, 1.5f, EDGE_COL(160 * a));
 }
 
 static void selection_bar(float x, float y, float w, float h) { selection_bar_side(x, y, w, h, 0); }
@@ -116,8 +175,15 @@ int UiMenuAdd(UiMenu *m, const char *label, const char *value)
     return m->count++;
 }
 
+static void icon_tri(float cx, float cy, float s, int dir, D3DCOLOR c);   // the menu symbols' triangle, below
+
 // A value shown "< 250 ms >" (DPAD changes it): drawn as the text between two
-// chevrons. Returns the left end.
+// small solid arrows, light blue on the selected row (grey otherwise), that
+// nudge outwards for a moment when the value changes (a press: UiMenuPress).
+// Returns the left end.
+#define VALUE_ARROW 9.0f    // an arrow's width
+#define VALUE_GAP 12.0f     // between an arrow and the text
+static float press_amount(void);
 static float draw_value(float right, float cy, const char *value, int selected)
 {
     size_t n = strlen(value);
@@ -125,17 +191,17 @@ static float draw_value(float right, float cy, const char *value, int selected)
     if (n >= 4 && value[0] == '<' && value[1] == ' ' && value[n - 1] == '>' && value[n - 2] == ' ')
     {
         char inner[64];
-        float cw = UiTextWidth(UI_BOLD, 30, UI_CH_RCHEVRON), x = right;
-        D3DCOLOR chev = selected ? UI_COL_ACCENT_HI : UI_COL_TEXT3;
+        float x = right, nudge = selected ? press_amount() * 3.0f : 0.0f;
+        D3DCOLOR arrow = selected ? SEL_HI(255) : UI_COL_TEXT3;
         size_t k = n - 4 < sizeof(inner) - 1 ? n - 4 : sizeof(inner) - 1;
         memcpy(inner, value + 2, k);
         inner[k] = 0;
-        UiText(UI_BOLD, 30, x, cy - 1, chev, UI_CH_RCHEVRON, UI_RIGHT);
-        x -= cw + 10;
+        icon_tri(x - VALUE_ARROW * 0.5f + nudge, cy, VALUE_ARROW * 1.3f, 1, arrow);
+        x -= VALUE_ARROW + VALUE_GAP;
         x -= UiText(selected ? UI_BOLD : UI_REGULAR, 21, x, cy, text, inner, UI_RIGHT);
-        x -= 10;
-        UiText(UI_BOLD, 30, x, cy - 1, chev, UI_CH_LCHEVRON, UI_RIGHT);
-        return x - cw;
+        x -= VALUE_GAP;
+        icon_tri(x - VALUE_ARROW * 0.5f - nudge, cy, VALUE_ARROW * 1.3f, 3, arrow);
+        return x - VALUE_ARROW;
     }
     return right - UiText(UI_REGULAR, 21, right, cy, text, value, UI_RIGHT);
 }
@@ -150,7 +216,7 @@ static float value_width(const char *value, int selected)
         size_t k = n - 4 < sizeof(inner) - 1 ? n - 4 : sizeof(inner) - 1;
         memcpy(inner, value + 2, k);
         inner[k] = 0;
-        return 2 * (UiTextWidth(UI_BOLD, 30, UI_CH_RCHEVRON) + 10) + UiTextWidth(selected ? UI_BOLD : UI_REGULAR, 21, inner);
+        return 2 * (VALUE_ARROW + VALUE_GAP) + UiTextWidth(selected ? UI_BOLD : UI_REGULAR, 21, inner);
     }
     return UiTextWidth(UI_REGULAR, 21, value);
 }
@@ -158,15 +224,216 @@ static float value_width(const char *value, int selected)
 static void controls_draw(const UiMenu *m);
 static void calib_draw(const UiMenu *m);
 static void volume_draw(const UiMenu *m);
+static void fxpage_draw(const UiMenu *m);
+static void wallpage_draw(const UiMenu *m);
+static void borderpage_draw(const UiMenu *m);
 
 static int s_browser;   // opened from the ROM list: the box art rows are shown (also: UiMenuDraw skips the dim behind it in-game, over the frozen frame)
+
+// A small solid triangle pointing `dir` (0 up, 1 right, 2 down, 3 left), `s`
+// across, its centre at (cx, cy): slices, the primitives having no triangle.
+static void icon_tri(float cx, float cy, float s, int dir, D3DCOLOR c)
+{
+    const int n = 7;
+    int i;
+    for (i = 0; i < n; i++)
+    {
+        float t = (i + 0.5f) / n, len = s * t, step = s / n, along = -s * 0.5f + i * step;
+        if (dir == 0) UiRect(cx - len * 0.5f, cy + along, len, step + 0.3f, c);
+        else if (dir == 2) UiRect(cx - len * 0.5f, cy - along - step, len, step + 0.3f, c);
+        else if (dir == 3) UiRect(cx + along, cy - len * 0.5f, step + 0.3f, len, c);
+        else UiRect(cx - along - step, cy - len * 0.5f, step + 0.3f, len, c);
+    }
+}
+
+void UiMenuIcons(UiMenu *m, const unsigned char *icons, int n)
+{
+    int i;
+    for (i = 0; i < n && i < m->count; i++) m->icon[i] = icons[i];
+}
 
 // A row's small line symbol (UI_ICON_*), about 22 pixels across, centred on (cx, cy).
 static void menu_icon(int icon, float cx, float cy, D3DCOLOR c)
 {
+    const D3DCOLOR soft = UiAlpha(c, 0.45f);
     int k;
     switch (icon)
     {
+    case UI_ICON_PLAY:        // resume: a ring around a triangle
+        UiRoundRing(cx - 11, cy - 11, 22, 22, 11, 2.0f, c);
+        icon_tri(cx + 1, cy, 9, 1, c);
+        break;
+    case UI_ICON_STATES:      // saved states: two cards, one behind the other
+        UiRoundRing(cx - 6, cy - 10, 16, 13, 2.5f, 2.0f, soft);
+        UiRoundRect(cx - 10, cy - 4, 16, 13, 2.5f, c, c);
+        break;
+    case UI_ICON_GEAR:        // settings: a ring with eight teeth
+        for (k = 0; k < 8; k++)
+        {
+            float a = k * 0.785398f, tx = cx + cosf(a) * 8.5f, ty = cy + sinf(a) * 8.5f;
+            UiRoundRect(tx - 2.2f, ty - 2.2f, 4.4f, 4.4f, 1.0f, c, c);
+        }
+        UiCircle(cx, cy, 7.5f, c);
+        UiCircle(cx, cy, 3.0f, D3DCOLOR_ARGB(255, 27, 29, 38));
+        break;
+    case UI_ICON_RESET:       // reset: a ring and its arrow head
+        UiRoundRing(cx - 9, cy - 9, 18, 18, 9, 2.0f, c);
+        icon_tri(cx + 6, cy - 9, 7, 1, c);
+        break;
+    case UI_ICON_LIST:        // the ROM list: three rows
+        for (k = -1; k <= 1; k++)
+        {
+            UiCircle(cx - 8, cy + k * 6, 1.8f, c);
+            UiRoundRect(cx - 4, cy + k * 6 - 1, 14, 2, 1, c, c);
+        }
+        break;
+    case UI_ICON_POWER:       // the dashboard: a power button
+        UiRoundRing(cx - 9, cy - 8, 18, 18, 9, 2.0f, c);
+        UiRoundRect(cx - 1.5f, cy - 12, 3, 10, 1.5f, c, c);
+        break;
+    case UI_ICON_SLOT:        // a slot: a grid of dots
+        for (k = 0; k < 9; k++) UiCircle(cx + (k % 3 - 1) * 7.0f, cy + (k / 3 - 1) * 7.0f, 2.0f, k == 4 ? c : soft);
+        break;
+    case UI_ICON_LOAD:        // load / download: an arrow into a tray
+        UiRect(cx - 10, cy + 7, 20, 2, c);
+        UiRect(cx - 10, cy + 2, 2, 7, c);
+        UiRect(cx + 8, cy + 2, 2, 7, c);
+        UiRect(cx - 1, cy - 11, 2, 9, c);
+        icon_tri(cx, cy + 1, 9, 2, c);
+        break;
+    case UI_ICON_BATTERY:     // battery: its case, its tip and two bars
+        UiRoundRing(cx - 11, cy - 6, 19, 12, 2.5f, 2.0f, c);
+        UiRect(cx + 8, cy - 2.5f, 3, 5, c);
+        UiRect(cx - 8, cy - 3, 4, 6, c);
+        UiRect(cx - 3, cy - 3, 4, 6, c);
+        break;
+    case UI_ICON_SLIDERS:     // preset: three sliders
+        for (k = -1; k <= 1; k++)
+        {
+            UiRect(cx - 10, cy + k * 7 - 0.75f, 20, 1.5f, soft);
+            UiCircle(cx + (k == 0 ? 4.0f : k < 0 ? -4.0f : 1.0f), cy + k * 7, 2.8f, c);
+        }
+        break;
+    case UI_ICON_TEXTURE:     // texture filter: a checkerboard
+        UiRoundRect(cx - 9, cy - 9, 9, 9, 1.5f, c, c);
+        UiRoundRect(cx, cy, 9, 9, 1.5f, c, c);
+        UiRoundRing(cx, cy - 9, 9, 9, 1.5f, 1.5f, soft);
+        UiRoundRing(cx - 9, cy, 9, 9, 1.5f, 1.5f, soft);
+        break;
+    case UI_ICON_HD:          // HD textures
+        UiRoundRing(cx - 12, cy - 8, 24, 16, 3, 2.0f, c);
+        UiText(UI_BOLD, 11, cx, cy, c, "HD", UI_CENTER);
+        break;
+    case UI_ICON_SMOOTH:      // edge smoothing: a soft disc
+        UiCircle(cx, cy, 10, UiAlpha(c, 0.25f));
+        UiCircle(cx, cy, 7, UiAlpha(c, 0.5f));
+        UiCircle(cx, cy, 4, c);
+        break;
+    case UI_ICON_SHARP:       // sharpening: a sharp peak
+        icon_tri(cx, cy - 1, 18, 0, c);
+        UiRect(cx - 10, cy + 8, 20, 2, c);
+        break;
+    case UI_ICON_BLUR:        // blur: rings fading out
+        UiCircle(cx, cy, 3, c);
+        UiRoundRing(cx - 7, cy - 7, 14, 14, 7, 1.5f, UiAlpha(c, 0.6f));
+        UiRoundRing(cx - 11, cy - 11, 22, 22, 11, 1.5f, UiAlpha(c, 0.3f));
+        break;
+    case UI_ICON_CHART:       // FPS: rising bars
+        UiRoundRect(cx - 10, cy + 2, 5, 8, 1, c, c);
+        UiRoundRect(cx - 2.5f, cy - 3, 5, 13, 1, c, c);
+        UiRoundRect(cx + 5, cy - 9, 5, 19, 1, c, c);
+        break;
+    case UI_ICON_STRETCH:     // stretch: arrows to both sides
+    case UI_ICON_ARROWS_H:
+        UiRect(cx - 7, cy - 1, 14, 2, c);
+        icon_tri(cx - 8, cy, 9, 3, c);
+        icon_tri(cx + 8, cy, 9, 1, c);
+        if (icon == UI_ICON_STRETCH) { UiRect(cx - 12, cy - 7, 1.5f, 14, soft); UiRect(cx + 10.5f, cy - 7, 1.5f, 14, soft); }
+        break;
+    case UI_ICON_ARROWS_V:    // up and down
+        UiRect(cx - 1, cy - 7, 2, 14, c);
+        icon_tri(cx, cy - 8, 9, 0, c);
+        icon_tri(cx, cy + 8, 9, 2, c);
+        break;
+    case UI_ICON_CROSSHAIR:   // calibration: a ring and its ticks
+        UiRoundRing(cx - 8, cy - 8, 16, 16, 8, 2.0f, c);
+        UiRect(cx - 12, cy - 1, 6, 2, c);
+        UiRect(cx + 6, cy - 1, 6, 2, c);
+        UiRect(cx - 1, cy - 12, 2, 6, c);
+        UiRect(cx - 1, cy + 6, 2, 6, c);
+        UiCircle(cx, cy, 1.8f, c);
+        break;
+    case UI_ICON_SUN:         // brightness: a sun
+        UiCircle(cx, cy, 5, c);
+        for (k = 0; k < 8; k++)
+        {
+            float a = k * 0.785398f;
+            UiCircle(cx + cosf(a) * 9.5f, cy + sinf(a) * 9.5f, 1.6f, c);
+        }
+        break;
+    case UI_ICON_VSYNC:       // V-Sync: two frames kept in step
+        UiRoundRing(cx - 11, cy - 8, 13, 10, 2, 1.5f, soft);
+        UiRoundRing(cx - 2, cy - 2, 13, 10, 2, 2.0f, c);
+        break;
+    case UI_ICON_EYE:         // antiflicker: an eye
+        UiRoundRing(cx - 12, cy - 6.5f, 24, 13, 6.5f, 2.0f, c);
+        UiCircle(cx, cy, 3.5f, c);
+        break;
+    case UI_ICON_SCANLINES:   // screen effect: a screen with lines
+        UiRoundRing(cx - 11, cy - 9, 22, 18, 3, 2.0f, c);
+        for (k = -1; k <= 1; k++) UiRect(cx - 7, cy + k * 4 - 0.75f, 14, 1.5f, soft);
+        break;
+    case UI_ICON_FRAME:       // picture size: a frame in a frame
+        UiRoundRing(cx - 11, cy - 9, 22, 18, 3, 1.5f, soft);
+        UiRoundRing(cx - 6, cy - 4.5f, 12, 9, 2, 2.0f, c);
+        break;
+    case UI_ICON_CLOCK:       // audio margin: a clock
+        UiRoundRing(cx - 10, cy - 10, 20, 20, 10, 2.0f, c);
+        UiRect(cx - 1, cy - 6, 2, 7, c);
+        UiRect(cx - 1, cy - 1, 6, 2, c);
+        break;
+    case UI_ICON_PALETTE:     // skins: a palette
+        UiRoundRing(cx - 11, cy - 10, 22, 20, 10, 2.0f, c);
+        UiCircle(cx - 4, cy - 3, 2.2f, c);
+        UiCircle(cx + 3, cy - 4, 2.2f, c);
+        UiCircle(cx + 5, cy + 3, 2.2f, c);
+        break;
+    case UI_ICON_GLOBE:       // language: a globe
+        UiRoundRing(cx - 10, cy - 10, 20, 20, 10, 2.0f, c);
+        UiRoundRing(cx - 4.5f, cy - 10, 9, 20, 4.5f, 1.5f, soft);
+        UiRect(cx - 10, cy - 0.75f, 20, 1.5f, soft);
+        break;
+    case UI_ICON_MUSIC:       // music: two joined notes
+        UiCircle(cx - 6, cy + 6, 3.6f, c);
+        UiCircle(cx + 6, cy + 4, 3.6f, c);
+        UiRect(cx - 3.4f, cy - 9, 2, 15, c);
+        UiRect(cx + 8.6f, cy - 11, 2, 15, c);
+        UiRoundRect(cx - 3.4f, cy - 11.5f, 14, 3.5f, 1, c, c);
+        break;
+    case UI_ICON_SPEAKERS:    // mono / stereo: two speakers
+        for (k = 0; k < 2; k++)
+        {
+            float sx = cx + (k ? 2.0f : -12.0f);
+            UiRoundRing(sx, cy - 9, 10, 18, 2, 1.8f, c);
+            UiCircle(sx + 5, cy + 3, 2.6f, c);
+            UiCircle(sx + 5, cy - 4, 1.4f, c);
+        }
+        break;
+    case UI_ICON_PLUS:        // make something new: a plus in a ring
+        UiRoundRing(cx - 11, cy - 11, 22, 22, 11, 2.0f, c);
+        UiRoundRect(cx - 6, cy - 1.2f, 12, 2.4f, 1, c, c);
+        UiRoundRect(cx - 1.2f, cy - 6, 2.4f, 12, 1, c, c);
+        break;
+    case UI_ICON_TRASH:       // delete: a bin and its lid
+        UiRoundRect(cx - 9, cy - 9, 18, 2.5f, 1, c, c);
+        UiRect(cx - 3, cy - 11, 6, 2, c);
+        UiRoundRing(cx - 7, cy - 5, 14, 16, 2, 2.0f, c);
+        UiRect(cx - 2.75f, cy - 2, 1.5f, 10, soft);
+        UiRect(cx + 1.25f, cy - 2, 1.5f, 10, soft);
+        break;
+    case UI_ICON_LAYOUT:      // design: four tiles
+        for (k = 0; k < 4; k++) UiRoundRect(cx + (k % 2 ? 1.5f : -10.5f), cy + (k / 2 ? 1.5f : -10.5f), 9, 9, 2, k ? soft : c, k ? soft : c);
+        break;
     case UI_ICON_SYSTEM:      // a chip: a square, its core and three pins on each side
         UiRoundRing(cx - 8, cy - 8, 16, 16, 3, 2.0f, c);
         UiRoundRect(cx - 3.5f, cy - 3.5f, 7, 7, 1.5f, c, c);
@@ -218,19 +485,38 @@ static void menu_icon(int icon, float cx, float cy, D3DCOLOR c)
 // A side bar down the left of the screen: the LAIKA 64 logo, the page's
 // title, its rows (each with its symbol, when it has one) and, at the
 // bottom, the button prompts.
+// How far the side bar is still sliding in (0 once in place; UiMenuThumb follows it).
+static float s_menuSlide;
+
+static float ease_out(float t) { if (t <= 0) return 0; if (t >= 1) return 1; t = 1 - t; return 1 - t * t * t; }
+
 void UiMenuDraw(const UiMenu *m)
 {
     static UiAnim sel;
     static char lastTitle[128];
     static int lastCount;
-    const float x = 8, y = 12, w = 690, h = UI_HEIGHT - 24, head = 190, foot = 78;
+    static float lastDraw = -1.0f, openAt = -10.0f, pageAt = -10.0f;
+    const float y = 12, w = 690, h = UI_HEIGHT - 24, head = 190, foot = 78;
     // Rows shrink a little when a page has many, so they stay above the prompts.
     const float room = h - head - 18 - foot;
-    float rowH = m->count > 0 && room / m->count < 48 ? room / m->count : 48, sy, lx, ix;
+    float rowH = m->count > 0 && room / m->count < 48 ? room / m->count : 48, sy, lx, ix, x, now = UiTime(), shift;
     int i, restart = strcmp(lastTitle, m->title) != 0 || lastCount != m->count, rtl = LangRtl(), icons = 0;
+    char title[160];
     if (m->page == UI_PAGE_CONTROLS) { controls_draw(m); lastTitle[0] = 0; return; }
     if (m->page == UI_PAGE_CALIB) { calib_draw(m); lastTitle[0] = 0; return; }
     if (m->page == UI_PAGE_VOLUME) { volume_draw(m); lastTitle[0] = 0; return; }
+    if (m->page == UI_PAGE_FX) { fxpage_draw(m); lastTitle[0] = 0; return; }
+    if (m->page == UI_PAGE_WALL) { wallpage_draw(m); lastTitle[0] = 0; return; }
+    if (m->page == UI_PAGE_BORDER) { borderpage_draw(m); lastTitle[0] = 0; return; }
+    // A short entrance: the bar slides in from the left as the menu opens (it
+    // was not drawn a moment ago: the pause menu, Settings from the ROM list),
+    // and its rows slide in when the page changes.
+    if (now - lastDraw > 0.25f) openAt = now;
+    lastDraw = now;
+    if (restart) pageAt = now;
+    s_menuSlide = (1.0f - ease_out((now - openAt) / 0.18f)) * 80.0f;
+    shift = (1.0f - ease_out((now - pageAt) / 0.16f)) * 22.0f;
+    x = 8 - s_menuSlide;
     strncpy(lastTitle, m->title, sizeof(lastTitle) - 1);
     lastCount = m->count;
     for (i = 0; i < m->count; i++) icons |= m->icon[i];
@@ -238,15 +524,17 @@ void UiMenuDraw(const UiMenu *m)
     // where this draws over the frozen frame and the dim hid graphics
     // changes (texture packs, filters) from showing clearly while paused.
     if (s_browser) UiDim();
+    edge_glow(x, y, w, h, 22);
     UiPanel(x, y, w, h, 22);
     UiBrand(x + 66, y + 60, 44);
-    // Right to left (Arabic): title and labels on the right, values on the left.
-    UiText(UI_BOLD, 30, rtl ? x + w - 66 : x + 66, y + 130, UI_COL_TEXT, m->title, rtl ? UI_RIGHT : UI_LEFT);
+    // The page's name under the logo, centred, in capitals.
+    UiUpper(UI_BOLD, m->title, title, sizeof(title));
+    UiText(UI_BOLD, 30, x + w * 0.5f, y + 130, UI_COL_TEXT, title, UI_CENTER);
     sy = anim_step(&sel, y + head + m->sel * rowH, restart);
     if (m->count) selection_bar_side(x + 42, sy + 3, w - 66, rowH - 6, rtl);
     // With symbols, they take the label's place and the label moves over.
-    ix = rtl ? x + w - 78 : x + 78;
-    lx = icons ? (rtl ? ix - 24 : ix + 24) : (rtl ? x + w - 66 : x + 66);
+    ix = (rtl ? x + w - 78 : x + 78) + (rtl ? -shift : shift);
+    lx = icons ? (rtl ? ix - 24 : ix + 24) : (rtl ? x + w - 66 - shift : x + 66 + shift);
     for (i = 0; i < m->count; i++)
     {
         float cy = y + head + i * rowH + rowH * 0.5f;
@@ -267,7 +555,7 @@ void UiMenuDraw(const UiMenu *m)
 // (pulsing light blue ring and glow). NULL: an empty box with `emptyText`.
 void UiMenuThumb(const UiMenu *m, IDirect3DTexture9 *tex, const char *emptyText)
 {
-    const float x = 8, y = 12, w = 690, h = UI_HEIGHT - 24, head = 190, foot = 78;
+    const float x = 8 - s_menuSlide, y = 12, w = 690, h = UI_HEIGHT - 24, head = 190, foot = 78;
     const float room = h - head - 18 - foot;
     float rowH = m->count > 0 && room / m->count < 48 ? room / m->count : 48;
     float top = y + head + m->count * rowH + 28, bottom = y + h - foot - 28, bh = bottom - top, bw, bx, a = selection_pulse();
@@ -296,15 +584,110 @@ void UiMenuNavigate(UiMenu *m, WORD down)
 // brightness, VSync, antiflicker, screen effect) are shown in the same
 // UiMenu as the main page; their Back returns to it.
 enum { S_SYSTEM = 0, S_GRAPHICS, S_SCREEN, S_SOUND, S_CONTROLS, S_INTERFACE };
-enum { V_GAME = 0, V_MUSIC, V_COUNT };   // the Volumen page: two bars
-enum { I_DESIGN = 0, I_SKINS, I_LANGUAGE };   // the Interface page; B goes back, no row for it
+// The Volumen page: three bars (game, button sounds, menu music - the last from the ROM list only:
+// no menu music plays in game).
+enum { V_GAME = 0, V_SFX, V_MUSIC, V_COUNT };
+// The Interface page (ROM list only); B goes back, no row for it. Borders and
+// panels, Wallpapers, Background effect and Screen saver open their own pages with A.
+enum { I_DESIGN = 0, I_SKINS, I_SELCOLOR, I_BORDERS, I_WALLPAPERS, I_EFFECT, I_SAVER, I_LANGUAGE };
+static int s_saverPage;   // Interface > Screen saver
+enum { SAVER_OFF = 0, SAVER_EFFECT, SAVER_WALL, SAVER_LOGO, SAVER_CLOCK, SAVER_COUNT };   // Config::saverMode
 #define I_ART (I_LANGUAGE + 1)       // "Box art downloads" (ROM list only)
+#define I_CATS (I_LANGUAGE + 2)      // "Categories": the ROM list's tabs, made and changed on their own pages (ROM list only)
+static int s_catsPage, s_catEditPage;   // Interface > Categories, and one category being made or changed
+static void settings_cats(UiMenu *m, const Config *c, int selCat);   // below, with the game library
+static int cats_input(UiMenu *m, Config *c, WORD down);
+static int catedit_input(UiMenu *m, Config *c, WORD down);
 // The ROM browser's layouts (Config::browserDesign; Interface > Design, X in the browser):
 // the list and its card, the covers grid, the big covers grid, the carousel.
 enum { BD_LIST = 0, BD_COVERS, BD_BIG, BD_CAROUSEL, BD_COUNT };
 static const int s_designLabels[BD_COUNT] = { T_DESIGN_DETAILED, T_DESIGN_COVERS, T_DESIGN_BIG, T_DESIGN_CAROUSEL };
-enum { SYS_CPU = 0, SYS_RSP, SYS_PADLOSS, SYS_AUTOSLOT, SYS_BATTERY };   // the System page: CPU and RSP (both apply at the next game start), what a controller unplugged in game does, the slot it saves to, the low battery warning; B goes back, no row for it
-enum { SND_VOLUME = 0, SND_AUDIO };   // the Sound page: Volumen (opens the bars page), Margen de audio; B goes back, no row for it
+// The ROM list's animated background (Config::bgEffect; drawn by browser_effect).
+enum { BGFX_OFF = 0, BGFX_WAVES, BGFX_PULSE, BGFX_RAIN, BGFX_VORTEX, BGFX_RIPPLES, BGFX_SILK, BGFX_EMBERS, BGFX_GRID,
+       BGFX_UNDERWATER, BGFX_ENERGY, BGFX_AURORA, BGFX_LIQUID, BGFX_PARTICLES, BGFX_SMOKE, BGFX_XMB, BGFX_PS4_FLOW,
+       BGFX_PS4_BOKEH, BGFX_NEBULA, BGFX_FIRE_DUST, BGFX_LAVA, BGFX_PRISM, BGFX_TOPO, BGFX_HEX, BGFX_SPIRAL, BGFX_INK, BGFX_HOLO,
+       BGFX_FRACTAL, BGFX_BURST, BGFX_WARP, BGFX_COUNT };
+static const int s_fxLabels[BGFX_COUNT] = { T_OFF, T_FX_WAVES, T_FX_PULSE, T_FX_RAIN, T_FX_VORTEX, T_FX_RIPPLES, T_FX_SILK,
+                                            T_FX_EMBERS, T_FX_GRID, T_FX_UNDERWATER, T_FX_ENERGY, T_FX_AURORA, T_FX_LIQUID,
+                                            T_FX_PARTICLES, T_FX_SMOKE, T_FX_XMB, T_FX_PS4_FLOW, T_FX_PS4_BOKEH,
+                                            T_FX_NEBULA, T_FX_FIRE_DUST, T_FX_LAVA, T_FX_PRISM, T_FX_TOPO, T_FX_HEX, T_FX_SPIRAL,
+                                            T_FX_INK, T_FX_HOLO, T_FX_FRACTAL, T_FX_BURST, T_FX_WARP };
+static int s_bgEffect = BGFX_WAVES;   // what the ROM list draws (set from Config::bgEffect)
+// The colours the effect page offers (Config::fxColor; 0: none - the effect's own colours for colour 1, unused for 2 and 3).
+#define FX_PALETTE_COUNT 13
+static const int s_fxPalette[FX_PALETTE_COUNT + 1][3] = {
+    { 0, 0, 0 },
+    { 240, 242, 255 }, { 255, 60, 70 }, { 255, 140, 40 }, { 255, 220, 60 }, { 140, 240, 80 }, { 40, 210, 120 }, { 40, 220, 210 },
+    { 60, 200, 255 }, { 60, 120, 255 }, { 110, 80, 255 }, { 170, 80, 240 }, { 240, 70, 200 }, { 255, 130, 180 },
+};
+static int s_fxColor[3], s_fxOpacity = 100, s_fxSpeed = 100;   // what the ROM list draws with (ui_from_config)
+static float s_fxClock = 50.0f, s_fxLast = -1.0f;   // the effects' own time (run at s_fxSpeed), and UiTime() when it last moved
+static void browser_effect(void);
+static void settings_fx(UiMenu *m, const Config *c);   // Interface > Background effect's own page (below, after Volumen)
+static void settings_wall(UiMenu *m, const Config *c);   // Interface > Wallpapers and > Borders (below, after Volumen)
+static void wall_choice_text(const Config *c, char *out, size_t size, float maxW);
+static void settings_saver(UiMenu *m, const Config *c);
+static void settings_borders(UiMenu *m, const Config *c);
+static void saver_values(UiMenu *m, const Config *c);
+static void saver_run(IDirect3DDevice9 *dev, const Config *c);   // after the background effects
+static int saver_any_input(void);
+
+// The menus' look from *c (kept in range): the background effect, its
+// colours, opacity and speed, the selection's colour, the wallpapers.
+static void ui_from_config(const Config *c)
+{
+    int i;
+    s_sel = c->selColor >= 0 && c->selColor < SEL_COLORS ? c->selColor : 0;
+    UiSetWallpapers(c->wallCustom ? "." : "", c->wallFile, c->wallInterval, c->wallTransition >= 0 && c->wallTransition < UI_TRANS_COUNT ? c->wallTransition : 0,
+                    c->wallDim, c->wallFit, c->wallShuffle);
+    {
+        // The edges: the selection's colour, or one of the swatches; the panels' body and corners.
+        static const float rounds[4] = { 0.2f, 0.55f, 1.0f, 1.6f };
+        int width = c->borderWidth < 0 ? 0 : c->borderWidth > 4 ? 4 : c->borderWidth;
+        for (i = 0; i < 3; i++)
+            s_edgeRgb[i] = c->borderColor > 0 && c->borderColor <= FX_PALETTE_COUNT ? s_fxPalette[c->borderColor][i] : s_selColors[s_sel][0][i];
+        s_edgeOp = c->borderOpacity < 0 ? 0 : c->borderOpacity > 100 ? 100 : c->borderOpacity;
+        s_edgeGlow = c->borderGlow >= 0 && c->borderGlow < 3 ? c->borderGlow : 0;
+        // The panel's own fine edge: as faint as before at 1 px, stronger when wider.
+        UiSetPanelStyle(EDGE_COL(s_edgeOp * (width > 1 ? 1.4f : 0.4f)), (float)width, c->panelOpacity,
+                        rounds[c->panelRound >= 0 && c->panelRound < 4 ? c->panelRound : 2]);
+    }
+    s_bgEffect = c->bgEffect >= 0 && c->bgEffect < BGFX_COUNT ? c->bgEffect : BGFX_OFF;
+    for (i = 0; i < 3; i++) s_fxColor[i] = c->fxColor[i] >= 0 && c->fxColor[i] <= FX_PALETTE_COUNT ? c->fxColor[i] : 0;
+    s_fxOpacity = c->fxOpacity < 10 ? 10 : c->fxOpacity > 200 ? 200 : c->fxOpacity;
+    s_fxSpeed = c->fxSpeed < 25 ? 25 : c->fxSpeed > 300 ? 300 : c->fxSpeed;
+}
+// The System page: what a controller unplugged in game does, the slot it saves to, the low battery
+// warning, then CPU and RSP (both apply at the next game start, so the ROM list only shows them -
+// last, so the rows before keep their place in game). B goes back, no row for it.
+enum { SYS_PADLOSS = 0, SYS_AUTOSLOT, SYS_BATTERY, SYS_CPU, SYS_RSP, SYS_STARTROM };   // SYS_STARTROM: ROM list only too
+static std::string s_browserSel;   // the ROM selected in the list when Settings opened (Game at start: that game)
+static std::string clean_name(const char *name, size_t len);   // the list's name of a file (below)
+
+// "Game at start"'s value: no, the last game, or the chosen game's name (cut to fit).
+static void start_rom_text(const Config *c, char *out, size_t size)
+{
+    if (c->startRomMode == 1) _snprintf(out, size - 1, "< %s >", Tr(T_START_LAST));
+    else if (c->startRomMode == 2 && c->startRom[0])
+    {
+        const char *base = strrchr(c->startRom, '\\'), *dot;
+        std::string name;
+        char fit[48];
+        base = base ? base + 1 : c->startRom;
+        dot = strrchr(base, '.');
+        name = clean_name(base, dot ? (size_t)(dot - base) : strlen(base));
+        UiTextFit(UI_BOLD, 21, 230, name.c_str(), fit, sizeof(fit));
+        _snprintf(out, size - 1, "< %s >", fit);
+    }
+    else _snprintf(out, size - 1, "< %s >", Tr(T_OFF));
+    out[size - 1] = 0;
+}
+// The Sound page: Volumen (opens the bars page), Margen de audio, mono/stereo, then - from the ROM
+// list only, last so the rows before keep their place in game - the menus' button sounds and music.
+// B goes back, no row for it.
+enum { SND_VOLUME = 0, SND_AUDIO, SND_MONO, SND_UISOUNDS, SND_SFXSTYLE, SND_MUSIC };
+static const int s_sfxStyleLabels[XB_SFX_STYLE_COUNT] = { T_STYLE_GLASS, T_STYLE_SOFT, T_STYLE_RETRO, T_STYLE_DIGITAL };
+#define MUSIC_DIR "game:\\music"   // the menus' music: every .mp3/.wav in it
 enum { G_PRESET = 0, G_FILTER, G_HIRES, G_SMOOTH, G_SHARPEN, G_BLUR, G_FPS };   // the Graphics page; B goes back, no row for it
 enum { SCR_RES = 0, SCR_STRETCH, SCR_CAL, SCR_BRIGHT, SCR_VSYNC, SCR_DEFLICKER, SCR_SCREEN };   // the Screen page (SCR_CAL opens the calibration page below); B goes back, no row for it
 enum { CAL_SIZE = 0, CAL_LR, CAL_UD };   // the Image calibration page, opened from Screen > SCR_CAL; B goes back, no row for it
@@ -343,7 +726,9 @@ static int s_soundPage;
 static int s_systemPage;
 static int s_perGame;
 static char s_langPath[160];   // where a language change is kept (SettingsSetLangFile)
-#define S_SAVE_ALL (S_INTERFACE + 1)
+// The save rows follow Interface, which only the ROM list shows (in game the
+// menus' look cannot be seen, so there is nothing to set).
+#define S_SAVE_ALL (s_browser ? S_INTERFACE + 1 : S_INTERFACE)
 
 static const char *onoff(int v) { return Tr(v ? T_ON : T_OFF); }
 
@@ -376,6 +761,15 @@ static void settings_values(UiMenu *m, const Config *c)
             if (sn > 1) sprintf(m->value[I_SKINS], "< %s (%d/%d) >", SkinName(si), si + 1, sn);
             else sprintf(m->value[I_SKINS], "< %s >", SkinName(si));
         }
+        sprintf(m->value[I_EFFECT], "< %s >", Tr(s_fxLabels[c->bgEffect >= 0 && c->bgEffect < BGFX_COUNT ? c->bgEffect : 0]));
+        sprintf(m->value[I_SELCOLOR], "< %s >", Tr(s_selLabels[c->selColor >= 0 && c->selColor < SEL_COLORS ? c->selColor : 0]));
+        {
+            char wall[64];
+            wall_choice_text(c, wall, sizeof(wall), 200);
+            strcpy(m->value[I_WALLPAPERS], wall);
+        }
+        sprintf(m->value[I_SAVER], "< %s >", Tr(c->saverMode == SAVER_EFFECT ? T_BG_EFFECT : c->saverMode == SAVER_WALL ? T_WALLPAPERS :
+                                                c->saverMode == SAVER_LOGO ? T_SAVER_LOGO : c->saverMode == SAVER_CLOCK ? T_SAVER_CLOCK : T_OFF));
         sprintf(m->value[I_LANGUAGE], "< %s >", Tr(T_LANG_NAME));
         if (s_browser) sprintf(m->value[I_ART], "< %s >", onoff(c->artDownload));
         return;
@@ -388,11 +782,29 @@ static void settings_values(UiMenu *m, const Config *c)
         sprintf(m->value[SYS_AUTOSLOT], "< %d >", c->autoSaveSlot);
         if (c->batteryWarn) sprintf(m->value[SYS_BATTERY], "< %d%% >", c->batteryWarn);
         else sprintf(m->value[SYS_BATTERY], "< %s >", Tr(T_OFF));
+        start_rom_text(c, m->value[SYS_STARTROM], sizeof(m->value[SYS_STARTROM]));
         return;
     }
     if (s_soundPage)
     {
         sprintf(m->value[SND_AUDIO], "< %d ms >", c->audioMs);
+        sprintf(m->value[SND_MONO], "< %s >", Tr(c->audioMono ? T_AUDIO_MONO : T_AUDIO_STEREO));
+        if (!s_browser) return;   // the menus' sounds and music: ROM list only
+        sprintf(m->value[SND_UISOUNDS], "< %s >", onoff(c->uiSounds));
+        sprintf(m->value[SND_SFXSTYLE], "< %s >", Tr(s_sfxStyleLabels[c->uiSoundStyle >= 0 && c->uiSoundStyle < XB_SFX_STYLE_COUNT ? c->uiSoundStyle : 0]));
+        if (c->musicMode == XB_MUSIC_OFF) sprintf(m->value[SND_MUSIC], "< %s >", Tr(T_OFF));
+        else if (!xb_audio_music_scan(MUSIC_DIR)) sprintf(m->value[SND_MUSIC], "< %s >", Tr(T_MUSIC_NONE));
+        else if (c->musicMode == XB_MUSIC_TRACK && c->musicTrack[0])
+        {
+            // The track's name without its extension, cut to fit the row.
+            char name[96], fit[64], *dot;
+            strncpy(name, c->musicTrack, sizeof(name) - 1);
+            name[sizeof(name) - 1] = 0;
+            if ((dot = strrchr(name, '.')) != NULL) *dot = 0;
+            UiTextFit(UI_BOLD, 21, 220, name, fit, sizeof(fit) - 6);
+            sprintf(m->value[SND_MUSIC], "< %s >", fit);
+        }
+        else sprintf(m->value[SND_MUSIC], "< %s >", Tr(c->musicMode == XB_MUSIC_RANDOM ? T_MUSIC_RANDOM : T_MUSIC_ORDER));
         return;
     }
     if (s_calPage)
@@ -432,7 +844,9 @@ static void settings_values(UiMenu *m, const Config *c)
             if (!c->hiTex || !hn) sprintf(m->value[G_HIRES], "< %s >", Tr(T_OFF));
             else
             {
-                char name[40];
+                // The name cut with an ellipsis to what fits the row beside its label
+                // (the counter always shown in full).
+                char name[128], fit[48], count[16];
                 const char *p;
                 size_t nlen;
                 if (c->hiTexFile[0])
@@ -444,8 +858,10 @@ static void settings_values(UiMenu *m, const Config *c)
                 if (nlen >= sizeof(name)) nlen = sizeof(name) - 1;
                 memcpy(name, p, nlen);
                 name[nlen] = 0;
-                if (hn > 1) sprintf(m->value[G_HIRES], "< %s (%d/%d) >", name, hi + 1, hn);
-                else sprintf(m->value[G_HIRES], "< %s >", name);
+                count[0] = 0;
+                if (hn > 1) sprintf(count, " (%d/%d)", hi + 1, hn);
+                UiTextFit(UI_BOLD, 21, 290 - UiTextWidth(UI_BOLD, 21, count), name, fit, sizeof(fit));
+                sprintf(m->value[G_HIRES], "< %s%s >", fit, count);
             }
         }
         sprintf(m->value[G_SMOOTH], "< %s >", onoff(c->smooth));
@@ -467,27 +883,29 @@ static void settings_main(UiMenu *m, const Config *c)
     s_screenPage = 0;
     s_calPage = 0;
     s_interfacePage = 0;
+    s_catsPage = s_catEditPage = 0;
+    s_saverPage = 0;
     s_soundPage = 0;
     s_systemPage = 0;
-    static const unsigned char icons[] = { UI_ICON_SYSTEM, UI_ICON_GRAPHICS, UI_ICON_SCREEN, UI_ICON_SOUND, UI_ICON_CONTROLS,
-                                           UI_ICON_INTERFACE, UI_ICON_SAVE, UI_ICON_SAVE };
-    int i;
+    static const unsigned char icons[] = { UI_ICON_SYSTEM, UI_ICON_GRAPHICS, UI_ICON_SCREEN, UI_ICON_SOUND, UI_ICON_CONTROLS };
     UiMenuClear(m, Tr(T_SETTINGS), Tr(T_FOOT_SELECT));   // just "Settings", from the ROM list too
     UiMenuAdd(m, Tr(T_SYSTEM), "");
     UiMenuAdd(m, Tr(T_GRAPHICS), "");
     UiMenuAdd(m, Tr(T_SCREEN), "");
     UiMenuAdd(m, Tr(T_SOUND), "");
     UiMenuAdd(m, Tr(T_CONTROLS), "");
-    UiMenuAdd(m, Tr(T_INTERFACE), "");
-    UiMenuAdd(m, Tr(T_SAVE_ALL), "");
-    if (s_perGame) UiMenuAdd(m, Tr(T_SAVE_GAME), "");
-    for (i = 0; i < m->count; i++) m->icon[i] = icons[i];
+    UiMenuIcons(m, icons, sizeof(icons));
+    if (s_browser) m->icon[UiMenuAdd(m, Tr(T_INTERFACE), "")] = UI_ICON_INTERFACE;   // not in game (S_SAVE_ALL)
+    m->icon[UiMenuAdd(m, Tr(T_SAVE_ALL), "")] = UI_ICON_SAVE;
+    if (s_perGame) m->icon[UiMenuAdd(m, Tr(T_SAVE_GAME), "")] = UI_ICON_SAVE;
     settings_values(m, c);   // no Back row: B goes back
 }
 
 static void settings_interface(UiMenu *m, const Config *c)
 {
     s_interfacePage = 1;
+    s_catsPage = s_catEditPage = 0;   // back from Categories: B must reach the main page, not Categories again
+    s_saverPage = 0;                  // the same from Screen saver
     // The menu's own state (title, rows, count) first, as a tight, I/O-free
     // sequence - SkinScan's directory listing (disk I/O, unlike every other
     // field here) runs only after, so nothing can observe *m mid-rebuild
@@ -495,8 +913,22 @@ static void settings_interface(UiMenu *m, const Config *c)
     UiMenuClear(m, Tr(T_INTERFACE), Tr(T_FOOT_SELECT));
     UiMenuAdd(m, Tr(T_DESIGN), "");
     UiMenuAdd(m, Tr(T_SKINS), "");
+    UiMenuAdd(m, Tr(T_SEL_COLOR), "");
+    UiMenuAdd(m, Tr(T_BORDERS), "");
+    UiMenuAdd(m, Tr(T_WALLPAPERS), "");
+    UiMenuAdd(m, Tr(T_BG_EFFECT), "");
+    UiMenuAdd(m, Tr(T_SAVER), "");
     UiMenuAdd(m, Tr(T_LANGUAGE), "");
-    if (s_browser) UiMenuAdd(m, Tr(T_ART_DOWNLOADS), "");
+    if (s_browser)
+    {
+        UiMenuAdd(m, Tr(T_ART_DOWNLOADS), "");
+        UiMenuAdd(m, Tr(T_CATEGORIES), "");
+    }
+    {
+        static const unsigned char icons[] = { UI_ICON_LAYOUT, UI_ICON_PALETTE, UI_ICON_EYE, UI_ICON_INTERFACE, UI_ICON_FRAME, UI_ICON_SUN,
+                                               UI_ICON_CLOCK, UI_ICON_GLOBE, UI_ICON_LOAD, UI_ICON_LIST };
+        UiMenuIcons(m, icons, sizeof(icons));
+    }
     SkinScan();   // keeps the inline Skins picker below matching the game:\skins folder
     settings_values(m, c);
 }
@@ -534,9 +966,48 @@ static int interface_input(UiMenu *m, Config *c, WORD down)
             strncpy(c->skinName, SkinName(cur - 1), sizeof(c->skinName) - 1);
             c->skinName[sizeof(c->skinName) - 1] = 0;
         }
-        UiSetSkinWant(c->skinName);
-        if (c->skinName[0]) xb_audio_music_play(c->skinName);
-        else xb_audio_music_stop();
+        UiSetSkinWant(c->skinName);   // the picture only: the music is game:\music\ (Settings > Sound > Music)
+        settings_values(m, c);
+        return SET_CHANGED;
+    }
+    if (m->sel == I_SELCOLOR && (dir || (down & XINPUT_GAMEPAD_A)))
+    {
+        if (!dir) dir = 1;
+        c->selColor = ((c->selColor >= 0 && c->selColor < SEL_COLORS ? c->selColor : 0) + dir + SEL_COLORS) % SEL_COLORS;
+        ui_from_config(c);   // the selection shows it at once
+        settings_values(m, c);
+        return SET_CHANGED;
+    }
+    if (m->sel == I_BORDERS && (down & XINPUT_GAMEPAD_A))
+    {
+        settings_borders(m, c);
+        return SET_NONE;
+    }
+    if (m->sel == I_WALLPAPERS && (down & XINPUT_GAMEPAD_A))
+    {
+        settings_wall(m, c);
+        return SET_NONE;
+    }
+    if (m->sel == I_SAVER && (down & XINPUT_GAMEPAD_A))
+    {
+        settings_saver(m, c);
+        return SET_NONE;
+    }
+    if (m->sel == I_SAVER && dir)
+    {
+        c->saverMode = ((c->saverMode >= 0 && c->saverMode < SAVER_COUNT ? c->saverMode : 0) + dir + SAVER_COUNT) % SAVER_COUNT;
+        settings_values(m, c);
+        return SET_CHANGED;
+    }
+    if (m->sel == I_EFFECT && (down & XINPUT_GAMEPAD_A))
+    {
+        settings_fx(m, c);   // its colours, opacity and speed (the page below)
+        return SET_NONE;
+    }
+    if (m->sel == I_EFFECT && dir)
+    {
+        c->bgEffect = ((c->bgEffect >= 0 && c->bgEffect < BGFX_COUNT ? c->bgEffect : 0) + dir + BGFX_COUNT) % BGFX_COUNT;
+        ui_from_config(c);   // shows at once behind the settings
         settings_values(m, c);
         return SET_CHANGED;
     }
@@ -549,6 +1020,11 @@ static int interface_input(UiMenu *m, Config *c, WORD down)
         m->sel = I_LANGUAGE;
         return SET_NONE;
     }
+    if (s_browser && m->sel == I_CATS && (down & XINPUT_GAMEPAD_A))
+    {
+        settings_cats(m, c, -1);
+        return SET_NONE;
+    }
     if (s_browser && m->sel == I_ART && (dir || (down & XINPUT_GAMEPAD_A)))
     {
         if (!c->artDownload) return SET_ART_ASK;   // turning downloads on asks first (settings_loop)
@@ -559,6 +1035,58 @@ static int interface_input(UiMenu *m, Config *c, WORD down)
     return SET_NONE;
 }
 
+// ---- Screen saver page (Interface > Screen saver, A): what it shows, after
+// how long without a button in the ROM list, and a preview (saver_run).
+enum { SV_MODE = 0, SV_TIME, SV_PREVIEW };
+static const int s_saverMins[] = { 1, 2, 3, 5, 10, 15, 30 };
+static const int s_saverLabels[SAVER_COUNT] = { T_OFF, T_BG_EFFECT, T_WALLPAPERS, T_SAVER_LOGO, T_SAVER_CLOCK };
+
+static int saver_minutes(const Config *c) { return c->saverTime < 1 ? 1 : c->saverTime > 60 ? 60 : c->saverTime; }
+
+static void saver_values(UiMenu *m, const Config *c)
+{
+    sprintf(m->value[SV_MODE], "< %s >", Tr(s_saverLabels[c->saverMode >= 0 && c->saverMode < SAVER_COUNT ? c->saverMode : 0]));
+    sprintf(m->value[SV_TIME], "< %d min >", saver_minutes(c));
+}
+
+static void settings_saver(UiMenu *m, const Config *c)
+{
+    static const unsigned char icons[] = { UI_ICON_SCREEN, UI_ICON_CLOCK, UI_ICON_PLAY };
+    s_interfacePage = 0;
+    s_saverPage = 1;
+    UiMenuClear(m, Tr(T_SAVER), Tr(T_FOOT_SELECT));
+    UiMenuAdd(m, Tr(T_SAVER_MODE), "");
+    UiMenuAdd(m, Tr(T_SAVER_TIME), "");
+    UiMenuAdd(m, Tr(T_SAVER_PREVIEW), "");
+    UiMenuIcons(m, icons, sizeof(icons));
+    saver_values(m, c);
+}
+
+static int saver_input(UiMenu *m, Config *c, WORD down)
+{
+    int dir = (down & XINPUT_GAMEPAD_DPAD_RIGHT) ? 1 : (down & XINPUT_GAMEPAD_DPAD_LEFT) ? -1 : 0, k, cur = 0;
+    UiMenuNavigate(m, down);
+    if (down & XINPUT_GAMEPAD_B)
+    {
+        settings_interface(m, c);
+        m->sel = I_SAVER;
+        return SET_NONE;
+    }
+    if (m->sel == SV_PREVIEW) return (down & XINPUT_GAMEPAD_A) ? SET_SAVER : SET_NONE;
+    if (!dir && !(down & XINPUT_GAMEPAD_A)) return SET_NONE;
+    if (!dir) dir = 1;
+    if (m->sel == SV_MODE) c->saverMode = ((c->saverMode >= 0 && c->saverMode < SAVER_COUNT ? c->saverMode : 0) + dir + SAVER_COUNT) % SAVER_COUNT;
+    else
+    {
+        const int n = sizeof(s_saverMins) / sizeof(s_saverMins[0]);
+        for (k = 0; k < n; k++)
+            if (s_saverMins[k] <= c->saverTime) cur = k;
+        c->saverTime = s_saverMins[(cur + dir + n) % n];
+    }
+    saver_values(m, c);
+    return SET_CHANGED;
+}
+
 // ---- System page: CPU and RSP (recompiler/interpreter, HLE/LLE) - both
 // apply at the next game start, not live; what a controller unplugged during
 // a game does (off, save and pause, pause: main.cpp) and the slot that save
@@ -567,11 +1095,20 @@ static void settings_system(UiMenu *m, const Config *c)
 {
     s_systemPage = 1;
     UiMenuClear(m, Tr(T_SYSTEM), Tr(T_FOOT_SELECT));
-    UiMenuAdd(m, Tr(T_CPU_NEXT), "");
-    UiMenuAdd(m, Tr(T_RSP_NEXT), "");
     UiMenuAdd(m, Tr(T_PAD_LOSS), "");
     UiMenuAdd(m, Tr(T_AUTOSAVE_SLOT), "");
     UiMenuAdd(m, Tr(T_BATTERY_WARN), "");
+    if (s_browser)
+    {
+        // For the next game only: nothing to change in the one running.
+        UiMenuAdd(m, Tr(T_CPU_NEXT), "");
+        UiMenuAdd(m, Tr(T_RSP_NEXT), "");
+        UiMenuAdd(m, Tr(T_START_ROM), "");
+    }
+    {
+        static const unsigned char icons[] = { UI_ICON_CONTROLS, UI_ICON_SAVE, UI_ICON_BATTERY, UI_ICON_SYSTEM, UI_ICON_SYSTEM, UI_ICON_PLAY };
+        UiMenuIcons(m, icons, sizeof(icons));
+    }
     settings_values(m, c);
 }
 
@@ -605,6 +1142,22 @@ static int system_input(UiMenu *m, Config *c, WORD down)
         settings_values(m, c);
         return SET_CHANGED;
     }
+    if (m->sel == SYS_STARTROM && (dir || (down & XINPUT_GAMEPAD_A)))
+    {
+        // No, the last game played, or the game selected in the list (when there is one).
+        int states = s_browserSel.empty() ? 2 : 3, cur = c->startRomMode;
+        if (!dir) dir = 1;
+        if (cur == 2 && states == 2) cur = 0;
+        cur = (cur + dir + states) % states;
+        c->startRomMode = cur;
+        if (cur == 2)
+        {
+            strncpy(c->startRom, s_browserSel.c_str(), sizeof(c->startRom) - 1);
+            c->startRom[sizeof(c->startRom) - 1] = 0;
+        }
+        settings_values(m, c);
+        return SET_CHANGED;
+    }
     if (m->sel == SYS_BATTERY && (dir || (down & XINPUT_GAMEPAD_A)))
     {
         static const int levels[4] = { 0, 10, 25, 50 };
@@ -628,7 +1181,7 @@ static void settings_volume(UiMenu *m, const Config *c)
 {
     UiMenuClear(m, Tr(T_VOLUME), Tr(T_FOOT_SELECT));
     m->page = UI_PAGE_VOLUME;
-    m->count = V_COUNT;
+    m->count = s_browser ? V_COUNT : V_MUSIC;
     m->sel = 0;
     s_volumeCfg = c;
 }
@@ -645,32 +1198,34 @@ static int volume_input(UiMenu *m, Config *c, WORD down)
     }
     if (dir)
     {
-        int *v = m->sel == V_MUSIC ? &c->volumeMusic : &c->volumeGame;
+        int *v = m->sel == V_MUSIC ? &c->volumeMusic : m->sel == V_SFX ? &c->volumeSfx : &c->volumeGame;
         *v += dir * 5;
         if (*v < 0) *v = 0;
         if (*v > 100) *v = 100;
         if (m->sel == V_MUSIC) xb_audio_set_music_volume(c->volumeMusic);
+        else if (m->sel == V_SFX) xb_audio_set_sfx_volume(c->volumeSfx);
         else xb_audio_set_game_volume(c->volumeGame);
         return SET_CHANGED;
     }
     return SET_NONE;
 }
 
-static void volume_bar_draw(float x, float y, float w, const char *label, int percent, int selected)
+// One bar: its label, its percentage, and the fill gliding to the new value (full at maxPercent).
+static void volume_bar_draw(float x, float y, float w, const char *label, int percent, int maxPercent, int selected, UiAnim *fill)
 {
     const float barH = 28, barY = y + 34;
     char pct[16];
-    float fillW;
+    float fillW, shown = anim_step_rate(fill, (float)percent, 0, 12.0f, 0.05f);
     UiText(UI_BOLD, 20, x, y, selected ? UI_COL_TEXT : UI_COL_TEXT2, label, UI_LEFT);
-    _snprintf(pct, sizeof(pct) - 1, "%d%%", percent);
+    _snprintf(pct, sizeof(pct) - 1, "%d%%", (int)(shown + 0.5f));
     pct[sizeof(pct) - 1] = 0;
     UiText(UI_BOLD, 20, x + w, y, selected ? UI_COL_TEXT : UI_COL_TEXT2, pct, UI_RIGHT);
     UiRoundRect(x, barY, w, barH, barH * 0.5f, D3DCOLOR_ARGB(255, 34, 36, 47), D3DCOLOR_ARGB(255, 27, 29, 38));
-    fillW = w * (percent / 100.0f);
-    if (fillW > 0)
+    fillW = w * (shown / maxPercent);
+    if (fillW > 0.5f)
     {
         if (fillW < barH) fillW = barH;   // keeps the rounded cap from looking clipped at tiny values
-        UiRoundRect(x, barY, fillW, barH, barH * 0.5f, D3DCOLOR_ARGB(255, 150, 220, 255), D3DCOLOR_ARGB(255, 70, 160, 240));
+        UiRoundRect(x, barY, fillW, barH, barH * 0.5f, SEL_HI(255), SEL_LO(255));
     }
     if (selected)
     {
@@ -684,14 +1239,504 @@ static void volume_bar_draw(float x, float y, float w, const char *label, int pe
 
 static void volume_draw(const UiMenu *m)
 {
-    const float w = 660, foot = 78, h = 100 + 2 * 90 + 18 + foot;
+    static UiAnim fill[V_COUNT];
+    const float w = 660, foot = 78, h = 100 + m->count * 90 + 18 + foot;
     const float x = (UI_WIDTH - w) * 0.5f, y = (UI_HEIGHT - h) * 0.5f;
     const Config *c = s_volumeCfg;
     UiDim();
+    edge_glow(x, y, w, h, 22);
     UiPanel(x, y, w, h, 22);
     UiText(UI_BOLD, 30, x + 40, y + 50, UI_COL_TEXT, m->title, UI_LEFT);
-    volume_bar_draw(x + 44, y + 120, w - 88, Tr(T_VOLUME_GAME), c ? c->volumeGame : 100, m->sel == V_GAME);
-    volume_bar_draw(x + 44, y + 210, w - 88, Tr(T_VOLUME_MUSIC), c ? c->volumeMusic : 100, m->sel == V_MUSIC);
+    volume_bar_draw(x + 44, y + 120, w - 88, Tr(T_VOLUME_GAME), c ? c->volumeGame : 100, 100, m->sel == V_GAME, &fill[V_GAME]);
+    volume_bar_draw(x + 44, y + 210, w - 88, Tr(T_UI_SOUNDS), c ? c->volumeSfx : 100, 100, m->sel == V_SFX, &fill[V_SFX]);
+    if (m->count > V_MUSIC)
+        volume_bar_draw(x + 44, y + 300, w - 88, Tr(T_VOLUME_MUSIC), c ? c->volumeMusic : 100, 100, m->sel == V_MUSIC, &fill[V_MUSIC]);
+    UiRect(x + 24, y + h - foot, w - 48, 1, UI_COL_LINE);
+    UiFooter(x + 40, y + h - foot * 0.5f, m->footer);
+}
+
+// ---- Background effect page (Interface > Background effect, A): the effect,
+// up to three colours picked from a row of swatches, its opacity and speed as
+// bars, and a reset. Drawn as a panel on the left with no veil, so the effect
+// itself shows the changes at once beside it (fxpage_draw).
+enum { FXP_EFFECT = 0, FXP_COLOR1, FXP_COLOR2, FXP_COLOR3, FXP_OPACITY, FXP_SPEED, FXP_RESET, FXP_COUNT };
+static const Config *s_fxCfg;
+
+static void settings_fx(UiMenu *m, const Config *c)
+{
+    s_interfacePage = 0;
+    UiMenuClear(m, Tr(T_BG_EFFECT), Tr(T_FOOT_SELECT));
+    m->page = UI_PAGE_FX;
+    m->count = FXP_COUNT;
+    m->sel = 0;
+    s_fxCfg = c;
+}
+
+static int fx_input(UiMenu *m, Config *c, WORD down)
+{
+    int dir = (down & XINPUT_GAMEPAD_DPAD_RIGHT) ? 1 : (down & XINPUT_GAMEPAD_DPAD_LEFT) ? -1 : 0;
+    int a = (down & XINPUT_GAMEPAD_A) != 0;
+    UiMenuNavigate(m, down);
+    if (down & XINPUT_GAMEPAD_B)
+    {
+        settings_interface(m, c);
+        m->sel = I_EFFECT;
+        return SET_NONE;
+    }
+    if (!dir && !a) return SET_NONE;
+    switch (m->sel)
+    {
+    case FXP_EFFECT:
+        c->bgEffect = ((c->bgEffect >= 0 && c->bgEffect < BGFX_COUNT ? c->bgEffect : 0) + (dir ? dir : 1) + BGFX_COUNT) % BGFX_COUNT;
+        break;
+    case FXP_COLOR1: case FXP_COLOR2: case FXP_COLOR3:
+    {
+        int *v = &c->fxColor[m->sel - FXP_COLOR1];
+        *v = ((*v >= 0 && *v <= FX_PALETTE_COUNT ? *v : 0) + (dir ? dir : 1) + FX_PALETTE_COUNT + 1) % (FX_PALETTE_COUNT + 1);
+        break;
+    }
+    case FXP_OPACITY:
+        if (!dir) return SET_NONE;
+        c->fxOpacity += dir * 10;
+        if (c->fxOpacity < 10) c->fxOpacity = 10;
+        if (c->fxOpacity > 200) c->fxOpacity = 200;
+        break;
+    case FXP_SPEED:
+        if (!dir) return SET_NONE;
+        c->fxSpeed += dir * 25;
+        if (c->fxSpeed < 25) c->fxSpeed = 25;
+        if (c->fxSpeed > 300) c->fxSpeed = 300;
+        break;
+    case FXP_RESET:
+        if (!a) return SET_NONE;
+        c->fxColor[0] = c->fxColor[1] = c->fxColor[2] = 0;
+        c->fxOpacity = 100;
+        c->fxSpeed = 100;
+        break;
+    }
+    ui_from_config(c);   // shows at once beside the page
+    return SET_CHANGED;
+}
+
+// One colour's row of swatches: "none" (a crossed-out ring) then the palette, the chosen one ringed.
+static void fx_swatches(float x, float cy, int chosen, int selected)
+{
+    const float r = 12, step = 34, rr = r + 4;
+    int i;
+    for (i = 0; i <= FX_PALETTE_COUNT; i++)
+    {
+        float sx = x + r + i * step;
+        if (!i)
+        {
+            int k;
+            UiCircle(sx, cy, r, D3DCOLOR_ARGB(255, 34, 36, 47));
+            UiRoundRing(sx - r, cy - r, r * 2, r * 2, r, 1.5f, UI_COL_TEXT3);
+            for (k = -3; k <= 3; k++) UiCircle(sx + k * 2.4f, cy - k * 2.4f, 1.1f, UI_COL_TEXT3);
+        }
+        else UiCircle(sx, cy, r, D3DCOLOR_ARGB(255, s_fxPalette[i][0], s_fxPalette[i][1], s_fxPalette[i][2]));
+        if (i != chosen) continue;
+        if (selected)
+        {
+            float a = selection_pulse();
+            selection_glow(sx - rr, cy - rr, rr * 2, rr * 2, rr, a);
+            UiRoundRing(sx - rr, cy - rr, rr * 2, rr * 2, rr, 2.5f, SEL_RING(0.5f + 0.5f * a));
+        }
+        else UiRoundRing(sx - rr, cy - rr, rr * 2, rr * 2, rr, 2.0f, UI_COL_TEXT);
+    }
+}
+
+static void fxpage_draw(const UiMenu *m)
+{
+    static UiAnim fill[2];
+    const float w = 600, h = 680, x = 24, y = 20, foot = 78, iw = w - 88, ix = x + 44;
+    const Config *c = s_fxCfg;
+    float ry = y + 96;
+    char buf[128], fit[96];
+    int i, any;
+    if (!c) return;
+    any = c->fxColor[0] || c->fxColor[1] || c->fxColor[2];
+    edge_glow(x, y, w, h, 22);
+    UiPanel(x, y, w, h, 22);
+    UiText(UI_BOLD, 30, x + 40, y + 48, UI_COL_TEXT, m->title, UI_LEFT);
+    // The effect: "< name >".
+    if (m->sel == FXP_EFFECT) selection_bar(x + 28, ry, w - 56, 42);
+    UiText(UI_BOLD, 20, ix, ry + 21, m->sel == FXP_EFFECT ? UI_COL_TEXT : UI_COL_TEXT2, Tr(T_FX_EFFECT), UI_LEFT);
+    UiTextFit(UI_BOLD, 20, iw - 160, Tr(s_fxLabels[c->bgEffect >= 0 && c->bgEffect < BGFX_COUNT ? c->bgEffect : 0]), fit, sizeof(fit));
+    _snprintf(buf, sizeof(buf) - 1, "< %s >", fit);
+    buf[sizeof(buf) - 1] = 0;
+    UiText(UI_BOLD, 20, ix + iw, ry + 21, UI_COL_TEXT, buf, UI_RIGHT);
+    ry += 60;
+    // The three colours: a label (and "Original" / "Off" while none is chosen there), the swatches under it.
+    for (i = 0; i < 3; i++)
+    {
+        int sel = m->sel == FXP_COLOR1 + i, v = c->fxColor[i];
+        if (sel) selection_bar(x + 28, ry - 4, w - 56, 66);
+        _snprintf(buf, sizeof(buf) - 1, Tr(T_FX_COLOR), i + 1);
+        buf[sizeof(buf) - 1] = 0;
+        UiText(UI_BOLD, 20, ix, ry + 14, sel ? UI_COL_TEXT : UI_COL_TEXT2, buf, UI_LEFT);
+        if (!v) UiText(UI_REGULAR, 19, ix + iw, ry + 14, UI_COL_TEXT3, Tr(!any && !i ? T_FX_ORIGINAL : T_OFF), UI_RIGHT);
+        fx_swatches(ix, ry + 44, v >= 0 && v <= FX_PALETTE_COUNT ? v : 0, sel);
+        ry += 70;
+    }
+    // Opacity and speed: bars, full at 200% and 300%.
+    ry += 4;
+    volume_bar_draw(ix, ry, iw, Tr(T_FX_OPACITY), c->fxOpacity, 200, m->sel == FXP_OPACITY, &fill[0]);
+    ry += 84;
+    volume_bar_draw(ix, ry, iw, Tr(T_FX_SPEED), c->fxSpeed, 300, m->sel == FXP_SPEED, &fill[1]);
+    ry += 80;
+    // Reset: a button.
+    {
+        float bw = UiTextWidth(UI_BOLD, 20, Tr(T_FX_RESET)) + 60, bx = x + (w - bw) * 0.5f;
+        if (m->sel == FXP_RESET) selection_bar(bx, ry, bw, 40);
+        else UiRoundRing(bx, ry, bw, 40, 12, 1.0f, UI_COL_LINE);
+        UiText(UI_BOLD, 20, x + w * 0.5f, ry + 20, m->sel == FXP_RESET ? UI_COL_TEXT : UI_COL_TEXT2, Tr(T_FX_RESET), UI_CENTER);
+    }
+    UiRect(x + 24, y + h - foot, w - 48, 1, UI_COL_LINE);
+    UiFooter(x + 40, y + h - foot * 0.5f, m->footer);
+}
+
+// ---- Wallpapers page (Interface > Wallpapers, A): the background - none, or
+// one of the pictures of game:\wallpapers\ and its folders, the others after
+// it in turn - how they
+// are laid out, how long each one stays, the transition between two, their
+// order, how much they are darkened. One wide panel: the settings on the left,
+// on the right a live preview of the backdrop and a thumbnail of each layout.
+#define WALL_DIR "game:\\wallpapers"
+enum { WP_PICTURE = 0, WP_FIT, WP_INTERVAL, WP_TRANSITION, WP_ORDER, WP_DIM, WP_RESET, WP_COUNT };
+static const int s_wallSecsList[] = { 0, 10, 20, 30, 60, 120, 300, 600 };   // 0: never changes
+
+// The background chosen: 0 none, else 1 + its place among the pictures.
+static int wall_choice(const Config *c)
+{
+    int i;
+    if (!c->wallCustom || !UiWallpaperCount()) return 0;
+    i = UiWallpaperFind(c->wallFile);
+    return i < 0 ? 1 : i + 1;   // gone from the folder: the first
+}
+
+// "< No >", or "< name (3/12) >" (its name without the extension, cut to fit).
+static void wall_choice_text(const Config *c, char *out, size_t size, float maxW)
+{
+    int k = wall_choice(c), n = UiWallpaperCount();
+    if (!k) _snprintf(out, size - 1, "< %s >", Tr(n || !c->wallCustom ? T_OFF : T_WALL_NONE_FOUND));
+    else
+    {
+        char name[128], fit[64], count[16], *dot;
+        strncpy(name, UiWallpaperName(k - 1), sizeof(name) - 1);
+        name[sizeof(name) - 1] = 0;
+        if ((dot = strrchr(name, '.')) != NULL) *dot = 0;
+        sprintf(count, " (%d/%d)", k, n);
+        UiTextFit(UI_BOLD, 20, maxW - UiTextWidth(UI_BOLD, 20, count), name, fit, sizeof(fit));
+        _snprintf(out, size - 1, "< %s%s >", fit, count);
+    }
+    out[size - 1] = 0;
+}
+static const int s_transLabels[UI_TRANS_COUNT] = { T_TR_FADE, T_TR_SLIDE, T_TR_ZOOM, T_TR_WIPE, T_TR_BLINDS, T_TR_RANDOM };
+static const int s_fitLabels[UI_FIT_COUNT] = { T_FIT_FILL, T_FIT_FIT, T_FIT_STRETCH, T_FIT_CENTER, T_FIT_TILE };
+static const Config *s_wallCfg;
+
+static void settings_wall(UiMenu *m, const Config *c)
+{
+    s_interfacePage = 0;
+    UiMenuClear(m, Tr(T_WALLPAPERS), Tr(T_FOOT_SELECT));
+    m->page = UI_PAGE_WALL;
+    m->count = WP_COUNT;
+    m->sel = 0;
+    s_wallCfg = c;
+    UiWallpaperRescan();   // pictures may have been copied in since
+}
+
+static int wall_input(UiMenu *m, Config *c, WORD down)
+{
+    int dir = (down & XINPUT_GAMEPAD_DPAD_RIGHT) ? 1 : (down & XINPUT_GAMEPAD_DPAD_LEFT) ? -1 : 0, a = (down & XINPUT_GAMEPAD_A) != 0, k, cur = 0;
+    UiMenuNavigate(m, down);
+    if (down & XINPUT_GAMEPAD_B)
+    {
+        settings_interface(m, c);
+        m->sel = I_WALLPAPERS;
+        return SET_NONE;
+    }
+    if (!dir && !a) return SET_NONE;
+    switch (m->sel)
+    {
+    case WP_PICTURE:
+    {
+        // No, then each picture.
+        int n = UiWallpaperCount(), states = n + 1;
+        cur = (wall_choice(c) + (dir ? dir : 1) + states) % states;
+        c->wallCustom = cur > 0;
+        if (cur)
+        {
+            strncpy(c->wallFile, UiWallpaperName(cur - 1), sizeof(c->wallFile) - 1);
+            c->wallFile[sizeof(c->wallFile) - 1] = 0;
+        }
+        break;
+    }
+    case WP_FIT:
+        c->wallFit = ((c->wallFit >= 0 && c->wallFit < UI_FIT_COUNT ? c->wallFit : 0) + (dir ? dir : 1) + UI_FIT_COUNT) % UI_FIT_COUNT;
+        break;
+    case WP_INTERVAL:
+    {
+        const int n = sizeof(s_wallSecsList) / sizeof(s_wallSecsList[0]);
+        for (k = 0; k < n; k++)
+            if (s_wallSecsList[k] <= c->wallInterval) cur = k;
+        c->wallInterval = s_wallSecsList[(cur + (dir ? dir : 1) + n) % n];   // "never" is one of them
+        break;
+    }
+    case WP_TRANSITION:
+        c->wallTransition = ((c->wallTransition >= 0 && c->wallTransition < UI_TRANS_COUNT ? c->wallTransition : 0) + (dir ? dir : 1) + UI_TRANS_COUNT) %
+                            UI_TRANS_COUNT;
+        break;
+    case WP_ORDER:
+        c->wallShuffle = !c->wallShuffle;
+        break;
+    case WP_DIM:
+        if (!dir) return SET_NONE;
+        c->wallDim += dir * 10;
+        if (c->wallDim < 0) c->wallDim = 0;
+        if (c->wallDim > 80) c->wallDim = 80;
+        break;
+    case WP_RESET:
+        if (!a) return SET_NONE;   // on or off stays: only how it is shown
+        c->wallFit = UI_FIT_FILL;
+        c->wallInterval = 30;
+        c->wallTransition = UI_TRANS_FADE;
+        c->wallShuffle = 0;
+        c->wallDim = 40;
+        break;
+    }
+    ui_from_config(c);
+    return SET_CHANGED;
+}
+
+// One row of the graphical pages: the selection behind it, its label at the left, its value at the right.
+static void page_row(float x, float w, float y, float h, const char *label, const char *value, int selected)
+{
+    if (selected) selection_bar(x + 28, y, w - 56, h);
+    UiText(UI_BOLD, 20, x + 44, y + h * 0.5f, selected ? UI_COL_TEXT : UI_COL_TEXT2, label, UI_LEFT);
+    if (value && value[0]) UiText(UI_BOLD, 20, x + w - 44, y + h * 0.5f, UI_COL_TEXT, value, UI_RIGHT);
+}
+
+// A thumbnail of one layout: the wallpaper shown now laid out that way, or a sketch of it when there is none.
+static void wall_thumb(float x, float y, float w, float h, int fit, int chosen, int selected)
+{
+    UiRoundRect(x, y, w, h, 6, D3DCOLOR_ARGB(255, 20, 22, 30), D3DCOLOR_ARGB(255, 14, 15, 21));
+    if (!UiWallpaperThumb(x, y, w, h, fit))
+    {
+        D3DCOLOR c = D3DCOLOR_ARGB(150, 120, 130, 160);
+        float pw = h * 1.33f;   // a 4:3 picture
+        switch (fit)
+        {
+        case UI_FIT_FIT: UiRect(x + (w - pw) * 0.5f, y, pw, h, c); break;
+        case UI_FIT_CENTER: UiRect(x + w * 0.35f, y + h * 0.3f, w * 0.3f, h * 0.4f, c); break;
+        case UI_FIT_TILE:
+        {
+            int i, j;
+            for (i = 0; i < 4; i++)
+                for (j = 0; j < 3; j++) UiRect(x + 2 + i * (w - 4) / 4, y + 2 + j * (h - 4) / 3, (w - 4) / 4 - 2, (h - 4) / 3 - 2, c);
+            break;
+        }
+        default: UiRect(x, y, w, h, c); break;
+        }
+    }
+    if (chosen)
+    {
+        if (selected)
+        {
+            float a = selection_pulse();
+            selection_glow(x - 3, y - 3, w + 6, h + 6, 8, a);
+            UiRoundRing(x - 3, y - 3, w + 6, h + 6, 8, 2.5f, SEL_RING(0.5f + 0.5f * a));
+        }
+        else UiRoundRing(x - 3, y - 3, w + 6, h + 6, 8, 2.0f, UI_COL_TEXT);
+    }
+    else UiRoundRing(x, y, w, h, 6, 1.0f, UI_COL_LINE);
+}
+
+static void wallpage_draw(const UiMenu *m)
+{
+    static UiAnim fill;
+    const float w = 1232, h = 680, x = 24, y = 20, foot = 78, lw = 600, iw = lw - 88, ix = x + 44;
+    const float px = x + lw + 10, pw = w - lw - 54, ph = pw * UI_HEIGHT / UI_WIDTH, py = y + 96;
+    const Config *c = s_wallCfg;
+    float ry = y + 96;
+    char buf[96];
+    int i, fit;
+    if (!c) return;
+    fit = c->wallFit >= 0 && c->wallFit < UI_FIT_COUNT ? c->wallFit : 0;
+    edge_glow(x, y, w, h, 22);
+    UiPanel(x, y, w, h, 22);
+    UiText(UI_BOLD, 30, x + 40, y + 48, UI_COL_TEXT, m->title, UI_LEFT);
+    // ---- The settings, on the left.
+    wall_choice_text(c, buf, sizeof(buf), 300);
+    page_row(x, lw, ry, 44, Tr(T_WALL_CUSTOM), buf, m->sel == WP_PICTURE);
+    ry += 54;
+    _snprintf(buf, sizeof(buf) - 1, "< %s >", Tr(s_fitLabels[fit]));
+    buf[sizeof(buf) - 1] = 0;
+    page_row(x, lw, ry, 44, Tr(T_WALL_FIT), buf, m->sel == WP_FIT);
+    ry += 54;
+    if (c->wallInterval <= 0) _snprintf(buf, sizeof(buf) - 1, "< %s >", Tr(T_WALL_NEVER));
+    else if (c->wallInterval < 60) _snprintf(buf, sizeof(buf) - 1, "< %d s >", c->wallInterval);
+    else _snprintf(buf, sizeof(buf) - 1, "< %d min >", c->wallInterval / 60);
+    buf[sizeof(buf) - 1] = 0;
+    page_row(x, lw, ry, 44, Tr(T_WALL_INTERVAL), buf, m->sel == WP_INTERVAL);
+    ry += 54;
+    _snprintf(buf, sizeof(buf) - 1, "< %s >", Tr(s_transLabels[c->wallTransition >= 0 && c->wallTransition < UI_TRANS_COUNT ? c->wallTransition : 0]));
+    buf[sizeof(buf) - 1] = 0;
+    page_row(x, lw, ry, 44, Tr(T_WALL_TRANSITION), buf, m->sel == WP_TRANSITION);
+    ry += 54;
+    _snprintf(buf, sizeof(buf) - 1, "< %s >", Tr(c->wallShuffle ? T_ORDER_RANDOM : T_ORDER_NAME));
+    buf[sizeof(buf) - 1] = 0;
+    page_row(x, lw, ry, 44, Tr(T_WALL_ORDER), buf, m->sel == WP_ORDER);
+    ry += 62;
+    volume_bar_draw(ix, ry, iw, Tr(T_WALL_DIM), c->wallDim, 80, m->sel == WP_DIM, &fill);
+    ry += 92;
+    {
+        float bw = UiTextWidth(UI_BOLD, 20, Tr(T_FX_RESET)) + 60, bx = x + (lw - bw) * 0.5f;
+        if (m->sel == WP_RESET) selection_bar(bx, ry, bw, 40);
+        else UiRoundRing(bx, ry, bw, 40, 12, 1.0f, UI_COL_LINE);
+        UiText(UI_BOLD, 20, x + lw * 0.5f, ry + 20, m->sel == WP_RESET ? UI_COL_TEXT : UI_COL_TEXT2, Tr(T_FX_RESET), UI_CENTER);
+    }
+    // ---- The preview and the layouts, on the right.
+    UiRect(x + lw - 8, y + 90, 1, h - foot - 110, UI_COL_LINE);
+    UiText(UI_BOLD, 20, px, py - 22, UI_COL_TEXT2, Tr(T_SAVER_PREVIEW), UI_LEFT);
+    UiRoundRect(px, py, pw, ph, 8, D3DCOLOR_ARGB(255, 16, 17, 23), D3DCOLOR_ARGB(255, 10, 11, 15));
+    if (!c->wallCustom || !UiWallpaperPreview(px, py, pw, ph))
+    {
+        // Off, or no picture to show: what to do about it.
+        const char *say = Tr(UiWallpaperCount() ? T_WALL_OFF_HINT : T_WALL_HINT);
+        float th = paragraph(UI_REGULAR, 19, px + 30, 0, pw - 60, 3, 0, say);   // measured
+        paragraph(UI_REGULAR, 19, px + 30, py + (ph - th) * 0.5f, pw - 60, 3, UI_COL_TEXT2, say);
+    }
+    UiRoundRing(px, py, pw, ph, 8, 1.0f, UI_COL_LINE);
+    {
+        const float tw = (pw - 4 * 14) / 5, th = tw * UI_HEIGHT / UI_WIDTH, ty = py + ph + 26;
+        for (i = 0; i < UI_FIT_COUNT; i++)
+        {
+            float tx = px + i * (tw + 14);
+            wall_thumb(tx, ty, tw, th, i, i == fit, m->sel == WP_FIT);
+            UiText(i == fit ? UI_BOLD : UI_REGULAR, 16, tx + tw * 0.5f, ty + th + 18, i == fit ? UI_COL_TEXT : UI_COL_TEXT3, Tr(s_fitLabels[i]), UI_CENTER);
+        }
+    }
+    UiRect(x + 24, y + h - foot, w - 48, 1, UI_COL_LINE);
+    UiFooter(x + 40, y + h - foot * 0.5f, m->footer);
+}
+
+// ---- Borders page (Interface > Borders and panels, A): the colour of the
+// menus' edges (the selection's, or one of the effect page's swatches), how
+// strong they are, how wide, whether they glow (pulsing, steady, not at all),
+// how see-through the panels are and how round their corners. A panel like
+// the others, so every change shows on the page itself.
+enum { BP_COLOR = 0, BP_OPACITY, BP_WIDTH, BP_GLOW, BP_PANEL, BP_CORNERS, BP_RESET, BP_COUNT };
+static const int s_glowLabels[3] = { T_GLOW_PULSE, T_GLOW_STEADY, T_OFF };
+static const int s_cornerLabels[4] = { T_CORNER_SQUARE, T_CORNER_SOFT, T_CORNER_ROUND, T_CORNER_ROUNDER };
+static const Config *s_borderCfg;
+
+static void settings_borders(UiMenu *m, const Config *c)
+{
+    s_interfacePage = 0;
+    UiMenuClear(m, Tr(T_BORDERS), Tr(T_FOOT_SELECT));
+    m->page = UI_PAGE_BORDER;
+    m->count = BP_COUNT;
+    m->sel = 0;
+    s_borderCfg = c;
+}
+
+static int border_input(UiMenu *m, Config *c, WORD down)
+{
+    int dir = (down & XINPUT_GAMEPAD_DPAD_RIGHT) ? 1 : (down & XINPUT_GAMEPAD_DPAD_LEFT) ? -1 : 0, a = (down & XINPUT_GAMEPAD_A) != 0;
+    UiMenuNavigate(m, down);
+    if (down & XINPUT_GAMEPAD_B)
+    {
+        settings_interface(m, c);
+        m->sel = I_BORDERS;
+        return SET_NONE;
+    }
+    if (!dir && !a) return SET_NONE;
+    switch (m->sel)
+    {
+    case BP_COLOR:
+        c->borderColor = ((c->borderColor >= 0 && c->borderColor <= FX_PALETTE_COUNT ? c->borderColor : 0) + (dir ? dir : 1) + FX_PALETTE_COUNT + 1) %
+                         (FX_PALETTE_COUNT + 1);
+        break;
+    case BP_OPACITY:
+        if (!dir) return SET_NONE;
+        c->borderOpacity += dir * 10;
+        if (c->borderOpacity < 0) c->borderOpacity = 0;
+        if (c->borderOpacity > 100) c->borderOpacity = 100;
+        break;
+    case BP_WIDTH:
+        c->borderWidth = ((c->borderWidth >= 0 && c->borderWidth <= 4 ? c->borderWidth : 1) + (dir ? dir : 1) + 5) % 5;
+        break;
+    case BP_GLOW:
+        c->borderGlow = ((c->borderGlow >= 0 && c->borderGlow < 3 ? c->borderGlow : 0) + (dir ? dir : 1) + 3) % 3;
+        break;
+    case BP_PANEL:
+        if (!dir) return SET_NONE;
+        c->panelOpacity += dir * 10;
+        if (c->panelOpacity < 20) c->panelOpacity = 20;
+        if (c->panelOpacity > 100) c->panelOpacity = 100;
+        break;
+    case BP_CORNERS:
+        c->panelRound = ((c->panelRound >= 0 && c->panelRound < 4 ? c->panelRound : 2) + (dir ? dir : 1) + 4) % 4;
+        break;
+    case BP_RESET:
+        if (!a) return SET_NONE;
+        c->borderColor = 0;
+        c->borderOpacity = 100;
+        c->borderWidth = 1;
+        c->borderGlow = 0;
+        c->panelOpacity = 70;
+        c->panelRound = 2;
+        break;
+    }
+    ui_from_config(c);
+    return SET_CHANGED;
+}
+
+static void borderpage_draw(const UiMenu *m)
+{
+    static UiAnim fill[2];
+    const float w = 600, h = 680, x = 24, y = 20, foot = 78, iw = w - 88, ix = x + 44;
+    const Config *c = s_borderCfg;
+    float ry = y + 92;
+    char buf[96];
+    int v;
+    if (!c) return;
+    edge_glow(x, y, w, h, 22);
+    UiPanel(x, y, w, h, 22);
+    UiText(UI_BOLD, 30, x + 40, y + 48, UI_COL_TEXT, m->title, UI_LEFT);
+    // The colour: "as the selection" first (its own colour, a dot in it), then the swatches.
+    v = c->borderColor >= 0 && c->borderColor <= FX_PALETTE_COUNT ? c->borderColor : 0;
+    if (m->sel == BP_COLOR) selection_bar(x + 28, ry - 4, w - 56, 66);
+    UiText(UI_BOLD, 20, ix, ry + 14, m->sel == BP_COLOR ? UI_COL_TEXT : UI_COL_TEXT2, Tr(T_BORDER_COLOR), UI_LEFT);
+    if (!v) UiText(UI_REGULAR, 19, ix + iw, ry + 14, UI_COL_TEXT3, Tr(T_COL_SELECTION), UI_RIGHT);
+    fx_swatches(ix, ry + 44, v, m->sel == BP_COLOR);
+    UiCircle(ix + 12, ry + 44, 12, SEL_HI(255));   // swatch 0 here: the selection's colour, not "none"
+    UiCircle(ix + 12, ry + 44, 4, D3DCOLOR_ARGB(255, 20, 22, 30));
+    ry += 76;
+    volume_bar_draw(ix, ry, iw, Tr(T_BORDER_OPACITY), c->borderOpacity, 100, m->sel == BP_OPACITY, &fill[0]);
+    ry += 80;
+    if (c->borderWidth <= 0) _snprintf(buf, sizeof(buf) - 1, "< %s >", Tr(T_OFF));
+    else _snprintf(buf, sizeof(buf) - 1, "< %d px >", c->borderWidth);
+    buf[sizeof(buf) - 1] = 0;
+    page_row(x, w, ry, 44, Tr(T_BORDER_WIDTH), buf, m->sel == BP_WIDTH);
+    ry += 50;
+    _snprintf(buf, sizeof(buf) - 1, "< %s >", Tr(s_glowLabels[c->borderGlow >= 0 && c->borderGlow < 3 ? c->borderGlow : 0]));
+    buf[sizeof(buf) - 1] = 0;
+    page_row(x, w, ry, 44, Tr(T_BORDER_GLOW), buf, m->sel == BP_GLOW);
+    ry += 56;
+    volume_bar_draw(ix, ry, iw, Tr(T_PANEL_OPACITY), c->panelOpacity, 100, m->sel == BP_PANEL, &fill[1]);
+    ry += 80;
+    _snprintf(buf, sizeof(buf) - 1, "< %s >", Tr(s_cornerLabels[c->panelRound >= 0 && c->panelRound < 4 ? c->panelRound : 2]));
+    buf[sizeof(buf) - 1] = 0;
+    page_row(x, w, ry, 44, Tr(T_PANEL_CORNERS), buf, m->sel == BP_CORNERS);
+    ry += 58;
+    {
+        float bw = UiTextWidth(UI_BOLD, 20, Tr(T_FX_RESET)) + 60, bx = x + (w - bw) * 0.5f;
+        if (m->sel == BP_RESET) selection_bar(bx, ry, bw, 40);
+        else UiRoundRing(bx, ry, bw, 40, 12, 1.0f, UI_COL_LINE);
+        UiText(UI_BOLD, 20, x + w * 0.5f, ry + 20, m->sel == BP_RESET ? UI_COL_TEXT : UI_COL_TEXT2, Tr(T_FX_RESET), UI_CENTER);
+    }
     UiRect(x + 24, y + h - foot, w - 48, 1, UI_COL_LINE);
     UiFooter(x + 40, y + h - foot * 0.5f, m->footer);
 }
@@ -704,6 +1749,18 @@ static void settings_sound(UiMenu *m, const Config *c)
     UiMenuClear(m, Tr(T_SOUND), Tr(T_FOOT_SELECT));
     UiMenuAdd(m, Tr(T_VOLUME), "");
     UiMenuAdd(m, Tr(T_AUDIO_MARGIN), "");
+    UiMenuAdd(m, Tr(T_AUDIO_OUTPUT), "");
+    if (s_browser)
+    {
+        // The menus' own sounds and music: nothing to hear of them in game.
+        UiMenuAdd(m, Tr(T_UI_SOUNDS), "");
+        UiMenuAdd(m, Tr(T_SFX_STYLE), "");
+        UiMenuAdd(m, Tr(T_MUSIC), "");
+    }
+    {
+        static const unsigned char icons[] = { UI_ICON_SOUND, UI_ICON_CLOCK, UI_ICON_SPEAKERS, UI_ICON_PLAY, UI_ICON_SLIDERS, UI_ICON_MUSIC };
+        UiMenuIcons(m, icons, sizeof(icons));
+    }
     settings_values(m, c);
 }
 
@@ -731,6 +1788,50 @@ static int sound_input(UiMenu *m, Config *c, WORD down)
         settings_values(m, c);
         return SET_CHANGED;
     }
+    if (m->sel == SND_UISOUNDS && (dir || (down & XINPUT_GAMEPAD_A)))
+    {
+        c->uiSounds = !c->uiSounds;
+        xb_audio_ui_enable(c->uiSounds);
+        if (c->uiSounds) xb_audio_ui_sound(XB_SFX_SELECT);   // heard at once, now that it is on
+        settings_values(m, c);
+        return SET_CHANGED;
+    }
+    if (m->sel == SND_MONO && (dir || (down & XINPUT_GAMEPAD_A)))
+    {
+        c->audioMono = !c->audioMono;
+        xb_audio_set_mono(c->audioMono);
+        settings_values(m, c);
+        return SET_CHANGED;
+    }
+    if (m->sel == SND_SFXSTYLE && (dir || (down & XINPUT_GAMEPAD_A)))
+    {
+        c->uiSoundStyle = ((c->uiSoundStyle >= 0 && c->uiSoundStyle < XB_SFX_STYLE_COUNT ? c->uiSoundStyle : 0) + (dir ? dir : 1) +
+                           XB_SFX_STYLE_COUNT) % XB_SFX_STYLE_COUNT;
+        xb_audio_ui_style(c->uiSoundStyle);
+        xb_audio_ui_sound(XB_SFX_SELECT);   // heard at once in the new style
+        settings_values(m, c);
+        return SET_CHANGED;
+    }
+    if (m->sel == SND_MUSIC && (dir || (down & XINPUT_GAMEPAD_A)))
+    {
+        // No music, in order, at random, then each track of game:\music\ on its own.
+        int n = xb_audio_music_scan(MUSIC_DIR), states = 3 + n, k;
+        int cur = c->musicMode == XB_MUSIC_OFF ? 0 : c->musicMode == XB_MUSIC_RANDOM ? 2 : 1;
+        if (!dir) dir = 1;
+        if (c->musicMode == XB_MUSIC_TRACK)
+            for (k = 0; k < n; k++)
+                if (!_stricmp(xb_audio_music_track(k), c->musicTrack)) cur = 3 + k;
+        cur = (cur + dir + states) % states;
+        c->musicMode = cur == 0 ? XB_MUSIC_OFF : cur == 1 ? XB_MUSIC_ORDER : cur == 2 ? XB_MUSIC_RANDOM : XB_MUSIC_TRACK;
+        if (cur >= 3)
+        {
+            strncpy(c->musicTrack, xb_audio_music_track(cur - 3), sizeof(c->musicTrack) - 1);
+            c->musicTrack[sizeof(c->musicTrack) - 1] = 0;
+        }
+        if (s_browser) xb_audio_music_start(MUSIC_DIR, c->musicMode, c->musicTrack);   // heard at once (no music in game)
+        settings_values(m, c);
+        return SET_CHANGED;
+    }
     return SET_NONE;
 }
 
@@ -745,6 +1846,10 @@ static void settings_graphics(UiMenu *m, const Config *c)
     UiMenuAdd(m, Tr(T_SHARPEN), "");
     UiMenuAdd(m, Tr(T_BLUR), "");
     UiMenuAdd(m, Tr(T_SHOW_FPS), "");
+    {
+        static const unsigned char icons[] = { UI_ICON_SLIDERS, UI_ICON_TEXTURE, UI_ICON_HD, UI_ICON_SMOOTH, UI_ICON_SHARP, UI_ICON_BLUR, UI_ICON_CHART };
+        UiMenuIcons(m, icons, sizeof(icons));
+    }
     settings_values(m, c);
 }
 
@@ -762,6 +1867,10 @@ static void settings_screen(UiMenu *m, const Config *c)
     UiMenuAdd(m, Tr(T_VSYNC), "");
     UiMenuAdd(m, Tr(T_ANTIFLICKER), "");
     UiMenuAdd(m, Tr(T_SCREEN_EFFECT), "");
+    {
+        static const unsigned char icons[] = { UI_ICON_SCREEN, UI_ICON_STRETCH, UI_ICON_CROSSHAIR, UI_ICON_SUN, UI_ICON_VSYNC, UI_ICON_EYE, UI_ICON_SCANLINES };
+        UiMenuIcons(m, icons, sizeof(icons));
+    }
     settings_values(m, c);
 }
 
@@ -773,6 +1882,10 @@ static void settings_cal(UiMenu *m, const Config *c)
     UiMenuAdd(m, Tr(T_PIC_SIZE), "");
     UiMenuAdd(m, Tr(T_PIC_LR), "");
     UiMenuAdd(m, Tr(T_PIC_UD), "");
+    {
+        static const unsigned char icons[] = { UI_ICON_FRAME, UI_ICON_ARROWS_H, UI_ICON_ARROWS_V };
+        UiMenuIcons(m, icons, sizeof(icons));
+    }
     settings_values(m, c);
 }
 
@@ -1336,6 +2449,7 @@ static void ctl_auto_draw(void)
     const float w = 760, h = 340, x = (UI_WIDTH - w) * 0.5f, y = (UI_HEIGHT - h) * 0.5f;
     char buf[200];
     UiDim();
+    edge_glow(x, y, w, h, 22);
     UiPanel(x, y, w, h, 22);
     UiText(UI_BOLD, 30, x + 40, y + 50, UI_COL_TEXT, Tr(T_AUTO_CONFIG), UI_LEFT);
     UiRoundRect(x + 40, y + 74, 30, 4, 2, UI_COL_ACCENT_HI, UI_COL_ACCENT);
@@ -1381,6 +2495,7 @@ static void controls_draw(const UiMenu *m)
     else { h64_padmap_default(&def); map = &def; }
 
     UiDim();
+    edge_glow(x, y, CTL_W, CTL_H, 22);
     UiPanel(x, y, CTL_W, CTL_H, 22);
     UiText(UI_BOLD, 30, x + 40, y + 50, UI_COL_TEXT, Tr(T_CONTROLS), UI_LEFT);
     UiRoundRect(x + 40, y + 74, 30, 4, 2, UI_COL_ACCENT_HI, UI_COL_ACCENT);
@@ -2033,6 +3148,7 @@ static void calib_draw(const UiMenu *m)
     cal = &map->cal[s];
 
     UiDim();
+    edge_glow(x, y, CTL_W, CTL_H, 22);
     UiPanel(x, y, CTL_W, CTL_H, 22);
     UiText(UI_BOLD, 30, x + 40, y + 50, UI_COL_TEXT, Tr(T_CALIBRATION), UI_LEFT);
     {
@@ -2219,16 +3335,34 @@ static int graphics_input(UiMenu *m, Config *c, WORD down)
     return SET_NONE;
 }
 
+static int settings_input(UiMenu *m, Config *c, int perGame, WORD down);
+
 int SettingsInput(UiMenu *m, Config *c, int perGame, WORD down)
 {
+    int r = settings_input(m, c, perGame, down);
+    if (r == SET_CHANGED && (down & (XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT)))
+        xb_audio_ui_sound_instead((down & XINPUT_GAMEPAD_DPAD_LEFT) ? XB_SFX_VALUE_DOWN : XB_SFX_VALUE_UP);
+    else if (r == SET_SAVE_ALL || r == SET_SAVE_GAME) xb_audio_ui_sound_instead(XB_SFX_SAVE);
+    return r;
+}
+
+static int settings_input(UiMenu *m, Config *c, int perGame, WORD down)
+{
     s_perGame = perGame;
+    if (down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT)) UiMenuPress();   // the row shows the press
+    if (s_catEditPage) return catedit_input(m, c, down);
+    if (s_catsPage) return cats_input(m, c, down);
     if (s_graphicsPage) return graphics_input(m, c, down);
     if (s_calPage) return cal_input(m, c, down);
     if (s_screenPage) return screen_input(m, c, down);
+    if (s_saverPage) return saver_input(m, c, down);
     if (s_interfacePage) return interface_input(m, c, down);
     if (m->page == UI_PAGE_CONTROLS) return controls_input(m, c, down);
     if (m->page == UI_PAGE_CALIB) return calib_input(m, c, down);
     if (m->page == UI_PAGE_VOLUME) return volume_input(m, c, down);
+    if (m->page == UI_PAGE_FX) return fx_input(m, c, down);
+    if (m->page == UI_PAGE_WALL) return wall_input(m, c, down);
+    if (m->page == UI_PAGE_BORDER) return border_input(m, c, down);
     if (s_soundPage) return sound_input(m, c, down);
     if (s_systemPage) return system_input(m, c, down);
     UiMenuNavigate(m, down);
@@ -2258,7 +3392,7 @@ int SettingsInput(UiMenu *m, Config *c, int perGame, WORD down)
         controls_open(m, c);
         return SET_NONE;
     }
-    if (m->sel == S_INTERFACE && (down & XINPUT_GAMEPAD_A))
+    if (s_browser && m->sel == S_INTERFACE && (down & XINPUT_GAMEPAD_A))
     {
         settings_interface(m, c);
         return SET_NONE;
@@ -2273,33 +3407,47 @@ int SettingsInput(UiMenu *m, Config *c, int perGame, WORD down)
 }
 
 // ---- Leaving ----
-// A yes/no question ("Quit to the dashboard?", "Download the box art?"): 1 for A, 0 for B or BACK.
-// `title` (-1: none) above the question; everything centred, the panel just
-// big enough for its text (a little room around, no wide margins).
-static int confirm_ask(IDirect3DDevice9 *dev, int title, int question, int footer)
+// A yes/no question's panel: `title` (-1: none) above the question, everything
+// centred, the panel just big enough for its text (a little room around, no
+// wide margins), its edge glowing.
+static void confirm_draw(int title, int question, int footer)
 {
     const float pad = 44.0f, titleH = title >= 0 ? 46.0f : 0.0f, qSize = title >= 0 ? 22.0f : 30.0f;
     float tw = title >= 0 ? UiTextWidth(UI_BOLD, 30, Tr(title)) : 0, qw = UiTextWidth(title >= 0 ? UI_REGULAR : UI_BOLD, qSize, Tr(question));
-    float fw = UiFooterWidth(Tr(footer)), w = tw, h = 36 + titleH + 44 + 26 + 66;
-    UiInput in;
+    float fw = UiFooterWidth(Tr(footer)), w = tw, h = 36 + titleH + 44 + 26 + 66, x, y, cx = UI_WIDTH * 0.5f;
     if (qw > w) w = qw;
     if (fw > w) w = fw;
     w += pad * 2;
+    x = (UI_WIDTH - w) / 2;
+    y = (UI_HEIGHT - h) / 2;
+    edge_glow(x, y, w, h, 22);
+    UiPanel(x, y, w, h, 22);
+    if (title >= 0) UiText(UI_BOLD, 30, cx, y + 36 + 18, UI_COL_TEXT, Tr(title), UI_CENTER);
+    UiText(title >= 0 ? UI_REGULAR : UI_BOLD, qSize, cx, y + 36 + titleH + 18, title >= 0 ? UI_COL_TEXT2 : UI_COL_TEXT, Tr(question), UI_CENTER);
+    UiRect(x + 24, y + h - 66, w - 48, 1, UI_COL_LINE);
+    UiFooter(cx - fw * 0.5f, y + h - 33, Tr(footer));
+}
+
+void UiConfirmDraw(int title, int question, int footer)
+{
+    UiDim();   // over whatever is behind it (the in-game menu)
+    confirm_draw(title, question, footer);
+}
+
+// The same question on its own screen (the ROM list, Settings): 1 for A, 0 for B or BACK.
+static int confirm_ask(IDirect3DDevice9 *dev, int title, int question, int footer)
+{
+    UiInput in;
     UiInputInit(&in);
     for (;;)
     {
         WORD down = UiInputPoll(&in);
-        const float x = (UI_WIDTH - w) / 2, y = (UI_HEIGHT - h) / 2, cx = UI_WIDTH * 0.5f;
         if (down & XINPUT_GAMEPAD_A) return 1;
         if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) return 0;
         dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
         UiBegin(dev);
         UiBackdrop();
-        UiPanel(x, y, w, h, 22);
-        if (title >= 0) UiText(UI_BOLD, 30, cx, y + 36 + 18, UI_COL_TEXT, Tr(title), UI_CENTER);
-        UiText(title >= 0 ? UI_REGULAR : UI_BOLD, qSize, cx, y + 36 + titleH + 18, title >= 0 ? UI_COL_TEXT2 : UI_COL_TEXT, Tr(question), UI_CENTER);
-        UiRect(x + 24, y + h - 66, w - 48, 1, UI_COL_LINE);
-        UiFooter(cx - fw * 0.5f, y + h - 33, Tr(footer));
+        confirm_draw(title, question, footer);
         UiEnd();
         dev->Present(NULL, NULL, NULL, NULL);
         Sleep(16);
@@ -2660,6 +3808,27 @@ int BatteryCheck(const Config *c, char *msg, int size)
 struct RomEntry { std::string file, shown; };
 static bool rom_less(const RomEntry &a, const RomEntry &b) { return _stricmp(a.shown.c_str(), b.shown.c_str()) < 0; }
 
+// A file name as the list shows it: without the dump tags - "(U)", "(USA)",
+// "(Rev 1)", "[!]", "[b1]"... - and the spaces they leave. A name that would
+// be left empty stays as it is.
+static std::string clean_name(const char *name, size_t len)
+{
+    std::string out;
+    size_t i;
+    int depth = 0;
+    for (i = 0; i < len; i++)
+    {
+        char ch = name[i];
+        if (ch == '(' || ch == '[') { depth++; continue; }
+        if ((ch == ')' || ch == ']') && depth) { depth--; continue; }
+        if (depth) continue;
+        if ((ch == ' ' || ch == '_') && (out.empty() || out[out.size() - 1] == ' ')) continue;   // no double or leading space
+        out += ch == '_' ? ' ' : ch;
+    }
+    while (!out.empty() && (out[out.size() - 1] == ' ' || out[out.size() - 1] == '-')) out.erase(out.size() - 1);
+    return out.empty() ? std::string(name, len) : out;
+}
+
 static void scan_roms(std::vector<RomEntry> *out)
 {
     WIN32_FIND_DATAA fd;
@@ -2672,11 +3841,417 @@ static void scan_roms(std::vector<RomEntry> *out)
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
         if (!dot || (_stricmp(dot, ".z64") && _stricmp(dot, ".n64") && _stricmp(dot, ".v64") && _stricmp(dot, ".zip"))) continue;
         e.file = std::string("game:\\roms\\") + fd.cFileName;
-        e.shown = std::string(fd.cFileName, dot - fd.cFileName);
+        e.shown = clean_name(fd.cFileName, dot - fd.cFileName);
         out->push_back(e);
     } while (FindNextFileA(f, &fd));
     FindClose(f);
     std::sort(out->begin(), out->end(), rom_less);
+}
+
+// ---- Game library: favourites and categories (the ROM list's tabs) ----
+// Favourites: <drive>:\config\favorites.txt, one ROM file name per line.
+// Categories: <drive>:\config\categories.txt, "field=value" per line - a
+// category is every game whose information (the box art download's <key>.txt:
+// ArtReadInfo) has that value in that field. The library's information is
+// read once, when first wanted, and again after a box art download.
+enum { CF_GENRE = 0, CF_REGION, CF_PLAYERS, CF_DEVELOPER, CF_PUBLISHER, CF_YEAR, CF_COUNT };
+static const char *const s_catFieldKey[CF_COUNT] = { "genre", "region", "players", "developer", "publisher", "year" };
+static const int s_catFieldLabel[CF_COUNT] = { T_CAT_GENRE, T_CAT_REGION, T_CAT_PLAYERS, T_CAT_DEVELOPER, T_CAT_PUBLISHER, T_CAT_YEAR };
+#define MAX_CATS 16
+struct GameCat { int field; char value[64]; };
+struct LibGame { std::string file, field[CF_COUNT]; };
+static GameCat s_cats[MAX_CATS];
+static int s_catCount, s_catsLoaded, s_favsLoaded, s_libLoaded;
+static std::set<std::string> s_favs;   // lower-case file names
+static std::vector<LibGame> s_lib;
+static char s_libDrive[16] = "game";
+
+static void lib_file(const char *name, char *out, size_t size)
+{
+    _snprintf(out, size - 1, "%s:\\config\\%s", s_libDrive, name);
+    out[size - 1] = 0;
+}
+
+static std::string fav_key(const std::string &file)
+{
+    const char *base = strrchr(file.c_str(), '\\');
+    std::string k = base ? base + 1 : file;
+    size_t i;
+    for (i = 0; i < k.size(); i++) k[i] = (char)tolower((unsigned char)k[i]);
+    return k;
+}
+
+static void favs_load(void)
+{
+    char path[64], line[300];
+    FILE *f;
+    if (s_favsLoaded) return;
+    s_favsLoaded = 1;
+    lib_file("favorites.txt", path, sizeof(path));
+    if (!(f = fopen(path, "r"))) return;
+    while (fgets(line, sizeof(line), f))
+    {
+        size_t n = strlen(line);
+        while (n && (line[n - 1] == '\n' || line[n - 1] == '\r' || line[n - 1] == ' ')) line[--n] = 0;
+        if (n) s_favs.insert(fav_key(line));
+    }
+    fclose(f);
+}
+
+static void favs_save(void)
+{
+    char path[64];
+    FILE *f;
+    std::set<std::string>::const_iterator it;
+    lib_file("favorites.txt", path, sizeof(path));
+    if (!(f = fopen(path, "w"))) { H64_WARN("[menu] cannot write %s", path); return; }
+    for (it = s_favs.begin(); it != s_favs.end(); ++it) fprintf(f, "%s\n", it->c_str());
+    fclose(f);
+}
+
+static int fav_is(const std::string &file) { favs_load(); return s_favs.count(fav_key(file)) != 0; }
+
+// Toggles a favourite; returns 1 when it is one now.
+static int fav_toggle(const std::string &file)
+{
+    std::string k = fav_key(file);
+    int now;
+    favs_load();
+    if (s_favs.count(k)) { s_favs.erase(k); now = 0; }
+    else { s_favs.insert(k); now = 1; }
+    favs_save();
+    return now;
+}
+
+static void cats_load(void)
+{
+    char path[64], line[200];
+    FILE *f;
+    if (s_catsLoaded) return;
+    s_catsLoaded = 1;
+    s_catCount = 0;
+    lib_file("categories.txt", path, sizeof(path));
+    if (!(f = fopen(path, "r"))) return;
+    while (fgets(line, sizeof(line), f) && s_catCount < MAX_CATS)
+    {
+        char *eq = strchr(line, '=');
+        size_t n = strlen(line);
+        int k;
+        while (n && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = 0;
+        if (!eq) continue;
+        *eq = 0;
+        for (k = 0; k < CF_COUNT; k++)
+            if (!strcmp(line, s_catFieldKey[k]) && eq[1])
+            {
+                s_cats[s_catCount].field = k;
+                strncpy(s_cats[s_catCount].value, eq + 1, sizeof(s_cats[0].value) - 1);
+                s_cats[s_catCount].value[sizeof(s_cats[0].value) - 1] = 0;
+                s_catCount++;
+                break;
+            }
+    }
+    fclose(f);
+}
+
+static void cats_save(void)
+{
+    char path[64];
+    FILE *f;
+    int i;
+    lib_file("categories.txt", path, sizeof(path));
+    if (!(f = fopen(path, "w"))) { H64_WARN("[menu] cannot write %s", path); return; }
+    for (i = 0; i < s_catCount; i++) fprintf(f, "%s=%s\n", s_catFieldKey[s_cats[i].field], s_cats[i].value);
+    fclose(f);
+}
+
+// Every ROM's information, read now if it was not yet (a header and a small
+// file each: a moment for a big library, once).
+static void lib_load(void)
+{
+    std::vector<RomEntry> roms;
+    size_t i;
+    if (s_libLoaded) return;
+    s_libLoaded = 1;
+    s_lib.clear();
+    scan_roms(&roms);
+    for (i = 0; i < roms.size(); i++)
+    {
+        H64GameInfo gi;
+        LibGame g;
+        g.file = roms[i].file;
+        if (ArtReadInfo(roms[i].file.c_str(), &gi))
+        {
+            g.field[CF_GENRE] = gi.genre;
+            g.field[CF_REGION] = gi.region;
+            g.field[CF_PLAYERS] = gi.players;
+            g.field[CF_DEVELOPER] = gi.developer;
+            g.field[CF_PUBLISHER] = gi.publisher;
+            g.field[CF_YEAR] = gi.year;
+        }
+        s_lib.push_back(g);
+    }
+    H64_INFO("[menu] library information: %u games", (unsigned)s_lib.size());
+}
+
+// The values a field holds ("Action / Platform": "Action" and "Platform";
+// "Japan, USA": both regions), each trimmed.
+static void field_values(const std::string &text, int field, std::vector<std::string> *out)
+{
+    const char *seps = field == CF_GENRE ? "/,;|" : field == CF_REGION ? ",;/" : "";
+    size_t start = 0, i;
+    for (i = 0; i <= text.size(); i++)
+        if (i == text.size() || (seps[0] && strchr(seps, text[i])))
+        {
+            size_t a = start, b = i;
+            while (a < b && text[a] == ' ') a++;
+            while (b > a && text[b - 1] == ' ') b--;
+            if (b > a) out->push_back(text.substr(a, b - a));
+            start = i + 1;
+        }
+}
+
+static int game_in_cat(const std::string &file, const GameCat *cat)
+{
+    size_t i, k;
+    for (i = 0; i < s_lib.size(); i++)
+        if (!_stricmp(s_lib[i].file.c_str(), file.c_str()))
+        {
+            std::vector<std::string> vals;
+            field_values(s_lib[i].field[cat->field], cat->field, &vals);
+            for (k = 0; k < vals.size(); k++)
+                if (!_stricmp(vals[k].c_str(), cat->value)) return 1;
+            return 0;
+        }
+    return 0;
+}
+
+static bool str_iless(const std::string &a, const std::string &b) { return _stricmp(a.c_str(), b.c_str()) < 0; }
+
+// The values of a field found in the library, sorted, each once.
+static void cat_values(int field, std::vector<std::string> *out)
+{
+    size_t i, k;
+    lib_load();
+    out->clear();
+    for (i = 0; i < s_lib.size(); i++)
+    {
+        std::vector<std::string> vals;
+        field_values(s_lib[i].field[field], field, &vals);
+        for (k = 0; k < vals.size(); k++)
+        {
+            size_t j;
+            int seen = 0;
+            for (j = 0; j < out->size() && !seen; j++) seen = !_stricmp((*out)[j].c_str(), vals[k].c_str());
+            if (!seen) out->push_back(vals[k]);
+        }
+    }
+    std::sort(out->begin(), out->end(), str_iless);
+}
+
+// A value as shown: regions translated, players as "1-4 players".
+static void cat_value_text(int field, const char *value, char *out, size_t size)
+{
+    if (field == CF_REGION) _snprintf(out, size - 1, "%s", TrRegion(value));
+    else if (field == CF_PLAYERS && !strcmp(value, "1")) _snprintf(out, size - 1, "%s", Tr(T_ONE_PLAYER));
+    else if (field == CF_PLAYERS) _snprintf(out, size - 1, Tr(T_N_PLAYERS), value);
+    else _snprintf(out, size - 1, "%s", value);
+    out[size - 1] = 0;
+}
+
+// "Genre: Platform".
+static void cat_name(const GameCat *cat, char *out, size_t size)
+{
+    char v[96];
+    cat_value_text(cat->field, cat->value, v, sizeof(v));
+    _snprintf(out, size - 1, "%s: %s", Tr(s_catFieldLabel[cat->field]), v);
+    out[size - 1] = 0;
+}
+
+// The ROM list's tabs (LT/RT): every game, the favourites, then each category.
+static int s_tab, s_tabGames;   // the tab shown, and how many games it has
+static int s_romsTotal;         // games in game:\roms\ (0: the "copy ROMs" screen, no tabs)
+
+static int tab_count(void) { cats_load(); return 2 + s_catCount; }
+
+static void tab_name(int tab, char *out, size_t size)
+{
+    if (tab == 0) _snprintf(out, size - 1, "%s", Tr(T_CAT_ALL));
+    else if (tab == 1) _snprintf(out, size - 1, "%s", Tr(T_FAVORITES));
+    else cat_name(&s_cats[tab - 2], out, size);
+    out[size - 1] = 0;
+}
+
+// The games of the tab shown, in the list's order.
+static void tab_filter(const std::vector<RomEntry> &all, std::vector<RomEntry> *out)
+{
+    size_t i;
+    out->clear();
+    if (s_tab < 0 || s_tab >= tab_count()) s_tab = 0;
+    if (s_tab >= 2) lib_load();
+    for (i = 0; i < all.size(); i++)
+        if (s_tab == 0 || (s_tab == 1 && fav_is(all[i].file)) || (s_tab >= 2 && game_in_cat(all[i].file, &s_cats[s_tab - 2])))
+            out->push_back(all[i]);
+    s_tabGames = (int)out->size();
+}
+
+// The favourite mark: a small gold star (two triangles), `s` across.
+static void fav_star(float cx, float cy, float s, float a)
+{
+    D3DCOLOR gold = UiAlpha(D3DCOLOR_ARGB(255, 255, 205, 70), a);
+    icon_tri(cx, cy - s * 0.12f, s, 0, gold);
+    icon_tri(cx, cy + s * 0.12f, s, 2, gold);
+}
+
+// ---- Settings > Interface > Categories ----
+// The list: "Make a category", then each category (A changes it). Making or
+// changing one: its field (genre, region...), its value among those the
+// library's games have, then save - or delete it.
+enum { CE_FIELD = 0, CE_VALUE, CE_SAVE, CE_DELETE };
+static int s_ceIndex, s_ceField, s_ceValue;   // the category changed (-1: a new one), its field, its value's index
+static std::vector<std::string> s_ceValues;   // that field's values in the library
+
+static void settings_cats(UiMenu *m, const Config *c, int selCat)
+{
+    int i;
+    (void)c;
+    cats_load();
+    s_interfacePage = 0;
+    s_catEditPage = 0;
+    s_catsPage = 1;
+    UiMenuClear(m, Tr(T_CATEGORIES), Tr(T_FOOT_SELECT));
+    m->icon[UiMenuAdd(m, Tr(T_CAT_NEW), "")] = UI_ICON_PLUS;
+    for (i = 0; i < s_catCount; i++)
+    {
+        char name[160];
+        cat_name(&s_cats[i], name, sizeof(name));
+        m->icon[UiMenuAdd(m, name, "")] = UI_ICON_LIST;
+    }
+    if (selCat >= 0 && selCat + 1 < m->count) m->sel = selCat + 1;
+}
+
+static void catedit_values(UiMenu *m)
+{
+    char v[96];
+    sprintf(m->value[CE_FIELD], "< %s >", Tr(s_catFieldLabel[s_ceField]));
+    if (s_ceValues.empty()) _snprintf(v, sizeof(v) - 1, "%s", Tr(T_CAT_NO_DATA));
+    else cat_value_text(s_ceField, s_ceValues[s_ceValue].c_str(), v, sizeof(v));
+    v[sizeof(v) - 1] = 0;
+    {
+        char fit[48];
+        UiTextFit(UI_BOLD, 21, 260, v, fit, sizeof(fit));
+        sprintf(m->value[CE_VALUE], "< %s >", fit);
+    }
+}
+
+static void settings_catedit(UiMenu *m, int index)
+{
+    size_t k;
+    s_catsPage = 0;
+    s_catEditPage = 1;
+    s_ceIndex = index;
+    s_ceField = index >= 0 ? s_cats[index].field : CF_GENRE;
+    cat_values(s_ceField, &s_ceValues);   // the library's information: read now the first time
+    s_ceValue = 0;
+    if (index >= 0)
+        for (k = 0; k < s_ceValues.size(); k++)
+            if (!_stricmp(s_ceValues[k].c_str(), s_cats[index].value)) s_ceValue = (int)k;
+    UiMenuClear(m, Tr(index >= 0 ? T_CATEGORIES : T_CAT_NEW), Tr(T_FOOT_SELECT));
+    m->icon[UiMenuAdd(m, Tr(T_CAT_FIELD), "")] = UI_ICON_SLIDERS;
+    m->icon[UiMenuAdd(m, Tr(T_CAT_VALUE), "")] = UI_ICON_LIST;
+    m->icon[UiMenuAdd(m, Tr(T_CAT_SAVE), "")] = UI_ICON_SAVE;
+    if (index >= 0) m->icon[UiMenuAdd(m, Tr(T_CAT_DELETE), "")] = UI_ICON_TRASH;
+    catedit_values(m);
+}
+
+static int cats_input(UiMenu *m, Config *c, WORD down)
+{
+    UiMenuNavigate(m, down);
+    if (down & XINPUT_GAMEPAD_B)
+    {
+        settings_interface(m, c);
+        m->sel = I_CATS;
+        return SET_NONE;
+    }
+    if (down & XINPUT_GAMEPAD_A)
+    {
+        if (m->sel == 0 && s_catCount >= MAX_CATS)
+        {
+            xb_audio_ui_sound_instead(XB_SFX_ERROR);   // full
+            return SET_NONE;
+        }
+        settings_catedit(m, m->sel - 1);
+    }
+    return SET_NONE;
+}
+
+static int catedit_input(UiMenu *m, Config *c, WORD down)
+{
+    int dir = (down & XINPUT_GAMEPAD_DPAD_RIGHT) ? 1 : (down & XINPUT_GAMEPAD_DPAD_LEFT) ? -1 : 0;
+    UiMenuNavigate(m, down);
+    if (down & XINPUT_GAMEPAD_B)
+    {
+        settings_cats(m, c, s_ceIndex);
+        return SET_NONE;
+    }
+    if (m->sel == CE_FIELD && (dir || (down & XINPUT_GAMEPAD_A)))
+    {
+        s_ceField = (s_ceField + (dir ? dir : 1) + CF_COUNT) % CF_COUNT;
+        cat_values(s_ceField, &s_ceValues);
+        s_ceValue = 0;
+        catedit_values(m);
+        return SET_NONE;
+    }
+    if (m->sel == CE_VALUE && (dir || (down & XINPUT_GAMEPAD_A)) && !s_ceValues.empty())
+    {
+        int n = (int)s_ceValues.size();
+        s_ceValue = (s_ceValue + (dir ? dir : 1) + n) % n;
+        catedit_values(m);
+        return SET_NONE;
+    }
+    if (m->sel == CE_SAVE && (down & XINPUT_GAMEPAD_A) && !s_ceValues.empty())
+    {
+        int at = s_ceIndex >= 0 ? s_ceIndex : s_catCount;
+        if (at >= MAX_CATS) return SET_NONE;
+        s_cats[at].field = s_ceField;
+        strncpy(s_cats[at].value, s_ceValues[s_ceValue].c_str(), sizeof(s_cats[0].value) - 1);
+        s_cats[at].value[sizeof(s_cats[0].value) - 1] = 0;
+        if (s_ceIndex < 0) s_catCount++;
+        cats_save();
+        settings_cats(m, c, at);
+        return SET_NONE;
+    }
+    if (m->sel == CE_DELETE && (down & XINPUT_GAMEPAD_A) && s_ceIndex >= 0)
+    {
+        int i;
+        for (i = s_ceIndex; i + 1 < s_catCount; i++) s_cats[i] = s_cats[i + 1];
+        s_catCount--;
+        if (s_tab >= 2 + s_catCount) s_tab = 0;   // the ROM list was on that tab
+        cats_save();
+        settings_cats(m, c, s_ceIndex - 1);
+        return SET_NONE;
+    }
+    return SET_NONE;
+}
+
+// The tab bar: "LT  Favourites (12)  RT", centred on `x` (the covers and the
+// carousel, at the top) or starting at it (the list, under the logo: a lower
+// pill, just around the LT/RT glyphs, so it sits closer over the list).
+static void browser_tabs(float x, float cy, int centred, float maxW)
+{
+    const float h = centred ? 34.0f : 28.0f;
+    char name[160], full[200], label[200];
+    float w;
+    tab_name(s_tab, name, sizeof(name));
+    _snprintf(full, sizeof(full) - 1, "%s (%d)", name, s_tabGames);
+    full[sizeof(full) - 1] = 0;
+    UiTextFit(UI_BOLD, 19, maxW - 128, full, label, sizeof(label));
+    w = UiTextWidth(UI_BOLD, 19, label);
+    x = centred ? x - w * 0.5f : x + 64;
+    UiRoundRect(x - 64, cy - h * 0.5f, w + 128, h, h * 0.5f, D3DCOLOR_ARGB(150, 30, 34, 46), D3DCOLOR_ARGB(150, 24, 27, 37));
+    UiRoundRing(x - 64, cy - h * 0.5f, w + 128, h, h * 0.5f, 1.5f, SEL_HI(120));
+    UiFooter(x - 58, cy, "LT");
+    UiText(UI_BOLD, 19, x, cy, UI_COL_TEXT, label, UI_LEFT);
+    UiFooter(x + w + 58 - UiFooterWidth("RT"), cy, "RT");
 }
 
 // ---- ROM files (plain or zipped) ----
@@ -2918,6 +4493,12 @@ static void settings_loop(IDirect3DDevice9 *dev, Config *c, const char *settings
             UiInputInit(&in);
             continue;
         }
+        if (r == SET_SAVER)
+        {
+            saver_run(dev, c);
+            UiInputInit(&in);
+            continue;
+        }
         if (r == SET_PREVIEW)
         {
             HiresPreviewScreen(dev, c);
@@ -2932,9 +4513,10 @@ static void settings_loop(IDirect3DDevice9 *dev, Config *c, const char *settings
             UiInputInit(&in);
             continue;
         }
-        if (r == SET_BACK) { s_browser = 0; return; }
-        if (r == SET_SAVE_ALL)
+        if (r == SET_BACK || r == SET_SAVE_ALL)
         {
+            // From the ROM list these settings are for all games: kept on leaving too (B), not only
+            // through "Save for all games" - a volume set here was lost at the next start otherwise.
             H64_INFO("[menu] settings for all games %s", ConfigWriteMenuKeys(c, settingsPath, 1) ? "saved" : "NOT saved");
             s_browser = 0;
             return;
@@ -2942,6 +4524,7 @@ static void settings_loop(IDirect3DDevice9 *dev, Config *c, const char *settings
         dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
         UiBegin(dev);
         UiBackdrop();
+        browser_effect();   // the ROM list's, so a new choice shows at once
         UiMenuDraw(&m);
         UiEnd();
         dev->Present(NULL, NULL, NULL, NULL);
@@ -3239,6 +4822,919 @@ static void card_draw(const char *shown, const RomInfo *ri, const ArtView *v, in
     }
 }
 
+// ---- The ROM list's animated background effects (Settings > Interface > Background effect) ----
+// Drawn right after the backdrop, behind every view, all made here from the
+// UI's shapes (no pictures): each moves with its own clock (s_fxClock, run at
+// the chosen speed). Kept faint enough for the covers and the text over them
+// to stay the clearest thing on screen; the chosen opacity scales that.
+// Colours: each effect has three of its own (s_fxDefault, along a gradient
+// fx_pal walks from 0 to 1); up to three chosen ones (Config::fxColor, from
+// s_fxPalette) take their place.
+#define WAVE_SLICE 8.0f
+static int s_fxRgb[3][3], s_fxRgbCount = 3;   // the colours drawn now (the effect's own or the chosen ones)
+
+// A steady pseudo-random 0..1 for `i` (the particles' own places and speeds).
+static float fx_rand(int i)
+{
+    u32 x = (u32)i * 2654435761u;
+    x ^= x >> 13;
+    x *= 0x5bd1e995u;
+    x ^= x >> 15;
+    return (x & 0xFFFF) / 65535.0f;
+}
+
+// Every colour of the effects comes through here: the chosen opacity applies to all.
+static D3DCOLOR fx_col(int a, int r, int g, int b)
+{
+    a = a * s_fxOpacity / 100;
+    return D3DCOLOR_ARGB(a < 0 ? 0 : a > 255 ? 255 : a, r, g, b);
+}
+
+// The colour `k` (0..1) along the effect's colours, lightened towards white by `white` (0..1).
+static void fx_rgb(float k, float white, int *rgb)
+{
+    int i0 = 0, i1 = 0, i;
+    float f = 0;
+    if (k < 0) k = 0;
+    if (k > 1) k = 1;
+    if (s_fxRgbCount > 1)
+    {
+        float p = k * (s_fxRgbCount - 1);
+        i0 = (int)p;
+        if (i0 >= s_fxRgbCount - 1) i0 = s_fxRgbCount - 2;
+        i1 = i0 + 1;
+        f = p - i0;
+    }
+    for (i = 0; i < 3; i++)
+    {
+        float v = s_fxRgb[i0][i] + (s_fxRgb[i1][i] - s_fxRgb[i0][i]) * f;
+        rgb[i] = (int)(v + (255 - v) * white);
+    }
+}
+static D3DCOLOR fx_pal(float k, int a)
+{
+    int c[3];
+    fx_rgb(k, 0, c);
+    return fx_col(a, c[0], c[1], c[2]);
+}
+static D3DCOLOR fx_palw(float k, float white, int a)
+{
+    int c[3];
+    fx_rgb(k, white, c);
+    return fx_col(a, c[0], c[1], c[2]);
+}
+
+// Ribbons of light (the waves, the aurora): slanted slices following two sines
+// (UiStrip, so the crest has no steps), a crest line then a fade downwards;
+// `k` is each one's place in the colours.
+static void fx_ribbons(int count, const float *base, const float *amp, const float *len, const float *speed, const float *thick,
+                       const int *alpha, const float *k, float t)
+{
+    float x;
+    int w;
+    for (w = 0; w < count; w++)
+    {
+        int rgb[3];
+        float kk = 6.2831853f / len[w], px = 0, py = 0, ph = 0;
+        fx_rgb(k[w], 0, rgb);
+        for (x = 0; x <= UI_WIDTH + WAVE_SLICE; x += WAVE_SLICE)
+        {
+            float y = base[w] + amp[w] * sinf(x * kk + t * speed[w] * 2.0f + w * 1.7f) + amp[w] * 0.4f * sinf(x * kk * 2.3f - t * speed[w] * 1.3f);
+            float h = thick[w] * (0.75f + 0.25f * sinf(x * kk * 0.7f + t * 0.5f + w));
+            if (x > 0)
+            {
+                UiStrip(px, py, py + ph, x, y, y + h, fx_col(alpha[w], rgb[0], rgb[1], rgb[2]), fx_col(0, rgb[0], rgb[1], rgb[2]));
+                UiLine(px, py, x, y, 2.0f, fx_col(alpha[w] * 3, rgb[0], rgb[1], rgb[2]));
+            }
+            px = x; py = y; ph = h;
+        }
+    }
+}
+
+static void fx_waves(float t)
+{
+    static const float base[4] = { 250, 375, 470, 565 }, amp[4] = { 26, 34, 22, 30 }, len[4] = { 620, 760, 540, 900 };
+    static const float speed[4] = { 0.35f, -0.27f, 0.45f, -0.20f }, thick[4] = { 70, 90, 60, 80 }, k[4] = { 0, 0.33f, 0.67f, 1 };
+    static const int alpha[4] = { 26, 34, 22, 30 };
+    fx_ribbons(4, base, amp, len, speed, thick, alpha, k, t);
+}
+
+// Image 1: a neon ring, its rim of bars beating like a sound meter.
+static void fx_pulse(float t)
+{
+    const float cx = UI_WIDTH * 0.5f, cy = UI_HEIGHT * 0.5f, beat = 0.5f + 0.5f * sinf(t * 3.1f);
+    float r = 120 + 6 * beat;
+    int i, k;
+    UiShadow(cx - r - 30, cy - r - 30, (r + 30) * 2, (r + 30) * 2, r + 30, 50, fx_pal(0.5f, 40));
+    for (i = 0; i < 72; i++)
+    {
+        float a = i * 6.2831853f / 72, f = (float)i / 72;
+        float len = 14 + 34 * (0.5f + 0.5f * sinf(t * 4.0f + i * 0.9f)) * (0.6f + 0.4f * sinf(t * 1.7f + i * 0.31f));
+        D3DCOLOR c = fx_pal(f < 0.5f ? f * 2 : 2 - f * 2, 150);   // around the ring and back, no seam
+        for (k = 0; k < 4; k++)
+        {
+            float d = r + 10 + len * k / 3.0f;
+            UiCircle(cx + cosf(a) * d, cy + sinf(a) * d, 2.0f - k * 0.3f, c);
+        }
+    }
+    UiRoundRing(cx - r, cy - r, r * 2, r * 2, r, 5.0f, fx_palw(0.3f, 0.2f, 200));
+    UiRoundRing(cx - r + 14, cy - r + 14, r * 2 - 28, r * 2 - 28, r - 14, 2.0f, fx_palw(0.5f, 0.3f, 140));
+}
+
+// Image 2: falling streaks of light, each with a bright head.
+static void fx_rain(float t)
+{
+    int i;
+    for (i = 0; i < 90; i++)
+    {
+        float x = fx_rand(i) * UI_WIDTH, speed = 70 + fx_rand(i + 500) * 160, len = 60 + fx_rand(i + 900) * 140;
+        float y = fmodf(t * speed + fx_rand(i + 1300) * 1000.0f, 1000.0f) - 200, k = fx_rand(i + 2100);
+        int a = 40 + (int)(fx_rand(i + 1700) * 90);
+        UiRoundRect(x - 1, y - len, 2, len, 1, fx_pal(k, 0), fx_pal(k, a));
+        UiCircle(x, y, 2.5f + fx_rand(i + 2500) * 2.0f, fx_palw(k, 0.15f, a + 80));
+        UiCircle(x, y, 7, fx_pal(k, a / 3));
+    }
+}
+
+// Image 3: a vortex - dotted rings turning, each its own way and speed.
+static void fx_vortex(float t)
+{
+    const float cx = UI_WIDTH * 0.5f, cy = UI_HEIGHT * 0.52f;
+    int ring, i;
+    for (ring = 0; ring < 9; ring++)
+    {
+        float r = 40.0f + ring * 46, spin = (ring & 1 ? -1.0f : 1.0f) * (0.6f - ring * 0.04f), squash = 0.55f + ring * 0.02f;
+        int dots = 24 + ring * 6;
+        for (i = 0; i < dots; i++)
+        {
+            float a = i * 6.2831853f / dots + t * spin, fade = 0.5f + 0.5f * sinf(a * 2 + ring);
+            UiCircle(cx + cosf(a) * r * 1.35f, cy + sinf(a) * r * squash, 1.6f + fade * 1.4f, fx_pal((float)ring / 8, (int)(40 + 110 * fade)));
+        }
+    }
+    UiShadow(cx - 60, cy - 40, 120, 80, 40, 40, fx_pal(0.6f, 60));
+}
+
+// Image 4: rings of light spreading from the middle and fading out.
+static void fx_ripples(float t)
+{
+    const float cx = UI_WIDTH * 0.5f, cy = UI_HEIGHT * 0.5f;
+    int i;
+    for (i = 0; i < 12; i++)
+    {
+        float r = fmodf(t * 55 + i * 55, 660), fade = 1.0f - r / 660;
+        if (r < 4) continue;
+        UiRoundRing(cx - r, cy - r, r * 2, r * 2, r, 2.5f, fx_pal(r / 660, (int)(150 * fade)));
+        UiRoundRing(cx - r - 4, cy - r - 4, r * 2 + 8, r * 2 + 8, r + 4, 5.0f, fx_pal(r / 660, (int)(40 * fade)));
+    }
+    UiShadow(cx - 50, cy - 50, 100, 100, 50, 40, fx_pal(0, 90));
+}
+
+// Image 5: silk - bundles of fine lines waving together.
+static void fx_silk(float t)
+{
+    float x;
+    int band, line;
+    for (band = 0; band < 3; band++)
+    {
+        int rgb[3];
+        float k = 6.2831853f / (700 + band * 160);
+        fx_rgb(band * 0.5f, 0, rgb);
+        for (line = 0; line < 10; line++)
+        {
+            float ph = line * 0.09f, px = 0, py = 0;
+            int a = 26 + (line == 0 || line == 9 ? 50 : 0);
+            for (x = 0; x <= UI_WIDTH + 16; x += 16)
+            {
+                float y = 380 + band * 25 + 70 * sinf(x * k + t * (0.5f + band * 0.15f) + ph * 3 + band) + 28 * sinf(x * k * 2.1f - t * 0.7f + ph * 5) +
+                          line * 4.0f;
+                if (x > 0) UiLine(px, py, x, y, 1.6f, fx_col(a, rgb[0], rgb[1], rgb[2]));
+                px = x; py = y;
+            }
+        }
+    }
+}
+
+// Image 6: embers rising from the bottom right, flickering as they go.
+static void fx_embers(float t)
+{
+    int i;
+    UiShadow(900, 520, 420, 260, 130, 120, fx_pal(0, 60));
+    for (i = 0; i < 120; i++)
+    {
+        float life = fmodf(t * (0.12f + fx_rand(i) * 0.18f) + fx_rand(i + 300), 1.0f);
+        float x = 1280 - fx_rand(i + 600) * 700 * life - 60 * life + 30 * sinf(t * 2 + i);
+        float y = 760 - life * (300 + fx_rand(i + 900) * 400);
+        float flick = 0.6f + 0.4f * sinf(t * 12 + i * 2.3f);
+        int a = (int)(220 * (1.0f - life) * flick);
+        UiCircle(x, y, 1.2f + fx_rand(i + 1200) * 2.0f, fx_pal(0.5f + fx_rand(i + 1500) * 0.5f, a));
+    }
+}
+
+// Image 7: a retro tunnel - a glowing grid floor and ceiling rushing towards you.
+static void fx_grid(float t)
+{
+    const float cx = UI_WIDTH * 0.5f, cy = UI_HEIGHT * 0.5f, scroll = fmodf(t * 0.8f, 1.0f);
+    int i, k, side;
+    for (side = -1; side <= 1; side += 2)
+    {
+        for (i = 0; i < 14; i++)
+        {
+            // Lines across, closer together towards the far end, moving out.
+            float z = 1.0f / (i + 1 - scroll), y = cy + side * (40 + 320 * z * 0.9f), zz = z > 1 ? 1 : z;
+            if (z > 1.2f) continue;
+            UiRect(0, y, UI_WIDTH, 1.5f, fx_pal(zz, (int)(40 + 120 * zz)));
+        }
+        for (i = -10; i <= 10; i++)
+        {
+            // Lines along, from the vanishing point out to the edge (dotted).
+            float ex = cx + i * 140, ey = cy + side * 380;
+            for (k = 1; k <= 24; k++)
+            {
+                float f = k / 24.0f;
+                UiCircle(cx + (ex - cx) * f * f, cy + side * 40 + (ey - cy - side * 40) * f, 1.1f, fx_pal(f, (int)(30 + 120 * f)));
+            }
+        }
+    }
+    UiShadow(cx - 90, cy - 40, 180, 80, 20, 40, fx_pal(1, 110));
+}
+
+// Image 8: light falling through water, rays swaying over a shimmering floor.
+static void fx_underwater(float t)
+{
+    int i;
+    for (i = 0; i < 9; i++)
+    {
+        float x = 300 + i * 85 + 40 * sinf(t * 0.4f + i * 1.3f), w = 30 + 40 * fx_rand(i + 40), k = i / 8.0f * 0.5f;
+        int a = (int)(26 + 20 * sinf(t * 0.9f + i * 2.1f));
+        UiRoundRect(x - w * 0.5f, 120, w, 480, w * 0.5f, fx_pal(k, a), fx_pal(k, 0));
+    }
+    for (i = 0; i < 46; i++)
+    {
+        float x = 220 + fx_rand(i) * 840 + 25 * sinf(t * 0.8f + i), y = 560 + fx_rand(i + 200) * 120 + 8 * sinf(t * 1.1f + i * 0.7f);
+        float r = 14 + fx_rand(i + 400) * 26;
+        UiRoundRing(x - r, y - r * 0.4f, r * 2, r * 0.8f, r * 0.4f, 1.5f, fx_pal(0.5f + fx_rand(i + 600) * 0.5f, (int)(60 + 40 * sinf(t * 2 + i))));
+    }
+}
+
+// Image 9: an electric ring, lightning crackling out to both sides.
+static void fx_energy(float t)
+{
+    const float cx = UI_WIDTH * 0.5f, cy = UI_HEIGHT * 0.5f;
+    int bolt, seg, k, step = (int)(t * 12);   // the bolts take a new shape 12 times a second
+    float r = 110 + 4 * sinf(t * 9);
+    UiShadow(cx - r - 40, cy - r - 40, (r + 40) * 2, (r + 40) * 2, r + 40, 60, fx_pal(0.5f, 50));
+    for (bolt = 0; bolt < 4; bolt++)
+    {
+        float dir = bolt < 2 ? -1.0f : 1.0f, x0 = cx + dir * r, y0 = cy + (bolt & 1 ? -14.0f : 14.0f);
+        for (seg = 0; seg < 12; seg++)
+        {
+            float x1 = x0 + dir * (50 + fx_rand(step * 97 + bolt * 13 + seg) * 20);
+            float y1 = cy + (fx_rand(step * 131 + bolt * 7 + seg) - 0.5f) * 90 * (seg / 12.0f + 0.3f);
+            for (k = 0; k < 8; k++)
+            {
+                float f = k / 8.0f;
+                UiCircle(x0 + (x1 - x0) * f, y0 + (y1 - y0) * f, 1.6f, fx_pal(0, 170));
+            }
+            x0 = x1;
+            y0 = y1;
+        }
+    }
+    UiRoundRing(cx - r, cy - r, r * 2, r * 2, r, 6.0f, fx_palw(0.5f, 0.7f, 220));
+    UiRoundRing(cx - r - 6, cy - r - 6, r * 2 + 12, r * 2 + 12, r + 6, 3.0f, fx_pal(1, 120));
+}
+
+// Image 10: an aurora - wide magenta and blue bands rolling across.
+static void fx_aurora(float t)
+{
+    static const float base[4] = { 300, 380, 440, 520 }, amp[4] = { 50, 60, 45, 55 }, len[4] = { 900, 1100, 800, 1300 };
+    static const float speed[4] = { 0.22f, -0.18f, 0.28f, -0.15f }, thick[4] = { 170, 150, 190, 160 }, k[4] = { 0, 0.5f, 0.25f, 1 };
+    static const int alpha[4] = { 30, 28, 26, 24 };
+    fx_ribbons(4, base, amp, len, speed, thick, alpha, k, t);
+}
+
+// Image 11: dark liquid, its swells catching the light.
+static void fx_liquid(float t)
+{
+    float x;
+    int row;
+    for (row = 0; row < 10; row++)
+    {
+        float k = 6.2831853f / (380 + row * 30), y0 = 330.0f + row * 38, px = 0, py = 0;
+        for (x = 0; x <= UI_WIDTH + 12; x += 12)
+        {
+            float y = y0 + 22 * sinf(x * k + t * (0.6f + row * 0.05f) + row) + 9 * sinf(x * k * 2.7f - t * 0.9f);
+            float slope = cosf(x * k + t * (0.6f + row * 0.05f) + row), shine = slope > 0.85f ? (slope - 0.85f) / 0.15f : 0.0f;
+            if (x > 0) UiLine(px, py, x, y, 2.0f, fx_pal(0, 30 + row * 4));
+            if (shine > 0) UiCircle(x, y, 2 + shine * 2, fx_pal(0.5f + 0.5f * fx_rand(row * 200 + (int)x), (int)(200 * shine)));
+            px = x; py = y;
+        }
+    }
+}
+
+// Image 12: a wave of glittering particles drifting across.
+static void fx_particles(float t)
+{
+    int i;
+    for (i = 0; i < 320; i++)
+    {
+        float x = fmodf(fx_rand(i) * 1400 + t * (12 + fx_rand(i + 50) * 18), 1400) - 60;
+        float y = 470 + 60 * sinf(x * 0.006f + t * 0.5f) + 30 * sinf(x * 0.013f - t * 0.3f) + (fx_rand(i + 100) - 0.5f) * 150 * fx_rand(i + 150);
+        float tw = 0.5f + 0.5f * sinf(t * 3 + i * 1.7f);
+        UiCircle(x, y, 1.0f + fx_rand(i + 250) * 2.2f, fx_pal(fx_rand(i + 200), (int)(60 + 150 * tw)));
+    }
+}
+
+// Image 13: smoke - soft clouds swirling slowly, one colour at each side and one between.
+static void fx_smoke(float t)
+{
+    int i;
+    for (i = 0; i < 27; i++)
+    {
+        int part = i % 3;
+        float x = 300 + part * 340 + 200 * sinf(t * 0.13f + i * 1.1f) + (fx_rand(i) - 0.5f) * 200;
+        float y = 360 + 150 * sinf(t * 0.17f + i * 0.7f) + (fx_rand(i + 50) - 0.5f) * 160;
+        float r = 70 + 60 * (0.5f + 0.5f * sinf(t * 0.3f + i));
+        UiShadow(x - r, y - r, r * 2, r * 2, r, r, fx_pal(part * 0.5f, part == 1 ? 24 : 34));
+    }
+}
+
+// PS3: the XMB wave - a ribbon of fine lines twisting across the screen over
+// a soft sheet of light, with a few specks of dust drifting by.
+#define XMB_STEP 10
+#define XMB_PTS (UI_WIDTH / XMB_STEP + 2)
+static void fx_xmb(float t)
+{
+    const int lines = 16;
+    float mid[XMB_PTS], spread[XMB_PTS];
+    int i, j;
+    for (j = 0; j < XMB_PTS; j++)
+    {
+        float x = (float)(j * XMB_STEP);
+        mid[j] = 380 + 70 * sinf(x * 0.0042f + t * 0.35f) + 30 * sinf(x * 0.0091f - t * 0.22f);
+        spread[j] = 90 * sinf(x * 0.0031f - t * 0.27f + 1.3f);   // the lines cross where it is 0: the ribbon's twist
+    }
+    for (j = 1; j < XMB_PTS; j++)
+    {
+        // The sheet between the ribbon's two edges, then the glow under it.
+        float x0 = (float)((j - 1) * XMB_STEP), x1 = (float)(j * XMB_STEP);
+        float h0 = fabsf(spread[j - 1]) * 0.5f + 6, h1 = fabsf(spread[j]) * 0.5f + 6;
+        UiStrip(x0, mid[j - 1] - h0, mid[j - 1] + h0, x1, mid[j] - h1, mid[j] + h1, fx_pal(0.4f, 16), fx_pal(0.4f, 16));
+        UiStrip(x0, mid[j - 1], mid[j - 1] + 180, x1, mid[j], mid[j] + 180, fx_pal(0.2f, 14), fx_pal(0.2f, 0));
+    }
+    for (i = 0; i < lines; i++)
+    {
+        float f = (float)i / (lines - 1), px = 0, py = 0;
+        int edge = i == 0 || i == lines - 1;
+        D3DCOLOR c = fx_palw(f, 0.25f, edge ? 110 : 34);
+        for (j = 0; j < XMB_PTS; j++)
+        {
+            float x = (float)(j * XMB_STEP), y = mid[j] + spread[j] * (f - 0.5f) + 6 * sinf(x * 0.012f + t * 0.6f + i * 0.4f);
+            if (j) UiLine(px, py, x, y, edge ? 1.6f : 1.1f, c);
+            px = x; py = y;
+        }
+    }
+    for (i = 0; i < 60; i++)
+    {
+        float px = fmodf(fx_rand(i) * 1360 + t * (6 + fx_rand(i + 70) * 10), 1360) - 40;
+        float py = 380 + 70 * sinf(px * 0.0042f + t * 0.35f) + (fx_rand(i + 140) - 0.5f) * 260;
+        float tw = 0.5f + 0.5f * sinf(t * 1.6f + i * 2.1f);
+        UiCircle(px, py, 1.0f + fx_rand(i + 210) * 1.6f, fx_palw(fx_rand(i + 280), 0.6f, (int)(30 + 150 * tw)));
+    }
+}
+
+// PS4: wide bands of light sweeping slowly on the slant, each with a bright edge,
+// and fine particles rising through them.
+static void fx_ps4_flow(float t)
+{
+    float x;
+    int b, i;
+    for (b = 0; b < 3; b++)
+    {
+        int rgb[3], hi[3];
+        float px = 0, py = 0;
+        fx_rgb(b * 0.5f, 0, rgb);
+        fx_rgb(b * 0.5f, 0.5f, hi);
+        for (x = 0; x <= UI_WIDTH + WAVE_SLICE; x += WAVE_SLICE)
+        {
+            float y = 620 - x * (0.22f + b * 0.06f) + b * 90 + 55 * sinf(x * (0.0035f + b * 0.0011f) + t * (0.25f + b * 0.07f) + b * 2.1f);
+            if (x > 0)
+            {
+                UiStrip(px, py, py + 240, x, y, y + 240, fx_col(22, rgb[0], rgb[1], rgb[2]), fx_col(0, rgb[0], rgb[1], rgb[2]));
+                UiLine(px, py, x, y, 1.5f, fx_col(90, hi[0], hi[1], hi[2]));
+            }
+            px = x; py = y;
+        }
+    }
+    for (i = 0; i < 70; i++)
+    {
+        float life = fmodf(t * (0.04f + fx_rand(i) * 0.05f) + fx_rand(i + 90), 1.0f);
+        float px = fx_rand(i + 180) * UI_WIDTH + 40 * sinf(t * 0.5f + i), py = 740 - life * 800;
+        int a = (int)(160 * sinf(life * 3.14159f));
+        UiCircle(px, py, 1.0f + fx_rand(i + 270) * 1.5f, fx_palw(fx_rand(i + 360), 0.5f, a));
+    }
+}
+
+// PS4: bokeh - soft discs of light, near ones big and blurred, far ones small
+// and sharp, floating up and fading in and out.
+static void fx_ps4_bokeh(float t)
+{
+    int i;
+    for (i = 0; i < 44; i++)
+    {
+        float depth = fx_rand(i + 11), life = fmodf(t * (0.015f + depth * 0.03f) + fx_rand(i + 33), 1.0f);
+        float r = 8 + depth * depth * 70, px = fx_rand(i + 55) * (UI_WIDTH + 200) - 100 + 50 * sinf(t * 0.2f + i * 1.7f);
+        float py = UI_HEIGHT + r - life * (UI_HEIGHT + 2 * r);
+        float fade = sinf(life * 3.14159f), k = fx_rand(i + 77);
+        if (depth > 0.5f)
+        {
+            // Near: a blurred disc with a faint rim.
+            UiShadow(px - r, py - r, r * 2, r * 2, r, r * 0.6f, fx_pal(k, (int)(26 * fade)));
+            UiRoundRing(px - r, py - r, r * 2, r * 2, r, 1.5f, fx_palw(k, 0.3f, (int)(30 * fade)));
+        }
+        else
+        {
+            UiCircle(px, py, r * 0.5f, fx_pal(k, (int)(40 * fade)));
+            UiCircle(px, py, r * 0.2f, fx_palw(k, 0.5f, (int)(120 * fade)));
+        }
+    }
+}
+
+// Image 26: a nebula - great soft clouds drifting slowly through a field of stars.
+static void fx_nebula(float t)
+{
+    int i;
+    for (i = 0; i < 14; i++)
+    {
+        float x = fx_rand(i) * 1400 - 60 + 60 * sinf(t * 0.05f + i), y = 200 + fx_rand(i + 20) * 380 + 40 * sinf(t * 0.07f + i * 1.3f);
+        float r = 120 + fx_rand(i + 40) * 160;
+        UiShadow(x - r, y - r, r * 2, r * 2, r, r, fx_pal(fx_rand(i + 60), 22));
+    }
+    for (i = 0; i < 160; i++)
+    {
+        float x = fmodf(fx_rand(i + 100) * 1300 + t * (2 + fx_rand(i + 300) * 4), 1300) - 10, y = fx_rand(i + 200) * UI_HEIGHT;
+        float tw = 0.5f + 0.5f * sinf(t * (1 + fx_rand(i + 400) * 2) + i);
+        UiCircle(x, y, 0.6f + fx_rand(i + 500) * 1.2f, fx_palw(fx_rand(i + 600), 0.8f, (int)(40 + 160 * tw)));
+    }
+    for (i = 0; i < 8; i++)
+    {
+        float x = fx_rand(i + 700) * UI_WIDTH, y = fx_rand(i + 800) * UI_HEIGHT, tw = 0.6f + 0.4f * sinf(t * 1.3f + i * 2);
+        UiShadow(x - 10, y - 10, 20, 20, 10, 14, fx_palw(fx_rand(i + 900), 0.5f, (int)(80 * tw)));
+        UiCircle(x, y, 1.8f, fx_palw(0.5f, 0.9f, (int)(230 * tw)));
+    }
+}
+
+// Image 27: fire dust - a red haze, sparks streaking up through it.
+static void fx_fire_dust(float t)
+{
+    int i;
+    for (i = 0; i < 12; i++)
+    {
+        float x = 100 + fx_rand(i) * 1100 + 80 * sinf(t * 0.11f + i * 1.7f), y = 380 + fx_rand(i + 30) * 260 + 50 * sinf(t * 0.09f + i);
+        float r = 140 + fx_rand(i + 60) * 140;
+        UiShadow(x - r, y - r, r * 2, r * 2, r, r, fx_pal(0.15f, 26));
+    }
+    for (i = 0; i < 200; i++)
+    {
+        float life = fmodf(t * (0.05f + fx_rand(i) * 0.08f) + fx_rand(i + 100), 1.0f);
+        float x = fmodf(fx_rand(i + 200) * 1400 + life * 260, 1400) - 60, y = 760 - life * (500 + fx_rand(i + 300) * 400);
+        float flick = 0.6f + 0.4f * sinf(t * 10 + i * 1.9f);
+        int a = (int)(230 * sinf(life * 3.14159f) * flick);
+        if (fx_rand(i + 400) > 0.8f) UiLine(x, y, x - 7, y + 9, 1.4f, fx_pal(0.6f + fx_rand(i + 500) * 0.4f, a));   // a streak
+        else UiCircle(x, y, 0.8f + fx_rand(i + 600) * 1.6f, fx_pal(0.6f + fx_rand(i + 500) * 0.4f, a));
+    }
+}
+
+// Image 28: lava - dark rock split by cracks that glow and fade like embers.
+static void fx_lava(float t)
+{
+    int i, s;
+    for (i = 0; i < 30; i++)
+    {
+        float x = fx_rand(i * 7) * UI_WIDTH, y = fx_rand(i * 7 + 1) * UI_HEIGHT, dir = fx_rand(i * 7 + 2) * 6.2831853f;
+        float glow = 0.55f + 0.45f * sinf(t * (0.5f + fx_rand(i * 7 + 3) * 0.6f) + i * 1.3f);
+        for (s = 0; s < 8; s++)
+        {
+            // A random walk: each piece of the crack bends a little from the last.
+            float len = 30 + fx_rand(i * 50 + s) * 50, x1, y1;
+            dir += (fx_rand(i * 50 + s + 25) - 0.5f) * 1.6f;
+            x1 = x + cosf(dir) * len;
+            y1 = y + sinf(dir) * len;
+            UiLine(x, y, x1, y1, 7.0f, fx_pal(0.3f, (int)(40 * glow)));
+            UiLine(x, y, x1, y1, 2.2f - s * 0.15f, fx_pal(0.6f + 0.4f * glow, (int)(200 * glow)));
+            x = x1;
+            y = y1;
+        }
+    }
+}
+
+// Image 29: a prism - a twisting band of glass, its fine lines splitting the light into colours.
+static void fx_prism(float t)
+{
+    const int lines = 22, step = 12, pts = UI_WIDTH / 12 + 2;
+    int i, j;
+    for (i = 0; i < lines; i++)
+    {
+        float f = (float)i / (lines - 1), px = 0, py = 0;
+        int edge = i == 0 || i == lines - 1;
+        for (j = 0; j < pts; j++)
+        {
+            float x = (float)(j * step), u = x / UI_WIDTH;
+            float mid = 520 - 260 * u + 90 * sinf(u * 5.0f + t * 0.4f);
+            float spread = 170 * sinf(u * 3.4f - t * 0.3f + 0.8f);
+            float y = mid + spread * (f - 0.5f);
+            if (j) UiLine(px, py, x, y, edge ? 2.0f : 1.2f, edge ? fx_palw(f, 0.7f, 150) : fx_palw(f, 0.15f, 46));
+            px = x; py = y;
+        }
+    }
+    // The shine running along it.
+    {
+        float u = fmodf(t * 0.08f, 1.4f) - 0.2f, x = u * UI_WIDTH, y = 520 - 260 * u + 90 * sinf(u * 5.0f + t * 0.4f);
+        UiShadow(x - 60, y - 40, 120, 80, 40, 40, fx_palw(0.5f, 0.9f, 60));
+    }
+}
+
+// Image 30: topography - contour lines around three slowly moving hills, seen on the slant.
+static void fx_topo(float t)
+{
+    int c, k, j;
+    for (c = 0; c < 3; c++)
+    {
+        float cx = 260 + c * 380 + 90 * sinf(t * 0.07f + c * 2), cy = 420 + 50 * sinf(t * 0.05f + c * 1.4f);
+        for (k = 0; k < 10; k++)
+        {
+            float r = 24.0f + k * 26, px = 0, py = 0;
+            D3DCOLOR col = fx_pal(k & 1 ? 1.0f : 0.0f, k & 1 ? 70 : 110);
+            for (j = 0; j <= 48; j++)
+            {
+                float a = j * 6.2831853f / 48;
+                float rr = r * (1 + 0.15f * sinf(3 * a + t * 0.5f + c) + 0.08f * sinf(5 * a - t * 0.3f + k * 0.4f));
+                float x = cx + cosf(a) * rr * 1.7f, y = cy + sinf(a) * rr * 0.45f;
+                if (j) UiLine(px, py, x, y, 1.3f, col);
+                px = x; py = y;
+            }
+        }
+        UiShadow(cx - 120, cy - 40, 240, 80, 40, 60, fx_pal(0.5f, 30));
+    }
+}
+
+// One hexagon (flat top), radius r.
+static void fx_hexagon(float cx, float cy, float r, float thick, D3DCOLOR c)
+{
+    int k;
+    for (k = 0; k < 6; k++)
+    {
+        float a0 = k * 1.0471976f, a1 = (k + 1) * 1.0471976f;
+        UiLine(cx + cosf(a0) * r, cy + sinf(a0) * r, cx + cosf(a1) * r, cy + sinf(a1) * r, thick, c);
+    }
+}
+
+// Image 31: hexagons - a honeycomb wall, its cells lighting up in slow waves.
+static void fx_hex(float t)
+{
+    const float r = 46, dx = r * 1.5f, dy = r * 1.7320508f;
+    int col, row;
+    for (col = 0; col < 20; col++)
+        for (row = 0; row < 10; row++)
+        {
+            float cx = col * dx, cy = row * dy + (col & 1 ? dy * 0.5f : 0) - 20;
+            float wave = sinf(t * 0.8f + col * 0.45f - row * 0.3f + fx_rand(col * 20 + row) * 6.0f);
+            float glow = wave > 0 ? wave * wave * wave * wave : 0;
+            fx_hexagon(cx, cy, r - 3, 1.2f, fx_pal(0.2f, 30));
+            if (glow > 0.05f)
+            {
+                UiShadow(cx - r * 0.8f, cy - r * 0.8f, r * 1.6f, r * 1.6f, r * 0.8f, 20, fx_pal(0.5f, (int)(50 * glow)));
+                fx_hexagon(cx, cy, r - 3, 2.2f, fx_palw(1.0f, 0.2f, (int)(220 * glow)));
+            }
+        }
+}
+
+// Image 32: a spiral - arms of dots wound round a bright centre, turning.
+static void fx_spiral(float t)
+{
+    const float cx = UI_WIDTH * 0.5f, cy = UI_HEIGHT * 0.5f;
+    int arm, j;
+    UiShadow(cx - 90, cy - 70, 180, 140, 70, 60, fx_palw(1.0f, 0.5f, 90));
+    for (arm = 0; arm < 7; arm++)
+        for (j = 2; j < 60; j++)
+        {
+            float r = 6 + j * j * 0.2f, a = arm * 6.2831853f / 7 + j * 0.085f + t * 0.45f;
+            float f = (float)j / 60;
+            UiCircle(cx + cosf(a) * r * 1.35f, cy + sinf(a) * r * 0.85f, 1.0f + f * 3.2f, fx_palw(1.0f - f, 0.2f, (int)(220 - 120 * f)));
+        }
+}
+
+// Image 33: ink - plumes sinking through water, spreading and fading as they go.
+static void fx_ink(float t)
+{
+    int i;
+    for (i = 0; i < 40; i++)
+    {
+        int src = i % 4;
+        float life = fmodf(t * (0.03f + fx_rand(i) * 0.02f) + fx_rand(i + 50), 1.0f);
+        float sx = 220 + src * 280 + 60 * sinf(t * 0.07f + src);
+        float x = sx + sinf(life * 6 + i) * 90 * life + (fx_rand(i + 100) - 0.5f) * 80 * life;
+        float y = 80 + life * 520 + (fx_rand(i + 150) - 0.5f) * 40;
+        float r = 18 + life * 110;
+        float a = 46 * (1 - life) * (life * 6 < 1 ? life * 6 : 1);
+        UiShadow(x - r, y - r, r * 2, r * 2, r, r * 0.7f, fx_pal(fx_rand(i + 200), (int)a));
+        if (fx_rand(i + 250) > 0.6f) UiRoundRing(x - r * 0.6f, y - r * 0.4f, r * 1.2f, r * 0.8f, r * 0.4f, 1.2f, fx_palw(0.5f, 0.5f, (int)(a * 1.6f)));
+    }
+}
+
+// Image 34: a hologram - a wireframe globe turning inside a scanner's frame, a beam on it.
+static void fx_holo(float t)
+{
+    const float cx = UI_WIDTH * 0.5f, cy = UI_HEIGHT * 0.5f, R = 190;
+    const float rot = t * 0.4f, scan = cy + R * sinf(t * 0.9f);
+    int i, j;
+    for (i = 1; i < 8; i++)
+    {
+        // Latitudes: ellipses, the far half dimmer.
+        float lat = -1.5707963f + i * 3.14159f / 8, y = cy + R * sinf(lat), rr = R * cosf(lat), px = 0, py = 0, pz = 0;
+        for (j = 0; j <= 32; j++)
+        {
+            float a = j * 6.2831853f / 32 + rot, x = cx + rr * cosf(a), z = sinf(a), yy = y + rr * 0.18f * z;
+            if (j) UiLine(px, py, x, yy, 1.2f, fx_pal(0.6f, (pz + z) > 0 ? 130 : 40));
+            px = x; py = yy; pz = z;
+        }
+    }
+    for (i = 0; i < 12; i++)
+    {
+        // Meridians.
+        float lon = i * 3.14159f / 6 + rot, px = 0, py = 0, pz = 0;
+        for (j = 0; j <= 24; j++)
+        {
+            float lat = -1.5707963f + j * 3.14159f / 24, x = cx + R * cosf(lat) * cosf(lon), z = cosf(lat) * sinf(lon);
+            float y = cy + R * sinf(lat) + R * 0.18f * z * cosf(lat);
+            if (j) UiLine(px, py, x, y, 1.1f, fx_pal(0.5f, (pz + z) > 0 ? 120 : 35));
+            px = x; py = y; pz = z;
+        }
+    }
+    // The scan line across it, the beams from the left, the frame's corners.
+    UiShadow(cx - R, scan - 6, R * 2, 12, 6, 16, fx_palw(1.0f, 0.3f, 90));
+    UiLine(cx - R * 1.05f, scan, cx + R * 1.05f, scan, 1.5f, fx_palw(1.0f, 0.5f, 200));
+    for (i = 0; i < 3; i++)
+    {
+        float y0 = cy - 120 + i * 120, w = 0.6f + 0.4f * sinf(t * 1.5f + i * 2);
+        UiStrip(0, y0 - 26, y0 + 26, cx - 30, cy - 1, cy + 1, fx_pal(0.4f, (int)(30 * w)), fx_pal(0.4f, (int)(30 * w)));
+    }
+    {
+        const float bx = cx - R - 50, by = cy - R - 40, bw = (R + 50) * 2, bh = (R + 40) * 2, l = 40;
+        D3DCOLOR c = fx_palw(0.8f, 0.2f, 180);
+        UiLine(bx, by, bx + l, by, 2, c); UiLine(bx, by, bx, by + l, 2, c);
+        UiLine(bx + bw, by, bx + bw - l, by, 2, c); UiLine(bx + bw, by, bx + bw, by + l, 2, c);
+        UiLine(bx, by + bh, bx + l, by + bh, 2, c); UiLine(bx, by + bh, bx, by + bh - l, 2, c);
+        UiLine(bx + bw, by + bh, bx + bw - l, by + bh, 2, c); UiLine(bx + bw, by + bh, bx + bw, by + bh - l, 2, c);
+    }
+}
+
+// Image 35: a fractal - spiral arms of glowing dots, curls budding along them, turning slowly.
+static void fx_fractal(float t)
+{
+    static const float centres[2][2] = { { 420, 330 }, { 860, 400 } };
+    int c, arm, j, k;
+    for (c = 0; c < 2; c++)
+    {
+        float cx = centres[c][0], cy = centres[c][1], spin = (c ? -0.18f : 0.2f) * t;
+        UiShadow(cx - 50, cy - 50, 100, 100, 50, 50, fx_pal(0.5f, 60));
+        for (arm = 0; arm < 4; arm++)
+            for (j = 0; j < 70; j++)
+            {
+                // A logarithmic spiral: the arm opens as it goes out.
+                float th = j * 0.11f, r = 10 * expf(th * 0.28f), a = arm * 1.5707963f + th + spin;
+                float x = cx + cosf(a) * r, y = cy + sinf(a) * r * 0.8f, f = (float)j / 70;
+                UiCircle(x, y, 1.0f + f * 1.6f, fx_palw(f, 0.15f, (int)(200 - 90 * f)));
+                if (j % 10 == 9)
+                    for (k = 0; k < 9; k++)
+                    {
+                        // A small curl, the arm's pattern again.
+                        float ka = a + k * 0.7f + t * 0.6f, kr = 3 + k * 2.2f * (0.6f + f);
+                        UiCircle(x + cosf(ka) * kr, y + sinf(ka) * kr, 1.0f, fx_palw(1.0f - f, 0.3f, 150 - k * 12));
+                    }
+            }
+    }
+}
+
+// Image 36: a burst - particles streaming out of a bright centre along curving paths.
+static void fx_burst(float t)
+{
+    const float cx = UI_WIDTH * 0.5f, cy = UI_HEIGHT * 0.5f;
+    int i;
+    UiShadow(cx - 70, cy - 70, 140, 140, 70, 60, fx_palw(1.0f, 0.4f, 140));
+    for (i = 0; i < 320; i++)
+    {
+        // Most of them along a few main rays, the rest anywhere.
+        float th = fx_rand(i + 10) < 0.6f ? (int)(fx_rand(i + 20) * 9) * 0.6981317f + (fx_rand(i + 30) - 0.5f) * 0.25f : fx_rand(i + 40) * 6.2831853f;
+        float bend = (fx_rand(i + 50) - 0.5f) * 0.9f, life = fmodf(t * (0.06f + fx_rand(i + 60) * 0.08f) + fx_rand(i + 70), 1.0f);
+        float d = powf(life, 1.4f) * 760, a = th + bend * life;
+        UiCircle(cx + cosf(a) * d, cy + sinf(a) * d * 0.85f, 0.9f + life * 1.6f, fx_palw(life, 0.3f, (int)(220 * (1 - life * 0.75f))));
+    }
+    UiCircle(cx, cy, 10, fx_palw(1.0f, 0.8f, 220));
+}
+
+// Image 37: hyperspace - streaks of light rushing past from the middle, longer as they come.
+static void fx_warp(float t)
+{
+    const float cx = UI_WIDTH * 0.5f, cy = UI_HEIGHT * 0.5f;
+    int i;
+    for (i = 0; i < 170; i++)
+    {
+        float th = fx_rand(i) * 6.2831853f, life = fmodf(t * (0.25f + fx_rand(i + 100) * 0.3f) + fx_rand(i + 200), 1.0f);
+        float r0 = 20 + life * life * 900, len = 20 + life * life * 320, c = cosf(th) * 1.25f, s = sinf(th);
+        UiLine(cx + c * r0, cy + s * r0, cx + c * (r0 + len), cy + s * (r0 + len), 0.8f + life * 2.6f, fx_pal(fx_rand(i + 300), (int)(220 * life)));
+    }
+}
+
+// Each effect's own three colours (the gradient fx_pal walks), by BGFX_*.
+static const unsigned char s_fxDefault[BGFX_COUNT][3][3] = {
+    { { 110, 190, 255 }, { 110, 190, 255 }, { 110, 190, 255 } },   // off (unused)
+    { { 110, 190, 255 }, { 110, 190, 255 }, { 110, 190, 255 } },   // waves
+    { { 60, 230, 230 }, { 90, 120, 255 }, { 240, 80, 200 } },      // pulse
+    { { 80, 185, 255 }, { 70, 215, 235 }, { 60, 240, 210 } },      // rain
+    { { 60, 160, 255 }, { 125, 120, 255 }, { 190, 80, 255 } },     // vortex
+    { { 80, 170, 255 }, { 70, 145, 255 }, { 60, 120, 255 } },      // ripples
+    { { 60, 220, 200 }, { 150, 90, 230 }, { 80, 200, 255 } },      // silk
+    { { 255, 110, 30 }, { 255, 150, 60 }, { 255, 230, 60 } },      // embers
+    { { 120, 60, 220 }, { 190, 50, 170 }, { 255, 40, 120 } },      // grid
+    { { 60, 220, 210 }, { 70, 225, 215 }, { 80, 230, 220 } },      // underwater
+    { { 150, 230, 255 }, { 200, 80, 255 }, { 230, 90, 220 } },     // energy
+    { { 220, 70, 200 }, { 60, 150, 255 }, { 70, 200, 255 } },      // aurora
+    { { 140, 150, 200 }, { 255, 230, 200 }, { 200, 120, 255 } },   // liquid
+    { { 60, 210, 255 }, { 130, 150, 255 }, { 200, 90, 255 } },     // particles
+    { { 230, 70, 200 }, { 140, 80, 230 }, { 60, 220, 230 } },      // smoke
+    { { 70, 130, 255 }, { 140, 190, 255 }, { 225, 235, 255 } },    // XMB (the blue of its default theme to white)
+    { { 30, 90, 220 }, { 60, 150, 255 }, { 140, 210, 255 } },      // PS4 flow
+    { { 70, 140, 255 }, { 120, 200, 255 }, { 180, 120, 255 } },    // PS4 bokeh
+    { { 60, 80, 220 }, { 150, 70, 220 }, { 240, 120, 220 } },  // nebula
+    { { 150, 25, 10 }, { 255, 90, 20 }, { 255, 190, 60 } },    // fire dust
+    { { 130, 20, 0 }, { 255, 80, 10 }, { 255, 200, 80 } },     // lava
+    { { 255, 90, 90 }, { 90, 255, 170 }, { 100, 120, 255 } },  // prism
+    { { 70, 220, 255 }, { 120, 120, 255 }, { 200, 80, 255 } }, // topography
+    { { 30, 120, 140 }, { 60, 220, 240 }, { 180, 255, 255 } }, // hexagons
+    { { 170, 180, 220 }, { 220, 225, 245 }, { 255, 255, 255 } }, // spiral
+    { { 190, 195, 210 }, { 225, 228, 238 }, { 255, 255, 255 } }, // ink
+    { { 40, 160, 170 }, { 90, 230, 230 }, { 200, 255, 255 } }, // hologram
+    { { 60, 90, 255 }, { 90, 200, 255 }, { 200, 80, 255 } },   // fractal
+    { { 40, 140, 200 }, { 120, 220, 255 }, { 220, 250, 255 } }, // burst
+    { { 255, 60, 170 }, { 110, 80, 255 }, { 60, 220, 255 } },  // hyperspace
+};
+
+// The effect chosen (s_bgEffect: BGFX_*), right after UiBackdrop.
+static void browser_effect(void)
+{
+    float now = UiTime(), dt = s_fxLast < 0 ? 0 : now - s_fxLast, t;
+    int i, n = 0;
+    if (dt < 0 || dt > 0.1f) dt = 0.016f;   // a pause (a game, a long load) does not jump the effect on
+    s_fxLast = now;
+    s_fxClock += dt * s_fxSpeed / 100.0f;
+    t = s_fxClock;
+    if (s_bgEffect <= BGFX_OFF || s_bgEffect >= BGFX_COUNT) return;
+    // The colours: the chosen ones (those of the three set), or the effect's own when none is.
+    for (i = 0; i < 3; i++)
+        if (s_fxColor[i] > 0 && s_fxColor[i] <= FX_PALETTE_COUNT)
+        {
+            s_fxRgb[n][0] = s_fxPalette[s_fxColor[i]][0];
+            s_fxRgb[n][1] = s_fxPalette[s_fxColor[i]][1];
+            s_fxRgb[n][2] = s_fxPalette[s_fxColor[i]][2];
+            n++;
+        }
+    if (!n)
+        for (n = 0; n < 3; n++)
+            for (i = 0; i < 3; i++) s_fxRgb[n][i] = s_fxDefault[s_bgEffect][n][i];
+    s_fxRgbCount = n;
+    switch (s_bgEffect)
+    {
+    case BGFX_WAVES: fx_waves(t); break;
+    case BGFX_PULSE: fx_pulse(t); break;
+    case BGFX_RAIN: fx_rain(t); break;
+    case BGFX_VORTEX: fx_vortex(t); break;
+    case BGFX_RIPPLES: fx_ripples(t); break;
+    case BGFX_SILK: fx_silk(t); break;
+    case BGFX_EMBERS: fx_embers(t); break;
+    case BGFX_GRID: fx_grid(t); break;
+    case BGFX_UNDERWATER: fx_underwater(t); break;
+    case BGFX_ENERGY: fx_energy(t); break;
+    case BGFX_AURORA: fx_aurora(t); break;
+    case BGFX_LIQUID: fx_liquid(t); break;
+    case BGFX_PARTICLES: fx_particles(t); break;
+    case BGFX_SMOKE: fx_smoke(t); break;
+    case BGFX_XMB: fx_xmb(t); break;
+    case BGFX_PS4_FLOW: fx_ps4_flow(t); break;
+    case BGFX_PS4_BOKEH: fx_ps4_bokeh(t); break;
+    case BGFX_NEBULA: fx_nebula(t); break;
+    case BGFX_FIRE_DUST: fx_fire_dust(t); break;
+    case BGFX_LAVA: fx_lava(t); break;
+    case BGFX_PRISM: fx_prism(t); break;
+    case BGFX_TOPO: fx_topo(t); break;
+    case BGFX_HEX: fx_hex(t); break;
+    case BGFX_SPIRAL: fx_spiral(t); break;
+    case BGFX_INK: fx_ink(t); break;
+    case BGFX_HOLO: fx_holo(t); break;
+    case BGFX_FRACTAL: fx_fractal(t); break;
+    case BGFX_BURST: fx_burst(t); break;
+    case BGFX_WARP: fx_warp(t); break;
+    }
+}
+
+// ---- Screen saver (Interface > Screen saver): after Config::saverTime
+// minutes without a button in the ROM list (or its Preview), over black:
+// the background effect, the wallpapers slowly zooming in, the logo
+// drifting about, or a clock. Any button, trigger or stick ends it.
+static int saver_any_input(void)
+{
+    XINPUT_STATE st;
+    int i;
+    for (i = 0; i < 4; i++)
+        if (XInputGetState(i, &st) == ERROR_SUCCESS)
+        {
+            const XINPUT_GAMEPAD *g = &st.Gamepad;
+            if (g->wButtons || g->bLeftTrigger > 60 || g->bRightTrigger > 60 || abs(g->sThumbLX) > 12000 || abs(g->sThumbLY) > 12000 ||
+                abs(g->sThumbRX) > 12000 || abs(g->sThumbRY) > 12000)
+                return 1;
+        }
+    return 0;
+}
+
+// 0..1..0 as u goes 0..1..2 (bouncing between two walls).
+static float saver_tri(float u) { return 1.0f - fabsf(fmodf(u, 2.0f) - 1.0f); }
+
+static void saver_effect(float opacity)
+{
+    int keepFx = s_bgEffect, keepOp = s_fxOpacity;
+    if (s_bgEffect == BGFX_OFF) s_bgEffect = BGFX_PS4_BOKEH;   // no effect chosen: one anyway
+    s_fxOpacity = (int)(s_fxOpacity * opacity);
+    browser_effect();
+    s_bgEffect = keepFx;
+    s_fxOpacity = keepOp;
+}
+
+static void saver_draw(int mode, float t)
+{
+    switch (mode)
+    {
+    case SAVER_WALL:
+        if (UiWallpaperDraw(1)) break;
+        saver_effect(1.5f);   // no wallpaper folder: the effect instead
+        break;
+    case SAVER_LOGO:
+    {
+        const float size = 40, h = size * 1.9f;
+        float w = UiBrand(-4000, -4000, size);   // measured off screen
+        float x = 40 + saver_tri(t * 60.0f / (UI_WIDTH - 80 - w)) * (UI_WIDTH - 80 - w);
+        float cy = 40 + h * 0.5f + saver_tri(t * 45.0f / (UI_HEIGHT - 80 - h)) * (UI_HEIGHT - 80 - h);
+        saver_effect(0.4f);
+        UiShadow(x - 30, cy - h * 0.5f - 20, w + 60, h + 40, 40, 70, SEL_LO(70));
+        UiBrand(x, cy, size);
+        break;
+    }
+    case SAVER_CLOCK:
+    {
+        SYSTEMTIME st;
+        char tm[16], dt[32];
+        float ox, oy;
+        GetLocalTime(&st);
+        sprintf(tm, "%02d:%02d", st.wHour, st.wMinute);
+        sprintf(dt, "%02d/%02d/%04d", st.wDay, st.wMonth, st.wYear);
+        // Somewhere else every minute, so nothing stays in one place on the screen.
+        ox = (fx_rand(st.wHour * 60 + st.wMinute) - 0.5f) * 520;
+        oy = (fx_rand(st.wHour * 60 + st.wMinute + 7000) - 0.5f) * 300;
+        saver_effect(0.35f);
+        UiTextShadowed(UI_BOLD, 130, UI_WIDTH * 0.5f + ox, 320 + oy, UI_COL_TEXT, tm, UI_CENTER);
+        UiText(UI_REGULAR, 30, UI_WIDTH * 0.5f + ox, 420 + oy, UI_COL_TEXT2, dt, UI_CENTER);
+        UiRoundRect(UI_WIDTH * 0.5f + ox - 150, 462 + oy, 300, 4, 2, D3DCOLOR_ARGB(40, 255, 255, 255), D3DCOLOR_ARGB(40, 255, 255, 255));
+        UiRoundRect(UI_WIDTH * 0.5f + ox - 150, 462 + oy, 4 + 296 * (st.wSecond / 59.0f), 4, 2, SEL_HI(220), SEL_LO(220));
+        break;
+    }
+    default:
+        saver_effect(1.5f);
+        break;
+    }
+}
+
+static void saver_run(IDirect3DDevice9 *dev, const Config *c)
+{
+    const float start = UiTime();
+    int mode = c->saverMode > SAVER_OFF && c->saverMode < SAVER_COUNT ? c->saverMode : SAVER_EFFECT, armed = 0;
+    H64_INFO("[menu] screen saver %d", mode);
+    xb_audio_ui_sound(XB_SFX_SAVER);
+    for (;;)
+    {
+        float t = UiTime() - start;
+        // A button held when it starts (the Preview's A) has to be let go first.
+        if (!saver_any_input()) armed = 1;
+        else if (armed) break;
+        dev->Clear(0, NULL, D3DCLEAR_TARGET, D3DCOLOR_ARGB(255, 0, 0, 0), 1.0f, 0);
+        UiBegin(dev);
+        saver_draw(mode, t);
+        if (t < 1.0f) UiRect(0, 0, UI_WIDTH, UI_HEIGHT, D3DCOLOR_ARGB((int)(255 * (1.0f - t)), 0, 0, 0));   // fades in
+        UiEnd();
+        dev->Present(NULL, NULL, NULL, NULL);
+        Sleep(16);
+    }
+    xb_audio_ui_sound(XB_SFX_OPEN);
+    H64_INFO("[menu] screen saver ended");
+}
+
 static void browser_draw(const std::vector<RomEntry> &roms, int sel, int top, int rows, const RomInfo *info, const ArtView *view,
                          int busy, float selAt, const ArtStatus *st)
 {
@@ -3248,14 +5744,28 @@ static void browser_draw(const std::vector<RomEntry> &roms, int sel, int top, in
     int n = (int)roms.size(), i;
     char buf[160];
     UiBackdrop();
+    browser_effect();
     UiBrand(UI_SAFE_X, 72, 34);   // the logo alone (the version is on the About page)
-    if (n)
+    if (s_romsTotal)
     {
-        sprintf(buf, "%d / %d", sel + 1, n);
-        UiText(UI_REGULAR, 19, listX + listW, 64, UI_COL_TEXT2, buf, UI_RIGHT);
+        // The tab bar under the logo, the position in it at the list's right end
+        // (the box art download's progress there instead while it runs, below).
+        browser_tabs(listX, LIST_Y - 22, 0, st->bulk ? listW - 310 : listW - 90);
+        if (n && !st->bulk)
+        {
+            sprintf(buf, "%d / %d", sel + 1, n);
+            UiText(UI_REGULAR, 19, listX + listW, LIST_Y - 22, UI_COL_TEXT2, buf, UI_RIGHT);
+        }
     }
     UiPanel(listX, listY, listW, listH, 20);
-    if (!n)
+    if (!n && s_romsTotal)
+    {
+        // A tab with no game in it (no favourites yet, an empty category).
+        float cy = listY + listH * 0.5f;
+        UiText(UI_BOLD, 24, listX + listW * 0.5f, cy - 20, UI_COL_TEXT, Tr(T_CAT_EMPTY), UI_CENTER);
+        UiText(UI_REGULAR, 19, listX + listW * 0.5f, cy + 20, UI_COL_TEXT2, Tr(s_tab == 1 ? T_FAV_HINT : T_CAT_HINT), UI_CENTER);
+    }
+    else if (!n)
     {
         float cy = listY + listH * 0.5f;
         UiText(UI_BOLD, 30, listX + listW * 0.5f, cy - 50, UI_COL_TEXT, Tr(T_NO_ROM), UI_CENTER);
@@ -3264,14 +5774,16 @@ static void browser_draw(const std::vector<RomEntry> &roms, int sel, int top, in
     }
     else
     {
-        float sy = anim_step(&selAnim, listY + pad + (sel - top) * rowH, 0), textW = listW - 64;
+        float sy = anim_step(&selAnim, listY + pad + (sel - top) * rowH, 0), textW = listW - 100;
         selection_bar(listX + 10, sy + 1, listW - (n > rows ? 36 : 20), rowH - 2);
         for (i = 0; i < rows && top + i < n; i++)
         {
             float cy = listY + pad + i * rowH + rowH * 0.5f;
             int s = top + i == sel;
             UiTextFit(s ? UI_BOLD : UI_REGULAR, 21, textW, roms[top + i].shown.c_str(), buf, sizeof(buf));
-            UiText(s ? UI_BOLD : UI_REGULAR, 21, listX + 30, cy, s ? UI_COL_TEXT : UI_COL_TEXT2, buf, UI_LEFT);
+            // The favourite star in its own column at the left, the names lined up after it.
+            if (fav_is(roms[top + i].file)) fav_star(listX + 34, cy, 13, 1.0f);
+            UiText(s ? UI_BOLD : UI_REGULAR, 21, listX + 56, cy, s ? UI_COL_TEXT : UI_COL_TEXT2, buf, UI_LEFT);
         }
         if (n > rows)
         {
@@ -3288,11 +5800,11 @@ static void browser_draw(const std::vector<RomEntry> &roms, int sel, int top, in
     UiScreenFooter(Tr(n ? T_FOOT_BROWSER : T_FOOT_BROWSER_EMPTY));
     if (st->bulk)
     {
-        // "Download all" progress at the right end of the footer.
-        const float bw = 150, right = UI_WIDTH - UI_SAFE_X, cy = 664;
+        // "Download all" progress at the right end of the tab row, over the position
+        // (the prompts below take the whole width).
+        const float bw = 120, right = listX + listW, cy = LIST_Y - 22;
         float frac = st->total ? (float)st->done / st->total : 0;
-        if (st->done) _snprintf(buf, sizeof(buf) - 1, Tr(T_ART_PROGRESS), st->done, st->total);
-        else strncpy(buf, Tr(T_ART_CONNECTING), sizeof(buf) - 1);
+        _snprintf(buf, sizeof(buf) - 1, Tr(T_ART_PROGRESS), st->done, st->total);   // "0 / N" while it connects: short enough for this spot
         buf[sizeof(buf) - 1] = 0;
         UiText(UI_REGULAR, 17, right - bw - 16, cy, UI_COL_TEXT2, buf, UI_RIGHT);
         UiRoundRect(right - bw, cy - 3, bw, 6, 3, D3DCOLOR_ARGB(30, 255, 255, 255), D3DCOLOR_ARGB(30, 255, 255, 255));
@@ -3333,7 +5845,9 @@ static void browser_draw_covers(const std::vector<RomEntry> &roms, int sel, int 
     int n = (int)roms.size(), i;
     char buf[160];
     UiBackdrop();
+    browser_effect();
     UiBrand(UI_SAFE_X, 72, 34);   // the logo alone (the version is on the About page)
+    browser_tabs(UI_WIDTH * 0.5f, 72, 1, 520);
     // n == 0 never reaches here - the caller (RomBrowser) falls back to browser_draw
     // for that (one tested "no ROMs" screen instead of two).
     sprintf(buf, "%d / %d", sel + 1, n);
@@ -3378,6 +5892,12 @@ static void browser_draw_covers(const std::vector<RomEntry> &roms, int sel, int 
                 UiRoundRect(cx, cy, g->tileW, g->imgH, 12, UiAlpha(D3DCOLOR_ARGB(255, 22, 23, 31), fade), UiAlpha(D3DCOLOR_ARGB(255, 16, 17, 23), fade));
                 if (v && v->cover) UiImage(v->cover, cx, cy, g->tileW, g->imgH, 12, D3DCOLOR_ARGB((int)(255 * fade), 255, 255, 255));
                 else stage_placeholder(cx, cy, g->tileW, g->imgH, roms[idx].shown.c_str(), fade);
+                if (fav_is(roms[idx].file))
+                {
+                    // The favourite's badge, in the cover's top left corner.
+                    UiCircle(cx + 18, cy + 18, 13, UiAlpha(D3DCOLOR_ARGB(200, 16, 18, 26), fade));
+                    fav_star(cx + 18, cy + 18, 15, fade);
+                }
                 UiTextFit(isSel ? UI_BOLD : UI_REGULAR, g->labelSize, g->tileW, roms[idx].shown.c_str(), fit, sizeof(fit));
                 UiText(isSel ? UI_BOLD : UI_REGULAR, g->labelSize, cx + g->tileW * 0.5f, cy + g->imgH + GRID_LABEL_GAP + GRID_LABEL_H * 0.5f,
                        UiAlpha(isSel ? UI_COL_TEXT : UI_COL_TEXT2, fade), fit, UI_CENTER);
@@ -3405,7 +5925,9 @@ static void browser_draw_carousel(const std::vector<RomEntry> &roms, int sel)
     float p, a = selection_pulse();
     char buf[160];
     UiBackdrop();
+    browser_effect();
     UiBrand(UI_SAFE_X, 72, 34);
+    browser_tabs(UI_WIDTH * 0.5f, 72, 1, 520);
     sprintf(buf, "%d / %d", sel + 1, n);
     UiText(UI_REGULAR, 19, UI_WIDTH - UI_SAFE_X, 64, UI_COL_TEXT2, buf, UI_RIGHT);
     // The row glides; only a long jump (round the end of the list) cuts straight there.
@@ -3453,8 +5975,10 @@ static void browser_draw_carousel(const std::vector<RomEntry> &roms, int sel)
     }
     {
         char fit[160];
-        UiTextFit(UI_BOLD, 24, UI_WIDTH - 2 * UI_SAFE_X, roms[sel].shown.c_str(), fit, sizeof(fit));
-        UiTextShadowed(UI_BOLD, 24, UI_WIDTH * 0.5f, CAR_FLOOR + CAR_GAP + CAR_H * 0.5f + 34, UI_COL_TEXT, fit, UI_CENTER);
+        float ty = CAR_FLOOR + CAR_GAP + CAR_H * 0.5f + 34, tw;
+        UiTextFit(UI_BOLD, 24, UI_WIDTH - 2 * UI_SAFE_X - 40, roms[sel].shown.c_str(), fit, sizeof(fit));
+        tw = UiTextShadowed(UI_BOLD, 24, UI_WIDTH * 0.5f, ty, UI_COL_TEXT, fit, UI_CENTER);
+        if (fav_is(roms[sel].file)) fav_star(UI_WIDTH * 0.5f - tw * 0.5f - 22, ty, 16, 1.0f);   // a favourite: its star before the name
     }
     UiScreenFooter(Tr(T_FOOT_BROWSER));
 }
@@ -3467,8 +5991,10 @@ static void browser_draw_carousel(const std::vector<RomEntry> &roms, int sel)
 // UiTextWrap/UiTextFit lay text out without drawing anything - decides how
 // tall the two columns (cover, text) really are, then the panel, divider and
 // detail row are placed right after them instead of leaving a fixed gap.
-static void cover_detail_draw(const RomEntry *rom, const RomInfo *ri, const ArtView *v)
+// `open`: 0..1 as it opens (the veil fades in, the panel rises into place).
+static void cover_detail_draw(const RomEntry *rom, const RomInfo *ri, const ArtView *v, float open)
 {
+    const float e = ease_out(open), rise = (1.0f - e) * 44.0f;
     const float x = 140, w = 1000, pad = 36;
     const float ix = x + pad, iw = w - pad * 2;
     const float boxW = 420, boxH = boxW * 232.0f / 400.0f;   // ART_COVER_W:H's ratio
@@ -3534,18 +6060,25 @@ static void cover_detail_draw(const RomEntry *rom, const RomInfo *ri, const ArtV
     h = 2 * pad + contentH + 28 + 22 + 39 + 24 + 15 + 15;
     y = (UI_HEIGHT - h) * 0.5f;
     if (y < 20) y = 20;
+    y += rise;
     boxX = ix;
     boxY = y + pad;
     divY = boxY + contentH + 28;
     detailY = divY + 22;
     footY = detailY + 39 + 24 + 15;
 
-    UiDim();
+    UiRect(0, 0, UI_WIDTH, UI_HEIGHT, UiAlpha(UI_COL_DIM, e));   // the grid behind, veiled
+    edge_glow(x, y, w, h, 24);
     UiPanel(x, y, w, h, 24);
+    {
+        // The cover framed like the selected tile it came from.
+        float a = selection_pulse();
+        selection_glow(boxX - 4, boxY - 4, boxW + 8, boxH + 8, 18, a);
+        UiRoundRing(boxX - 4, boxY - 4, boxW + 8, boxH + 8, 18, 3.0f, SEL_RING(a));
+    }
     UiRoundRect(boxX, boxY, boxW, boxH, 16, D3DCOLOR_ARGB(255, 22, 23, 31), D3DCOLOR_ARGB(255, 16, 17, 23));
     if (v && v->cover) UiImage(v->cover, boxX, boxY, boxW, boxH, 16, D3DCOLOR_ARGB(255, 255, 255, 255));
     else stage_placeholder(boxX, boxY, boxW, boxH, rom->shown.c_str(), 1.0f);
-    UiRoundRing(boxX, boxY, boxW, boxH, 16, 1.0f, UI_COL_LINE);
 
     UiText(UI_BOLD, 28, textX, boxY, UI_COL_TEXT, titleBuf, UI_LEFT);
     if (hasSubt) UiText(UI_REGULAR, 19, textX, boxY + titleH, UI_COL_TEXT2, subtFit, UI_LEFT);
@@ -3578,13 +6111,18 @@ static void cover_detail_draw(const RomEntry *rom, const RomInfo *ri, const ArtV
 
 // A plays the game - the caller (RomBrowser) does the actual launch (same
 // side effects as the list view's A press, kept in one place), B goes back
-// to the grid.
-static int cover_detail_screen(IDirect3DDevice9 *dev, const RomEntry *rom)
+// to the grid. The view it was opened from (a grid's page, or the carousel)
+// stays drawn behind it; the panel opens over it in OPEN_S.
+#define DETAIL_OPEN_S 0.20f
+static int cover_detail_screen(IDirect3DDevice9 *dev, const std::vector<RomEntry> &roms, int sel, int page, int design)
 {
     UiInput in;
     RomInfo ri;
+    const RomEntry *rom = &roms[sel];
+    float openAt;
     UiInputInit(&in);
     rom_details(rom->file.c_str(), &ri);
+    openAt = UiTime();
     for (;;)
     {
         WORD down = UiInputPoll(&in);
@@ -3592,8 +6130,9 @@ static int cover_detail_screen(IDirect3DDevice9 *dev, const RomEntry *rom)
         if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) return 0;
         dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
         UiBegin(dev);
-        UiBackdrop();
-        cover_detail_draw(rom, &ri, view_find(rom->file.c_str()));
+        if (design == BD_CAROUSEL) browser_draw_carousel(roms, sel);
+        else browser_draw_covers(roms, sel, page, grid_layout(design));
+        cover_detail_draw(rom, &ri, view_find(rom->file.c_str()), (UiTime() - openAt) / DETAIL_OPEN_S);
         UiEnd();
         dev->Present(NULL, NULL, NULL, NULL);
         Sleep(16);
@@ -3606,23 +6145,61 @@ static int cover_detail_screen(IDirect3DDevice9 *dev, const RomEntry *rom)
 // network is not the console's, unless artdownload=2).
 static int art_net_possible(const Config *c) { return (!c->xenia && h64_fenv_reliable()) || c->artDownload == 2; }
 
+// The tab's games again (tab_filter) and their paths; returns where `keep`
+// (a ROM file) is in it now, or 0.
+static int browser_retab(const std::vector<RomEntry> &all, std::vector<RomEntry> *roms, std::vector<const char *> *paths, const std::string &keep)
+{
+    int i, at = 0;
+    tab_filter(all, roms);
+    paths->clear();
+    for (i = 0; i < (int)roms->size(); i++)
+    {
+        paths->push_back((*roms)[i].file.c_str());
+        if (!keep.empty() && !_stricmp((*roms)[i].file.c_str(), keep.c_str())) at = i;
+    }
+    return at;
+}
+
 int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char *path, size_t pathSize)
 {
-    std::vector<RomEntry> roms;
-    std::vector<const char *> paths;
+    static int s_booted;   // the first visit of this session (Settings > System > Game at start)
+    std::vector<RomEntry> allRoms, roms;      // every game; those of the tab shown (LT/RT)
+    std::vector<const char *> allPaths, paths;
     UiInput in;
-    int sel = 0, top = 0, page = 0, detailsFor = -1, i, lastSel = -1, wasBulk = 0;
+    int sel = 0, top = 0, page = 0, detailsFor = -1, i, lastSel = -1, wasBulk = 0, trigPrev = 3;
     RomInfo details;
     const int rows = 13;
     char newVersion[32], msg[256], drive[16];
-    DWORD msgAt = 0, demoAt = GetTickCount();
+    DWORD msgAt = 0, demoAt = GetTickCount(), idleAt = GetTickCount();
     float selAt = 0;
     msg[0] = 0;
-    scan_roms(&roms);
+    // The menus' music and wallpapers folders, there to be filled from the first start on.
+    CreateDirectoryA(MUSIC_DIR, NULL);
+    CreateDirectoryA(WALL_DIR, NULL);
+    scan_roms(&allRoms);
+    s_romsTotal = (int)allRoms.size();
+    for (i = 0; i < (int)allRoms.size(); i++) allPaths.push_back(allRoms[i].file.c_str());
+    roms = allRoms;   // the tab is applied once the box art (game information) is reachable, below
     for (i = 0; i < (int)roms.size(); i++)
     {
         paths.push_back(roms[i].file.c_str());
         if (!_stricmp(roms[i].file.c_str(), c->lastRom)) sel = i;
+    }
+    if (!s_booted)
+    {
+        // Settings > System > Game at start: the last game played, or the one
+        // chosen, straight away - unless BACK is held while the emulator starts.
+        XINPUT_STATE st;
+        const char *want = c->startRomMode == 1 ? c->lastRom : c->startRomMode == 2 ? c->startRom : "";
+        s_booted = 1;
+        if (want[0] && GetFileAttributesA(want) != (DWORD)0xFFFFFFFF &&
+            !(XInputGetState(0, &st) == ERROR_SUCCESS && (st.Gamepad.wButtons & XINPUT_GAMEPAD_BACK)))
+        {
+            strncpy(path, want, pathSize - 1);
+            path[pathSize - 1] = 0;
+            H64_INFO("[menu] game at start: %s", path);
+            return 1;
+        }
     }
     if (c->browserSel[0])
     {
@@ -3644,6 +6221,8 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
         return 1;
     }
     if (c->browserDesign < 0 || c->browserDesign >= BD_COUNT) c->browserDesign = BD_LIST;
+    if (c->bgEffect < 0 || c->bgEffect >= BGFX_COUNT) c->bgEffect = BGFX_WAVES;
+    ui_from_config(c);
     page = roms.empty() ? 0 : sel / grid_per_page(grid_layout(c->browserDesign));   // a grid starts on sel's page, not always page 0
     // Box art: in the folder of the settings' drive ("game:\config\settings.ini" -> game).
     SettingsSetLangFile(settingsPath);
@@ -3653,15 +6232,39 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
     ArtStart(drive);
     ArtSetNetwork(c->artDownload && art_net_possible(c));
     ArtPause(0);
+    strncpy(s_libDrive, drive, sizeof(s_libDrive) - 1);   // favourites and categories: <drive>:\config\ too
+    if (s_tab)
+    {
+        // Back from a game on a tab other than "every game": that tab again, on the same game.
+        std::string cur = roms.empty() ? std::string() : roms[sel].file;
+        tab_filter(allRoms, &roms);
+        paths.clear();
+        sel = 0;
+        for (i = 0; i < (int)roms.size(); i++)
+        {
+            paths.push_back(roms[i].file.c_str());
+            if (!_stricmp(roms[i].file.c_str(), cur.c_str())) sel = i;
+        }
+        page = roms.empty() ? 0 : sel / grid_per_page(grid_layout(c->browserDesign));
+    }
+    else s_tabGames = (int)roms.size();
     UiSetSkinWant(c->skinName);
-    xb_audio_music_play(c->skinName);   // "" just stops whatever was playing
+    // The sound settings of config\settings.ini (main.cpp read only harissa64v2.ini's at start):
+    // before the music starts, so it starts at its own volume.
+    xb_audio_set_game_volume(c->volumeGame);
+    xb_audio_set_music_volume(c->volumeMusic);
+    xb_audio_set_sfx_volume(c->volumeSfx);
+    xb_audio_set_mono(c->audioMono);
+    xb_audio_music_start(MUSIC_DIR, c->musicMode, c->musicTrack);   // nothing there: no music
+    xb_audio_ui_enable(c->uiSounds);
+    xb_audio_ui_style(c->uiSoundStyle);
 
     UiInputInit(&in);
     memset(&details, 0, sizeof(details));
     if (c->controlsTest >= 0) settings_loop(dev, c, settingsPath, c->controlsTest);
     // The box art of every game, in the background: what is missing (artall=1,
     // checks: also retrying what was not found before).
-    if (!roms.empty() && art_net_possible(c) && (c->artAll || c->artDownload)) ArtBulkStart(&paths[0], (int)paths.size(), c->artAll);
+    if (!allRoms.empty() && art_net_possible(c) && (c->artAll || c->artDownload)) ArtBulkStart(&allPaths[0], (int)allPaths.size(), c->artAll);
     // A newer release on GitHub: a message for a few seconds (the check runs
     // in the background and may answer later, or never without a network).
     // updatecheck=2 (testing): as if this were version 0.0.0, so any release is newer.
@@ -3671,15 +6274,26 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
         WORD down = UiInputPoll(&in);
         ArtStatus st;
         int n = (int)roms.size();
+        // The screen saver, after Config::saverTime minutes without any input.
+        if (down || saver_any_input()) idleAt = GetTickCount();
+        else if (c->saverMode > SAVER_OFF && c->saverMode < SAVER_COUNT && c->browserDemo <= 0 &&
+                 GetTickCount() - idleAt >= (DWORD)saver_minutes(c) * 60000u)
+        {
+            saver_run(dev, c);
+            idleAt = GetTickCount();
+            UiInputInit(&in);
+            continue;
+        }
         if (UpdateCheckTake(newVersion, sizeof(newVersion)))
         {
             _snprintf(msg, sizeof(msg) - 1, Tr(T_UPDATE_AVAILABLE), newVersion);
             msg[sizeof(msg) - 1] = 0;
             msgAt = GetTickCount();
+            xb_audio_ui_sound(XB_SFX_NOTIFY);
             H64_INFO("[update] %s", msg);
         }
-        if (ArtTakeNote(msg, sizeof(msg))) msgAt = GetTickCount();
-        if (BatteryCheck(c, msg, sizeof(msg))) msgAt = GetTickCount();
+        if (ArtTakeNote(msg, sizeof(msg))) { msgAt = GetTickCount(); xb_audio_ui_sound(XB_SFX_NOTIFY); }
+        if (BatteryCheck(c, msg, sizeof(msg))) { msgAt = GetTickCount(); xb_audio_ui_sound(XB_SFX_NOTIFY); }
         if ((down & XINPUT_GAMEPAD_BACK) && confirm_quit(dev))
         {
             views_clear(dev);
@@ -3711,6 +6325,7 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
                     views_clear(dev);
                     ArtPause(1);
                     xb_audio_music_stop();
+                    xb_audio_ui_sound_instead(XB_SFX_LAUNCH);
                     return 1;
                 }
                 if (sel < top) top = sel;
@@ -3759,7 +6374,7 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
                 page = sel / perPage;
                 if (down & XINPUT_GAMEPAD_A)
                 {
-                    if (cover_detail_screen(dev, &roms[sel]))
+                    if (cover_detail_screen(dev, roms, sel, page, c->browserDesign))
                     {
                         strncpy(path, roms[sel].file.c_str(), pathSize - 1);
                         path[pathSize - 1] = 0;
@@ -3768,6 +6383,7 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
                         views_clear(dev);
                         ArtPause(1);
                         xb_audio_music_stop();
+                        xb_audio_ui_sound(XB_SFX_LAUNCH);
                         return 1;
                     }
                     UiInputInit(&in);
@@ -3808,16 +6424,65 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
                 }
             }
         }
+        {
+            // LT / RT: the previous / next tab (every game, favourites, the categories).
+            XINPUT_STATE ts;
+            int held = 0, pressed, tabs;
+            if (XInputGetState(0, &ts) == ERROR_SUCCESS)
+                held = (ts.Gamepad.bLeftTrigger > 128 ? 1 : 0) | (ts.Gamepad.bRightTrigger > 128 ? 2 : 0);
+            pressed = held & ~trigPrev;
+            trigPrev = held;
+            tabs = tab_count();
+            if (pressed && s_romsTotal && tabs > 1)
+            {
+                std::string keep = n ? roms[sel].file : std::string();
+                s_tab = (s_tab + ((pressed & 2) ? 1 : tabs - 1)) % tabs;
+                sel = browser_retab(allRoms, &roms, &paths, keep);
+                n = (int)roms.size();
+                top = sel >= rows ? sel - rows + 1 : 0;
+                page = n ? sel / grid_per_page(grid_layout(c->browserDesign)) : 0;
+                lastSel = detailsFor = -1;
+                xb_audio_ui_sound(XB_SFX_TAB);
+            }
+        }
+        if ((down & XINPUT_GAMEPAD_B) && n)
+        {
+            // B: the selected game in or out of the favourites (on the Favourites tab: out of the list).
+            int now = fav_toggle(roms[sel].file);
+            xb_audio_ui_sound_instead(now ? XB_SFX_FAV_ON : XB_SFX_FAV_OFF);
+            strncpy(msg, Tr(now ? T_FAV_ADDED : T_FAV_REMOVED), sizeof(msg) - 1);
+            msg[sizeof(msg) - 1] = 0;
+            msgAt = GetTickCount();
+            if (s_tab == 1)
+            {
+                int keepAt = sel;
+                browser_retab(allRoms, &roms, &paths, std::string());
+                n = (int)roms.size();
+                sel = keepAt < n ? keepAt : n - 1;
+                if (sel < 0) sel = 0;
+                top = sel >= rows ? sel - rows + 1 : 0;
+                page = n ? sel / grid_per_page(grid_layout(c->browserDesign)) : 0;
+                lastSel = detailsFor = -1;
+            }
+        }
         if (down & XINPUT_GAMEPAD_Y)
         {
             int artWas = c->artDownload;
+            std::string keep = n ? roms[sel].file : std::string();
+            s_browserSel = keep;   // Settings > System > Game at start can pick it
             settings_loop(dev, c, settingsPath, -1);
             detailsFor = -1;   // the card's texts again (the language may have changed)
             ArtSetNetwork(c->artDownload && art_net_possible(c));
-            if (!artWas && c->artDownload && n && art_net_possible(c)) ArtBulkStart(&paths[0], n, 0);   // downloads just turned on
+            if (!artWas && c->artDownload && !allRoms.empty() && art_net_possible(c)) ArtBulkStart(&allPaths[0], (int)allPaths.size(), 0);   // downloads just turned on
+            // The categories may have changed: the tab again (or "every game" if its category went).
+            sel = browser_retab(allRoms, &roms, &paths, keep);
+            n = (int)roms.size();
+            top = sel >= rows ? sel - rows + 1 : 0;
+            page = n ? sel / grid_per_page(grid_layout(c->browserDesign)) : 0;
+            lastSel = -1;
             UiInputInit(&in);
         }
-        if ((down & XINPUT_GAMEPAD_X) && !n)
+        if ((down & XINPUT_GAMEPAD_X) && !s_romsTotal)
         {
             AboutScreen(dev);   // no ROMs: no view to change, X keeps the About page (FOOT_BROWSER_EMPTY)
             UiInputInit(&in);
@@ -3833,12 +6498,25 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
         }
         ArtGetStatus(&st);
         if (wasBulk && !st.bulk)
-            for (i = 0; i < n; i++) ArtForget(paths[i]);   // the downloads are over: the covers shown are read again
+        {
+            for (i = 0; i < (int)allPaths.size(); i++) ArtForget(allPaths[i]);   // the downloads are over: the covers shown are read again
+            s_libLoaded = 0;   // and the games' information, for the categories
+            if (s_tab >= 2)
+            {
+                std::string keep = n ? roms[sel].file : std::string();
+                sel = browser_retab(allRoms, &roms, &paths, keep);
+                n = (int)roms.size();
+                top = sel >= rows ? sel - rows + 1 : 0;
+                page = n ? sel / grid_per_page(grid_layout(c->browserDesign)) : 0;
+                lastSel = detailsFor = -1;
+            }
+        }
         wasBulk = st.bulk;
         views_take(dev);
 
         dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
         UiBegin(dev);
+        ui_from_config(c);   // also after the settings were left without saving
         if (c->browserDesign == BD_LIST || !n)
             browser_draw(roms, sel, top, rows, &details, n ? view_find(roms[sel].file.c_str()) : NULL,
                          n && !_stricmp(st.busyPath, roms[sel].file.c_str()), selAt, &st);

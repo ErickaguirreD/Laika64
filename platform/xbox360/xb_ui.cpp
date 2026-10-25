@@ -10,6 +10,7 @@
 #include "../../core/common/h64_png.h"
 #include "../../core/common/h64_types.h"
 #include "../../render/xenos/h64_xenos.h"
+#include "xb_audio.h"
 #include "xb_lang.h"
 #include "xb_logo.h"
 #include "xb_ui_atlas.h"
@@ -378,18 +379,504 @@ static void skin_sync(void)
     s_skinAttempted = 1;
 }
 
+// ---- Smooth lines and slanted strips (the background effects' waves) ----
+// A segment of `thick` pixels: the shape's box laid along it, so its edges are
+// anti-aliased whatever the angle (flat slices showed steps on slopes). Its
+// ends are square and soft, half a pixel over: the segments of a polyline
+// meet without a gap or a brighter bead.
+void UiLine(float x0, float y0, float x1, float y1, float thick, D3DCOLOR color)
+{
+    UiVtx *v;
+    float dx = x1 - x0, dy = y1 - y0, len = sqrtf(dx * dx + dy * dy), ht = thick * 0.5f, hw, hl, p[4], cx, cy, ux, uy, nx, ny;
+    if (!s_dev || thick <= 0) return;
+    if (len < 0.001f) { dx = 1; dy = 0; len = 0; }
+    else { dx /= len; dy /= len; }
+    if (s_quads == UI_MAX_QUADS) flush();
+    hw = len * 0.5f + 0.5f;   // the box: the segment
+    hl = hw + 1.0f;           // padded by the edge's width
+    p[0] = hw; p[1] = ht; p[2] = 0.0f; p[3] = 1.0f;
+    cx = (x0 + x1) * 0.5f; cy = (y0 + y1) * 0.5f;
+    ux = dx * hl; uy = dy * hl;                    // along, to the padded end
+    nx = -dy * (ht + 1.0f); ny = dx * (ht + 1.0f); // across, to the padded side
+    v = &s_vtx[s_quads * 6];
+    vtx(&v[0], cx - ux - nx, cy - uy - ny, color, -hl, -(ht + 1.0f), 0.0f, 0.0f, p);
+    vtx(&v[1], cx + ux - nx, cy + uy - ny, color, hl, -(ht + 1.0f), 0.0f, 0.0f, p);
+    vtx(&v[2], cx - ux + nx, cy - uy + ny, color, -hl, ht + 1.0f, 0.0f, 0.0f, p);
+    v[3] = v[1];
+    vtx(&v[4], cx + ux + nx, cy + uy + ny, color, hl, ht + 1.0f, 0.0f, 0.0f, p);
+    v[5] = v[2];
+    s_quads++;
+}
+
+// A strip between x0 and x1 whose top and bottom follow the two given heights
+// at each end (a slanted slice of a wave): top colour ct, bottom cb.
+void UiStrip(float x0, float top0, float bot0, float x1, float top1, float bot1, D3DCOLOR ct, D3DCOLOR cb)
+{
+    static const float p[4] = { 1.0e5f, 1.0e5f, 0.0f, 1.0f };   // a box far bigger than the strip: solid
+    UiVtx *v;
+    if (!s_dev) return;
+    if (s_quads == UI_MAX_QUADS) flush();
+    v = &s_vtx[s_quads * 6];
+    vtx(&v[0], x0, top0, ct, 0, 0, 0, 0, p);
+    vtx(&v[1], x1, top1, ct, 0, 0, 0, 0, p);
+    vtx(&v[2], x0, bot0, cb, 0, 0, 0, 0, p);
+    v[3] = v[1];
+    vtx(&v[4], x1, bot1, cb, 0, 0, 0, 0, p);
+    v[5] = v[2];
+    s_quads++;
+}
+
+// ---- Wallpapers (game:\wallpapers\: a slideshow behind the menus) ----
+// The .jpg/.jpeg/.png/.bmp in game:\wallpapers\ and its folders (one level
+// down), in name order (or at random), one at a
+// time, laid out as chosen (fill, fit, stretch, centre, tile), the next one
+// coming in with the chosen transition. Decoded with D3DX (JPEG too), PNG
+// through h64_png when D3DX cannot. Only two pictures are held: the one
+// shown and, during a transition, the one leaving.
+#define WALL_MAX 256
+#define WALL_TRANS_S 1.2f
+#define WALL_TILE_MIN 48.0f   // a smaller picture is tiled at this size (fewer draws)
+struct WallPic
+{
+    IDirect3DTexture9 *tex;
+    float w, h;   // the picture's own size in pixels (the texture may be smaller)
+};
+static char s_wallWant[64], s_wallLoaded[64];
+static int s_wallSecs = 30, s_wallTrans, s_wallDim = 40, s_wallFit, s_wallShuffle, s_wallScanned;   // s_wallSecs 0: never changes
+static char s_wallPick[128], s_wallPicked[128];   // the picture chosen to show (its name in s_wallFiles), and the one last applied
+static char s_wallFiles[WALL_MAX][128];   // relative to the folder: "pic.jpg", "folder\pic.jpg"
+static int s_wallCount, s_wallIdx;
+static WallPic s_wallCur, s_wallPrev;
+static float s_wallShownAt, s_wallTransAt = -100.0f;
+static int s_wallTransKind, s_wallLoadedOnce;
+
+static void wall_scan(void);
+// The list of pictures again when the choice changed (or never read): no device needed.
+static void wall_sync_scan(void)
+{
+    if (s_wallScanned && !strcmp(s_wallWant, s_wallLoaded)) return;
+    strcpy(s_wallLoaded, s_wallWant);
+    s_wallScanned = 1;
+    s_wallLoadedOnce = 0;   // the pictures follow at the next draw
+    wall_scan();
+}
+
+void UiWallpaperRescan(void) { s_wallScanned = 0; }
+
+void UiSetWallpapers(const char *folder, const char *pick, int seconds, int transition, int dim, int fit, int shuffle)
+{
+    strncpy(s_wallWant, folder ? folder : "", sizeof(s_wallWant) - 1);
+    s_wallWant[sizeof(s_wallWant) - 1] = 0;
+    strncpy(s_wallPick, pick ? pick : "", sizeof(s_wallPick) - 1);
+    s_wallPick[sizeof(s_wallPick) - 1] = 0;
+    s_wallSecs = seconds <= 0 ? 0 : seconds < 5 ? 5 : seconds;
+    s_wallTrans = transition;
+    s_wallDim = dim < 0 ? 0 : dim > 90 ? 90 : dim;
+    s_wallFit = fit >= 0 && fit < UI_FIT_COUNT ? fit : UI_FIT_FILL;
+    s_wallShuffle = shuffle;
+}
+
+// game:\wallpapers\<file> (file may hold a folder: "folder\pic.jpg").
+static void wall_path(const char *file, char *out, int size)
+{
+    _snprintf(out, size - 1, "game:\\wallpapers\\%s", file);
+    out[size - 1] = 0;
+}
+
+int UiWallpaperIsImage(const char *name)
+{
+    const char *dot = strrchr(name, '.');
+    return dot && (!_stricmp(dot, ".jpg") || !_stricmp(dot, ".jpeg") || !_stricmp(dot, ".png") || !_stricmp(dot, ".bmp"));
+}
+
+static int wall_cmp(const void *a, const void *b) { return _stricmp((const char *)a, (const char *)b); }
+
+// The pictures of one folder (prefix: its path under the wallpapers folder, "" for that folder itself).
+static void wall_scan_dir(const char *prefix, int subfolders)
+{
+    WIN32_FIND_DATAA fd;
+    HANDLE h;
+    char pattern[200];
+    _snprintf(pattern, sizeof(pattern) - 1, "game:\\wallpapers\\%s*", prefix);
+    pattern[sizeof(pattern) - 1] = 0;
+    h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do
+    {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+        {
+            char sub[128];
+            if (!subfolders || !strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
+            _snprintf(sub, sizeof(sub) - 1, "%s%s\\", prefix, fd.cFileName);
+            sub[sizeof(sub) - 1] = 0;
+            wall_scan_dir(sub, 0);
+            continue;
+        }
+        if (!UiWallpaperIsImage(fd.cFileName) || strlen(prefix) + strlen(fd.cFileName) >= sizeof(s_wallFiles[0])) continue;
+        if (s_wallCount >= WALL_MAX) break;
+        _snprintf(s_wallFiles[s_wallCount], sizeof(s_wallFiles[0]) - 1, "%s%s", prefix, fd.cFileName);
+        s_wallFiles[s_wallCount][sizeof(s_wallFiles[0]) - 1] = 0;
+        s_wallCount++;
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+}
+
+static void wall_scan(void)
+{
+    s_wallCount = 0;
+    wall_scan_dir("", 1);   // also while they are off: Settings chooses among them
+    qsort(s_wallFiles, s_wallCount, sizeof(s_wallFiles[0]), wall_cmp);
+}
+
+int UiWallpaperCount(void)
+{
+    wall_sync_scan();
+    return s_wallCount;
+}
+
+static void wall_free(WallPic *p)
+{
+    if (p->tex)
+    {
+        flush();
+        UiImageRelease(s_dev, p->tex);
+    }
+    memset(p, 0, sizeof(*p));
+}
+
+// One picture: its own size kept for the layouts, the texture no bigger than
+// it takes to cover the screen (a large photo is scaled down, a small picture
+// kept as it is).
+static int wall_load(int idx, WallPic *out)
+{
+    char path[200];
+    unsigned char *enc;
+    long size = 0;
+    D3DXIMAGE_INFO info;
+    IDirect3DTexture9 *tex = NULL;
+    memset(out, 0, sizeof(*out));
+    if (idx < 0 || idx >= s_wallCount) return 0;
+    wall_path(s_wallFiles[idx], path, sizeof(path));
+    enc = skin_file_read(path, &size);
+    if (!enc) return 0;
+    if (SUCCEEDED(D3DXGetImageInfoFromFileInMemory(enc, (UINT)size, &info)) && info.Width && info.Height)
+    {
+        float s = (float)UI_WIDTH / info.Width;
+        int w, h;
+        if ((float)UI_HEIGHT / info.Height > s) s = (float)UI_HEIGHT / info.Height;
+        if (s > 1.0f) s = 1.0f;
+        w = (int)(info.Width * s + 0.5f);
+        h = (int)(info.Height * s + 0.5f);
+        if (w > 4096) w = 4096;   // a panorama: squeezed a little more
+        if (h > 4096) h = 4096;
+        if (w < 1) w = 1;
+        if (h < 1) h = 1;
+        if (FAILED(D3DXCreateTextureFromFileInMemoryEx(s_dev, enc, (UINT)size, w, h, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT,
+                                                       D3DX_FILTER_LINEAR, D3DX_DEFAULT, 0, NULL, NULL, &tex)))
+            tex = NULL;
+        out->w = (float)info.Width;
+        out->h = (float)info.Height;
+    }
+    if (!tex)
+    {
+        int pw = 0, ph = 0;
+        unsigned char *rgba = h64_png_decode(enc, (u32)size, &pw, &ph, 2048 * 2048);
+        if (rgba)
+        {
+            tex = UiImageCreate(s_dev, rgba, pw, ph);
+            free(rgba);
+            out->w = (float)pw;
+            out->h = (float)ph;
+        }
+    }
+    free(enc);
+    if (!tex)
+    {
+        H64_WARN("[ui] wallpaper %s: cannot decode", path);
+        return 0;
+    }
+    out->tex = tex;
+    return 1;
+}
+
+// The next picture that loads (one that cannot is skipped), from idx on.
+static void wall_next(int idx, float now)
+{
+    int tries;
+    WallPic pic;
+    for (tries = 0; tries < s_wallCount; tries++)
+    {
+        int i = (idx + tries) % s_wallCount;
+        if (i == s_wallIdx && s_wallCur.tex && tries) break;   // round to the one shown: keep it
+        if (wall_load(i, &pic))
+        {
+            wall_free(&s_wallPrev);
+            s_wallPrev = s_wallCur;
+            s_wallCur = pic;
+            s_wallIdx = i;
+            s_wallTransAt = s_wallPrev.tex ? now : -100.0f;
+            s_wallTransKind = s_wallTrans < UI_TRANS_RANDOM ? s_wallTrans : (int)(GetTickCount() / 7 % UI_TRANS_RANDOM);
+            break;
+        }
+    }
+    s_wallShownAt = now;
+}
+
+// A picture's place in the list by its name (0 when it is not there any more).
+static int wall_find(const char *name)
+{
+    int i;
+    for (i = 0; i < s_wallCount; i++)
+        if (!_stricmp(s_wallFiles[i], name)) return i;
+    return 0;
+}
+
+int UiWallpaperFind(const char *name)
+{
+    int i;
+    wall_sync_scan();
+    for (i = 0; i < s_wallCount; i++)
+        if (!_stricmp(s_wallFiles[i], name)) return i;
+    return -1;
+}
+
+const char *UiWallpaperName(int i)
+{
+    wall_sync_scan();
+    return i >= 0 && i < s_wallCount ? s_wallFiles[i] : "";
+}
+
+// The one after s_wallIdx: the next by name, or any other at random.
+static int wall_after(void)
+{
+    if (!s_wallShuffle || s_wallCount < 3) return (s_wallIdx + 1) % s_wallCount;
+    return (s_wallIdx + 1 + (int)((GetTickCount() * 2654435761u) >> 8) % (s_wallCount - 1)) % s_wallCount;
+}
+
+static void wall_sync(void)
+{
+    float now = UiTime();
+    if (!s_dev) return;
+    if (!s_wallWant[0])
+    {
+        // Off: no picture held.
+        wall_free(&s_wallPrev);
+        wall_free(&s_wallCur);
+        wall_sync_scan();
+        return;
+    }
+    if (!s_wallScanned || strcmp(s_wallWant, s_wallLoaded) || !s_wallLoadedOnce)
+    {
+        wall_free(&s_wallPrev);
+        wall_free(&s_wallCur);
+        wall_sync_scan();
+        s_wallLoadedOnce = 1;
+        s_wallIdx = 0;
+        strcpy(s_wallPicked, s_wallPick);
+        // The chosen picture first (or, none chosen, the first or any one).
+        if (s_wallCount) wall_next(s_wallPick[0] ? wall_find(s_wallPick) : s_wallShuffle ? (int)(GetTickCount() % s_wallCount) : 0, now);
+        s_wallTransAt = -100.0f;
+        return;
+    }
+    if (s_wallPrev.tex && now - s_wallTransAt > WALL_TRANS_S) wall_free(&s_wallPrev);   // the transition is over
+    if (strcmp(s_wallPick, s_wallPicked))
+    {
+        // Another picture chosen (Settings > Interface > Wallpapers): it comes in at once, with the transition.
+        int i = wall_find(s_wallPick);
+        strcpy(s_wallPicked, s_wallPick);
+        if (s_wallCount && i != s_wallIdx) wall_next(i, now);
+        return;
+    }
+    if (s_wallSecs && s_wallCount > 1 && s_wallCur.tex && now - s_wallShownAt >= s_wallSecs) wall_next(wall_after(), now);
+}
+
+// Part (u0..u1, v0..v1 of the whole picture, 0..1) of a picture over the box (x, y, w, h).
+void UiImagePart(IDirect3DTexture9 *tex, float x, float y, float w, float h, float u0, float v0, float u1, float v1, D3DCOLOR color)
+{
+    float p[4], fw, fh;
+    if (!s_dev || !tex || w <= 0 || h <= 0 || u1 <= u0 || v1 <= v0) return;
+    // The whole picture's size at this scale: the shader maps its box to the texture.
+    fw = w / (u1 - u0);
+    fh = h / (v1 - v0);
+    flush();
+    s_dev->SetTexture(1, tex);
+    p[0] = fw * 0.5f; p[1] = fh * 0.5f; p[2] = 0; p[3] = 1.0f;
+    quad(x, y, x + w, y + h, (u0 - 0.5f) * fw, (v0 - 0.5f) * fh, (u1 - 0.5f) * fw, (v1 - 0.5f) * fh, 2.0f, 0.0f, p, color, color);
+    flush();
+    s_dev->SetTexture(1, s_atlas);
+}
+
+// The picture drawn as one rectangle (x, y, w, h) of the screen, only where
+// it lies inside the clip (cx0, cy0)-(cx1, cy1).
+static void wall_rect(IDirect3DTexture9 *tex, float x, float y, float w, float h, float cx0, float cy0, float cx1, float cy1, D3DCOLOR c)
+{
+    float ix0 = x > cx0 ? x : cx0, iy0 = y > cy0 ? y : cy0, ix1 = x + w < cx1 ? x + w : cx1, iy1 = y + h < cy1 ? y + h : cy1;
+    if (ix1 - ix0 < 0.5f || iy1 - iy0 < 0.5f) return;
+    UiImagePart(tex, ix0, iy0, ix1 - ix0, iy1 - iy0, (ix0 - x) / w, (iy0 - y) / h, (ix1 - x) / w, (iy1 - y) / h, c);
+}
+
+// A wallpaper laid out (fit: UI_FIT_*) over the area (ax, ay, aw, ah) - the
+// screen, or a thumbnail of it at the same proportions - zoomed by `zoom`
+// around its middle, moved right by dx, drawn only inside the clip.
+static void wall_layout(const WallPic *p, int fit, float ax, float ay, float aw, float ah, float cx0, float cy0, float cx1, float cy1,
+                        float dx, float zoom, float alpha)
+{
+    const float k = aw / UI_WIDTH;   // the area's pixels per screen pixel (a picture's own size scales with it)
+    const float mx = ax + aw * 0.5f, my = ay + ah * 0.5f;
+    D3DCOLOR c = D3DCOLOR_ARGB((int)(255 * (alpha < 0 ? 0 : alpha > 1 ? 1 : alpha)), 255, 255, 255);
+    float w, h;
+    if (!p->tex || p->w <= 0 || p->h <= 0) return;
+    if (fit == UI_FIT_TILE)
+    {
+        float tw = p->w * k * zoom, th = p->h * k * zoom, x0, y0, x, y, minT = WALL_TILE_MIN * k;
+        if (tw < minT) { th *= minT / tw; tw = minT; }
+        if (th < minT) { tw *= minT / th; th = minT; }
+        // From a tile centred on the area's middle out to its edges.
+        x0 = mx - tw * 0.5f - ceilf((mx - tw * 0.5f - ax) / tw) * tw + dx;
+        y0 = my - th * 0.5f - ceilf((my - th * 0.5f - ay) / th) * th;
+        for (y = y0; y < ay + ah; y += th)
+            for (x = x0; x < ax + aw + dx; x += tw) wall_rect(p->tex, x, y, tw, th, cx0, cy0, cx1, cy1, c);
+        return;
+    }
+    if (fit == UI_FIT_STRETCH) { w = aw; h = ah; }
+    else if (fit == UI_FIT_CENTER) { w = p->w * k; h = p->h * k; }
+    else
+    {
+        float s = aw / p->w, t = ah / p->h;
+        s = fit == UI_FIT_FIT ? (s < t ? s : t) : (s > t ? s : t);
+        w = p->w * s;
+        h = p->h * s;
+    }
+    w *= zoom;
+    h *= zoom;
+    wall_rect(p->tex, mx - w * 0.5f + dx, my - h * 0.5f, w, h, cx0, cy0, cx1, cy1, c);
+}
+
+static float wall_ease(float t) { return t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t); }
+
+// The pictures (the one leaving, the one coming) over an area, the transition `k` (0..1) between them.
+static void wall_draw_area(float ax, float ay, float aw, float ah, int fit, float zoom)
+{
+    const float now = UiTime(), x1 = ax + aw, y1 = ay + ah;
+    float k = s_wallPrev.tex ? wall_ease((now - s_wallTransAt) / WALL_TRANS_S) : 1.0f;
+    if (k >= 1.0f)
+    {
+        wall_layout(&s_wallCur, fit, ax, ay, aw, ah, ax, ay, x1, y1, 0, zoom, 1.0f);
+        return;
+    }
+    switch (s_wallTransKind)
+    {
+    case UI_TRANS_SLIDE:   // the new one pushes the old one out to the left
+        wall_layout(&s_wallPrev, fit, ax, ay, aw, ah, ax, ay, x1, y1, -k * aw, 1.0f, 1.0f);
+        wall_layout(&s_wallCur, fit, ax, ay, aw, ah, ax, ay, x1, y1, (1 - k) * aw, zoom, 1.0f);
+        break;
+    case UI_TRANS_ZOOM:    // the new one comes forward from close up, fading in
+        wall_layout(&s_wallPrev, fit, ax, ay, aw, ah, ax, ay, x1, y1, 0, 1.0f + 0.1f * k, 1.0f);
+        wall_layout(&s_wallCur, fit, ax, ay, aw, ah, ax, ay, x1, y1, 0, (1.3f - 0.3f * k) * zoom, k);
+        break;
+    case UI_TRANS_WIPE:    // a bright edge sweeps across, the new one behind it
+    {
+        float ex = ax + k * aw;
+        wall_layout(&s_wallPrev, fit, ax, ay, aw, ah, ex, ay, x1, y1, 0, 1.0f, 1.0f);
+        wall_layout(&s_wallCur, fit, ax, ay, aw, ah, ax, ay, ex, y1, 0, zoom, 1.0f);
+        shape(ex - aw / 32, ay, aw / 16, ah, 0, aw / 42, 0, D3DCOLOR_ARGB((int)(120 * (1 - k)), 255, 255, 255),
+              D3DCOLOR_ARGB((int)(120 * (1 - k)), 255, 255, 255));
+        break;
+    }
+    case UI_TRANS_BLINDS:  // twelve slats, each opening from its top
+    {
+        const int slats = 12;
+        const float sh = ah / slats;
+        int i;
+        for (i = 0; i < slats; i++)
+        {
+            float kk = wall_ease(k * 1.6f - i * 0.05f), sy = ay + i * sh;   // one after the other, top first
+            wall_layout(&s_wallPrev, fit, ax, ay, aw, ah, ax, sy + sh * kk, x1, sy + sh, 0, 1.0f, 1.0f);
+            if (kk > 0.002f) wall_layout(&s_wallCur, fit, ax, ay, aw, ah, ax, sy, x1, sy + sh * kk, 0, zoom, 1.0f);
+        }
+        break;
+    }
+    default:               // a fade
+        wall_layout(&s_wallPrev, fit, ax, ay, aw, ah, ax, ay, x1, y1, 0, 1.0f, 1.0f - k);
+        wall_layout(&s_wallCur, fit, ax, ay, aw, ah, ax, ay, x1, y1, 0, zoom, k);
+        break;
+    }
+}
+
+// The menus' usual backdrop: the gradient and its two glows (under a
+// wallpaper that does not fill the screen too).
+static void backdrop_plain(void)
+{
+    shape(0, 0, UI_WIDTH, UI_HEIGHT, 0.0f, 1.0f, 0.0f, UI_COL_BG_TOP, UI_COL_BG_BOTTOM);
+    // Two soft glows: warm at the top right, cool at the bottom left.
+    shape(860, -420, 760, 760, 380, 420, 0.0f, D3DCOLOR_ARGB(46, 234, 76, 58), D3DCOLOR_ARGB(46, 234, 76, 58));
+    shape(-380, 420, 720, 720, 360, 420, 0.0f, D3DCOLOR_ARGB(26, 70, 90, 200), D3DCOLOR_ARGB(26, 70, 90, 200));
+}
+
+int UiWallpaperDraw(int kenBurns)
+{
+    float zoom = 1.0f;
+    wall_sync();
+    if (!s_wallCur.tex) return 0;
+    if (kenBurns)
+    {
+        // A slow push in over the picture's time (a minute when it never changes), then still.
+        float k = (UiTime() - s_wallShownAt) / ((s_wallSecs ? s_wallSecs : 60) + WALL_TRANS_S);
+        zoom = 1.0f + 0.08f * (k > 1.0f ? 1.0f : k);
+    }
+    if (s_wallFit != UI_FIT_FILL && s_wallFit != UI_FIT_STRETCH && !kenBurns) backdrop_plain();   // around a picture that leaves room
+    wall_draw_area(0, 0, UI_WIDTH, UI_HEIGHT, s_wallFit, zoom);
+    return 1;
+}
+
+int UiWallpaperPreview(float x, float y, float w, float h)
+{
+    wall_sync();
+    if (!s_wallCur.tex) return 0;
+    wall_draw_area(x, y, w, h, s_wallFit, 1.0f);
+    if (s_wallDim) UiRect(x, y, w, h, D3DCOLOR_ARGB(s_wallDim * 255 / 100, 0, 0, 0));
+    return 1;
+}
+
+int UiWallpaperThumb(float x, float y, float w, float h, int fit)
+{
+    wall_sync();
+    if (!s_wallCur.tex) return 0;
+    wall_layout(&s_wallCur, fit, x, y, w, h, x, y, x + w, y + h, 0, 1.0f, 1.0f);
+    return 1;
+}
+
+// ---- Panels (Settings > Interface > Borders): their edge's colour, opacity
+// and width, the body's opacity, how round their corners are ----
+static D3DCOLOR s_panelEdge = UI_COL_LINE;
+static float s_panelEdgeW = 1.0f, s_panelRound = 1.0f;
+static int s_panelAlpha = 179;   // UI_COL_PANEL's own 70%
+
+void UiSetPanelStyle(D3DCOLOR edge, float edgeWidth, int bodyPercent, float roundness)
+{
+    s_panelEdge = edge;
+    s_panelEdgeW = edgeWidth < 0 ? 0 : edgeWidth;
+    s_panelAlpha = (bodyPercent < 0 ? 0 : bodyPercent > 100 ? 100 : bodyPercent) * 255 / 100;
+    s_panelRound = roundness < 0 ? 0 : roundness;
+}
+
+float UiPanelRadius(float r) { return r * s_panelRound; }
+
 void UiBackdrop(void)
 {
     skin_sync();
+    if (UiWallpaperDraw(0))
+    {
+        // Darkened by the chosen amount, so the menus stay easy to read over it.
+        if (s_wallDim) UiRect(0, 0, UI_WIDTH, UI_HEIGHT, D3DCOLOR_ARGB(s_wallDim * 255 / 100, 0, 0, 0));
+        return;
+    }
     if (s_skinBg)
     {
         UiImage(s_skinBg, 0, 0, UI_WIDTH, UI_HEIGHT, 0.0f, D3DCOLOR_ARGB(255, 255, 255, 255));
         return;
     }
-    shape(0, 0, UI_WIDTH, UI_HEIGHT, 0.0f, 1.0f, 0.0f, UI_COL_BG_TOP, UI_COL_BG_BOTTOM);
-    // Two soft glows: warm at the top right, cool at the bottom left.
-    shape(860, -420, 760, 760, 380, 420, 0.0f, D3DCOLOR_ARGB(46, 234, 76, 58), D3DCOLOR_ARGB(46, 234, 76, 58));
-    shape(-380, 420, 720, 720, 360, 420, 0.0f, D3DCOLOR_ARGB(26, 70, 90, 200), D3DCOLOR_ARGB(26, 70, 90, 200));
+    backdrop_plain();
 }
 
 void UiDim(void) { UiRect(0, 0, UI_WIDTH, UI_HEIGHT, UI_COL_DIM); }
@@ -471,9 +958,10 @@ void UiImageMirror(IDirect3DTexture9 *tex, float x, float y, float w, float h, f
 
 void UiPanel(float x, float y, float w, float h, float r)
 {
-    UiShadow(x, y + 12, w, h, r, 48, D3DCOLOR_ARGB(150, 0, 0, 0));
-    UiRoundRect(x, y, w, h, r, UI_COL_PANEL_TOP, UI_COL_PANEL);
-    UiRoundRing(x, y, w, h, r, 1.0f, UI_COL_LINE);
+    r *= s_panelRound;
+    UiShadow(x, y + 12, w, h, r, 48, D3DCOLOR_ARGB(150 * s_panelAlpha / 179 > 150 ? 150 : 150 * s_panelAlpha / 179, 0, 0, 0));
+    UiRoundRect(x, y, w, h, r, (UI_COL_PANEL_TOP & 0x00FFFFFF) | ((u32)s_panelAlpha << 24), (UI_COL_PANEL & 0x00FFFFFF) | ((u32)s_panelAlpha << 24));
+    if (s_panelEdgeW > 0) UiRoundRing(x, y, w, h, r, s_panelEdgeW, s_panelEdge);
 }
 
 // ---- Text ----
@@ -523,6 +1011,33 @@ static const UiAtlasGlyph *glyph(int font, u32 c)
         else hi = mid - 1;
     }
     return &g['?' - 32];
+}
+
+static int has_glyph(int font, u32 c) { return c == '?' || glyph(font, c) != glyph(font, '?'); }
+
+static int utf8_put(u32 c, char *out)
+{
+    if (c < 0x80) { out[0] = (char)c; return 1; }
+    if (c < 0x800) { out[0] = (char)(0xC0 | (c >> 6)); out[1] = (char)(0x80 | (c & 0x3F)); return 2; }
+    out[0] = (char)(0xE0 | (c >> 12)); out[1] = (char)(0x80 | ((c >> 6) & 0x3F)); out[2] = (char)(0x80 | (c & 0x3F));
+    return 3;
+}
+
+void UiUpper(int font, const char *in, char *out, int size)
+{
+    const char *end = in + strlen(in);
+    int len = 0;
+    while (in < end && len < size - 4)
+    {
+        u32 c = utf8_next(&in, end), u = c;
+        if (c >= 'a' && c <= 'z') u = c - 32;
+        else if ((c >= 0xE0 && c <= 0xFE && c != 0xF7)) u = c - 32;   // Latin-1: à..þ
+        else if (c >= 0x430 && c <= 0x44F) u = c - 32;               // Cyrillic а..я
+        else if (c >= 0x450 && c <= 0x45F) u = c - 80;               // ѐ..џ (ё)
+        if (u != c && !has_glyph(font, u)) u = c;                    // no capital in the atlas: as it is
+        len += utf8_put(u, out + len);
+    }
+    out[len] = 0;
 }
 
 static float line_width(int font, float size, const char *s, int n)
@@ -1007,6 +1522,17 @@ WORD UiInputPoll(UiInput *in)
         in->repeatAt = now + (now - in->holdStart >= REPEAT_FAST_AFTER_MS ? REPEAT_FAST_MS : REPEAT_NEXT_MS);
     }
     if ((b & UI_SHOT_COMBO) == UI_SHOT_COMBO && (in->prev & UI_SHOT_COMBO) != UI_SHOT_COMBO) s_shotPending = 1;
+    // Settings > Sound > Interface sounds: one sound per press (and per repeat
+    // of a held direction), by button - every menu reads its input here, the
+    // game never does.
+    if (down & XINPUT_GAMEPAD_START) xb_audio_ui_sound(XB_SFX_OPEN);
+    else if (down & XINPUT_GAMEPAD_A) xb_audio_ui_sound(XB_SFX_SELECT);
+    else if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) xb_audio_ui_sound(XB_SFX_BACK);
+    else if (down & (XINPUT_GAMEPAD_X | XINPUT_GAMEPAD_Y)) xb_audio_ui_sound(XB_SFX_ACTION);
+    else if (down & (XINPUT_GAMEPAD_LEFT_SHOULDER | XINPUT_GAMEPAD_RIGHT_SHOULDER)) xb_audio_ui_sound(XB_SFX_PAGE);
+    else if (down & (XINPUT_GAMEPAD_DPAD_UP | XINPUT_GAMEPAD_DPAD_DOWN | XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT))
+        xb_audio_ui_sound(XB_SFX_MOVE);
+    xb_audio_music_tick();   // the menus' music moves on to its next track (every menu loop polls here)
     in->prev = b;
     in->held = b;
     return down;

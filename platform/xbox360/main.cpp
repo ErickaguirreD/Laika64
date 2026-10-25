@@ -947,6 +947,8 @@ static UiMenu s_menu;
 static int s_menuOpen;              // the in-game menu is drawn over the frozen frame
 static int s_aboutOpen;             // ... showing the About panel
 static int s_hiresPreviewOpen;      // ... showing the hi-res pack preview (HiresPreviewOpen already called)
+static int s_confirmOpen;           // ... asking before leaving the game: CONFIRM_LIST or CONFIRM_DASHBOARD (0: not asking)
+enum { CONFIRM_LIST = 1, CONFIRM_DASHBOARD, CONFIRM_RESET };
 
 // <save folder>\state<N>.thm: the picture of save state N - "H64T", width,
 // height (u32 each), then RGBA rows. Written with the state, at most THUMB_W x THUMB_H.
@@ -1003,6 +1005,9 @@ static void OverlayHook(void *, IDirect3DDevice9 *dev)
             StateThumbSync(dev);
             UiMenuThumb(&s_menu, s_stateThumb, empty);
         }
+        if (s_confirmOpen == CONFIRM_DASHBOARD) UiConfirmDraw(T_QUIT_TITLE, T_QUIT_ASK, T_FOOT_QUIT);
+        else if (s_confirmOpen == CONFIRM_LIST) UiConfirmDraw(-1, T_LIST_ASK, T_FOOT_QUIT);
+        else if (s_confirmOpen == CONFIRM_RESET) UiConfirmDraw(-1, T_RESET_ASK, T_FOOT_RESET_ASK);
     }
     if (osd) UiToast(s_osd, (float)(OSD_MS - left), (float)OSD_MS);
     UiEnd();
@@ -1101,6 +1106,10 @@ static void BuildGameMenu(void)
     UiMenuAdd(&s_menu, Tr(T_RESET_GAME), "");
     UiMenuAdd(&s_menu, Tr(T_BACK_TO_LIST), "");
     UiMenuAdd(&s_menu, Tr(T_QUIT_DASHBOARD), "");
+    {
+        static const unsigned char icons[] = { UI_ICON_PLAY, UI_ICON_STATES, UI_ICON_GEAR, UI_ICON_RESET, UI_ICON_LIST, UI_ICON_POWER };
+        UiMenuIcons(&s_menu, icons, sizeof(icons));
+    }
 }
 
 // The States page's slot value: "< 3 >", the reserved slot tagged "< 9 · auto >".
@@ -1119,6 +1128,10 @@ static void BuildStatesMenu(void)
     UiMenuAdd(&s_menu, Tr(T_STATE_SLOT), slot);
     UiMenuAdd(&s_menu, Tr(T_LOAD_STATE), "");
     UiMenuAdd(&s_menu, Tr(T_SAVE_STATE), "");
+    {
+        static const unsigned char icons[] = { UI_ICON_SLOT, UI_ICON_LOAD, UI_ICON_SAVE };
+        UiMenuIcons(&s_menu, icons, sizeof(icons));
+    }
 }
 
 static void ResetGame(H64System *sys)
@@ -1147,11 +1160,22 @@ static int GameMenu(H64System *sys, H64Renderer *renderer, Config *c)
     BuildGameMenu();
     UiInputInit(&in);
     s_menuOpen = 1;
+    xb_audio_ui_sound(XB_SFX_OPEN);   // the pause menu opens (Settings > Sound > Interface sounds)
     while (result < 0)
     {
         WORD down = UiInputPoll(&in);
         s_reservedSlot = c->padLoss == PADLOSS_SAVE ? c->autoSaveSlot : 0;   // Settings > System may change it from here
-        if (s_hiresPreviewOpen)
+        if (!settings && !s_aboutOpen && !s_hiresPreviewOpen && !s_confirmOpen && (down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT)))
+            UiMenuPress();   // the pause menu's and the States page's rows show the press (Settings does it itself)
+        if (s_confirmOpen)
+        {
+            // "Back to the ROM list?" / "Quit to the dashboard?" / "Reset the game?": A does it, B or BACK
+            // stays in the menu.
+            if ((down & XINPUT_GAMEPAD_A) && s_confirmOpen == CONFIRM_RESET) { s_confirmOpen = 0; ResetGame(sys); result = RG_CONTINUE; }
+            else if (down & XINPUT_GAMEPAD_A) result = s_confirmOpen == CONFIRM_DASHBOARD ? RG_DASHBOARD : RG_BROWSER;
+            else if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) s_confirmOpen = 0;
+        }
+        else if (s_hiresPreviewOpen)
         {
             if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_X)) s_hiresPreviewOpen = 0;
         }
@@ -1234,9 +1258,9 @@ static int GameMenu(H64System *sys, H64Renderer *renderer, Config *c)
                 case M_RESUME: result = RG_CONTINUE; break;
                 case M_STATES: states = 1; BuildStatesMenu(); break;
                 case M_SETTINGS: settings = 1; SettingsBuild(&s_menu, c, s_profilePath[0] != 0); break;
-                case M_RESET: ResetGame(sys); result = RG_CONTINUE; break;
-                case M_ROMS: result = RG_BROWSER; break;
-                case M_DASHBOARD: result = RG_DASHBOARD; break;
+                case M_RESET: s_confirmOpen = CONFIRM_RESET; break;      // asked first (above)
+                case M_ROMS: s_confirmOpen = CONFIRM_LIST; break;        // asked first (above)
+                case M_DASHBOARD: s_confirmOpen = CONFIRM_DASHBOARD; break;
                 }
             }
         }
@@ -1248,6 +1272,7 @@ static int GameMenu(H64System *sys, H64Renderer *renderer, Config *c)
     s_menuOpen = 0;
     s_aboutOpen = 0;
     s_hiresPreviewOpen = 0;
+    s_confirmOpen = 0;
     return result;
 }
 
@@ -1279,6 +1304,7 @@ static int GameMenuSafe(H64System *sys, H64Renderer *renderer, Config *c)
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
         s_menuOpen = 0;
+        s_confirmOpen = 0;
         H64_ERROR("[crash] exception %08X in the in-game menu", GetExceptionCode());
         r = RG_BROWSER;
     }
@@ -1372,6 +1398,8 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
     sys->profClock = ProfClock;
     s_script = c->input.count ? &c->input : NULL;
     xb_audio_set_target_ms(c->audioMs);
+    xb_audio_ui_enable(c->uiSounds);   // the pause menu's button sounds (also for a game started without the ROM list)
+    xb_audio_ui_style(c->uiSoundStyle);
     H64_INFO("[main] audio queue target %d ms", xb_audio_target_ms());
     if (xb_audio_init() == 0)
     {
@@ -1919,6 +1947,8 @@ int __cdecl main()
     UiSetSkinWant(cfg.skinName);   // set early: UiBrand/UiBackdrop lazily load it on first use (even the language screen)
     xb_audio_set_game_volume(cfg.volumeGame);     // remembered even before the engine exists - applied to each voice as it's created
     xb_audio_set_music_volume(cfg.volumeMusic);
+    xb_audio_set_sfx_volume(cfg.volumeSfx);
+    xb_audio_set_mono(cfg.audioMono);
     // logcpu=N: the hardware thread that writes the log (5 by default, shared
     // with the display list parser; checks of the 2 s stalls).
     if (s_logThread && cfg.logCpu >= 0 && cfg.logCpu <= 5 && cfg.logCpu != 5) XSetThreadProcessor(s_logThread, (DWORD)cfg.logCpu);
@@ -2003,7 +2033,7 @@ int __cdecl main()
             strcpy(s_settingsPath, menuFile);
             ChooseLanguage(dev, &cfg, s_settingsPath, !checks);
             SettingsSetLangFile(s_settingsPath);
-            xb_audio_init();   // the engine must be up before the browser's skin music; a game's own call then does nothing
+            xb_audio_init();   // the engine must be up before the browser's music (game:\music\); a game's own call then does nothing
             for (;;)
             {
                 base = cfg;

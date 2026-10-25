@@ -60,11 +60,39 @@ void ConfigDefaults(Config *c)
     c->padLoss = PADLOSS_OFF;
     c->autoSaveSlot = 9;
     c->batteryWarn = 0;
+    c->uiSounds = 1;
+    c->startRomMode = 0;
+    c->startRom[0] = 0;
     c->shotBtn1 = c->shotBtn2 = -1;
     c->browserDesign = 0;
+    c->bgEffect = 1;   // the waves
+    c->fxColor[0] = c->fxColor[1] = c->fxColor[2] = 0;   // the effect's own colours
+    c->fxOpacity = 100;
+    c->fxSpeed = 100;
+    c->selColor = 0;
+    c->wallCustom = 0;
+    c->wallFile[0] = 0;
+    c->uiSoundStyle = 0;
+    c->wallInterval = 30;
+    c->wallTransition = 0;
+    c->wallDim = 40;
+    c->wallFit = 0;
+    c->wallShuffle = 0;
+    c->borderColor = 0;
+    c->borderOpacity = 100;
+    c->borderWidth = 1;
+    c->borderGlow = 0;
+    c->panelOpacity = 70;
+    c->panelRound = 2;
+    c->saverMode = 0;
+    c->saverTime = 5;
     c->skinName[0] = 0;
     c->volumeGame = 100;
     c->volumeMusic = 100;
+    c->volumeSfx = 100;
+    c->audioMono = 0;
+    c->musicMode = 0;
+    c->musicTrack[0] = 0;
     c->langAuto = 0;
     c->fpuFlags = 1;
     c->jitFpu = 1;
@@ -135,9 +163,43 @@ int ConfigParseFile(Config *c, const char *path)
         else if (!strcmp(line, "browsersel")) { strncpy(c->browserSel, eq + 1, sizeof(c->browserSel) - 1); c->browserSel[sizeof(c->browserSel) - 1] = 0; }
         else if (!strcmp(line, "artall")) c->artAll = atoi(eq + 1);
         else if (!strcmp(line, "browserdesign")) c->browserDesign = atoi(eq + 1);
+        else if (!strcmp(line, "bgeffect")) c->bgEffect = atoi(eq + 1);
+        else if (!strncmp(line, "fxcolor", 7) && line[7] >= '1' && line[7] <= '3' && !line[8]) c->fxColor[line[7] - '1'] = atoi(eq + 1);
+        else if (!strcmp(line, "fxopacity")) c->fxOpacity = atoi(eq + 1);
+        else if (!strcmp(line, "fxspeed")) c->fxSpeed = atoi(eq + 1);
+        else if (!strcmp(line, "selcolor")) c->selColor = atoi(eq + 1);
+        else if (!strcmp(line, "wallcustom")) c->wallCustom = atoi(eq + 1);
+        else if (!strcmp(line, "wallfile")) { strncpy(c->wallFile, eq + 1, sizeof(c->wallFile) - 1); c->wallFile[sizeof(c->wallFile) - 1] = 0; }
+        else if (!strcmp(line, "wallfolder")) c->wallCustom = eq[1] != 0;   // written by 2.0.6 test builds: a folder chosen = on
+        else if (!strcmp(line, "uisoundstyle")) c->uiSoundStyle = atoi(eq + 1);
+        else if (!strcmp(line, "wallinterval")) c->wallInterval = atoi(eq + 1);
+        else if (!strcmp(line, "walltransition")) c->wallTransition = atoi(eq + 1);
+        else if (!strcmp(line, "walldim")) c->wallDim = atoi(eq + 1);
+        else if (!strcmp(line, "wallfit")) c->wallFit = atoi(eq + 1);
+        else if (!strcmp(line, "wallshuffle")) c->wallShuffle = atoi(eq + 1);
+        else if (!strcmp(line, "bordercolor")) c->borderColor = atoi(eq + 1);
+        else if (!strcmp(line, "borderopacity")) c->borderOpacity = atoi(eq + 1);
+        else if (!strcmp(line, "borderwidth")) c->borderWidth = atoi(eq + 1);
+        else if (!strcmp(line, "borderglow")) c->borderGlow = atoi(eq + 1);
+        else if (!strcmp(line, "panelopacity")) c->panelOpacity = atoi(eq + 1);
+        else if (!strcmp(line, "panelround")) c->panelRound = atoi(eq + 1);
+        else if (!strcmp(line, "savermode")) c->saverMode = atoi(eq + 1);
+        else if (!strcmp(line, "savertime")) c->saverTime = atoi(eq + 1);
         else if (!strcmp(line, "skin")) { strncpy(c->skinName, eq + 1, sizeof(c->skinName) - 1); c->skinName[sizeof(c->skinName) - 1] = 0; }
         else if (!strcmp(line, "volumegame")) c->volumeGame = atoi(eq + 1);
         else if (!strcmp(line, "volumemusic")) c->volumeMusic = atoi(eq + 1);
+        else if (!strcmp(line, "volumesfx")) c->volumeSfx = atoi(eq + 1);
+        else if (!strcmp(line, "audiomono")) c->audioMono = atoi(eq + 1) ? 1 : 0;
+        else if (!strcmp(line, "musicmode"))
+        {
+            int v = atoi(eq + 1);
+            c->musicMode = v >= 0 && v <= 3 ? v : 0;
+        }
+        else if (!strcmp(line, "musictrack"))
+        {
+            strncpy(c->musicTrack, eq + 1, sizeof(c->musicTrack) - 1);
+            c->musicTrack[sizeof(c->musicTrack) - 1] = 0;
+        }
         else if (!strcmp(line, "gameflags")) c->gameFlags = (int)strtoul(eq + 1, NULL, 16);   // strtoul: bit 31 is a flag
         else if (!strcmp(line, "logcpu")) c->logCpu = atoi(eq + 1);
         else if (!strcmp(line, "menuat")) c->menuAt = (u32)atoi(eq + 1);
@@ -167,6 +229,17 @@ int ConfigParseFile(Config *c, const char *path)
         {
             int v = atoi(eq + 1);
             if (v >= 1 && v <= 9) c->autoSaveSlot = v;
+        }
+        else if (!strcmp(line, "uisounds")) c->uiSounds = atoi(eq + 1) ? 1 : 0;
+        else if (!strcmp(line, "startrommode"))
+        {
+            int v = atoi(eq + 1);
+            c->startRomMode = v >= 0 && v <= 2 ? v : 0;
+        }
+        else if (!strcmp(line, "startrom"))
+        {
+            strncpy(c->startRom, eq + 1, sizeof(c->startRom) - 1);
+            c->startRom[sizeof(c->startRom) - 1] = 0;
         }
         else if (!strcmp(line, "batterywarn"))
         {
@@ -246,10 +319,25 @@ int ConfigWriteMenuKeys(const Config *c, const char *path, int withLastRom)
     fprintf(f, "shotbtn1=%s\nshotbtn2=%s\n", c->shotBtn1 >= 0 ? h64_padmap_source_name(c->shotBtn1) : "none",
             c->shotBtn2 >= 0 ? h64_padmap_source_name(c->shotBtn2) : "none");
     fprintf(f, "zoom=%d\nposx=%d\nposy=%d\nrumble=%d\n", c->zoom, c->offsetX, c->offsetY, c->rumble);
-    fprintf(f, "padloss=%d\nautosaveslot=%d\nbatterywarn=%d\n", c->padLoss, c->autoSaveSlot, c->batteryWarn);
-    if (withLastRom) fprintf(f, "artdownload=%d\nbrowserdesign=%d\n", c->artDownload, c->browserDesign);
+    fprintf(f, "padloss=%d\nautosaveslot=%d\nbatterywarn=%d\nuisounds=%d\n", c->padLoss, c->autoSaveSlot, c->batteryWarn, c->uiSounds);
+    if (withLastRom) fprintf(f, "artdownload=%d\nbrowserdesign=%d\nbgeffect=%d\n", c->artDownload, c->browserDesign, c->bgEffect);
+    if (withLastRom)
+        fprintf(f, "fxcolor1=%d\nfxcolor2=%d\nfxcolor3=%d\nfxopacity=%d\nfxspeed=%d\n", c->fxColor[0], c->fxColor[1], c->fxColor[2],
+                c->fxOpacity, c->fxSpeed);
+    if (withLastRom)
+        fprintf(f, "selcolor=%d\nwallinterval=%d\nwalltransition=%d\nwalldim=%d\nsavermode=%d\nsavertime=%d\n", c->selColor, c->wallInterval,
+                c->wallTransition, c->wallDim, c->saverMode, c->saverTime);
+    if (withLastRom) fprintf(f, "wallcustom=%d\nuisoundstyle=%d\n", c->wallCustom, c->uiSoundStyle);
+    if (withLastRom && c->wallFile[0]) fprintf(f, "wallfile=%s\n", c->wallFile);
+    if (withLastRom)
+        fprintf(f, "wallfit=%d\nwallshuffle=%d\nbordercolor=%d\nborderopacity=%d\nborderwidth=%d\nborderglow=%d\npanelopacity=%d\npanelround=%d\n",
+                c->wallFit, c->wallShuffle, c->borderColor, c->borderOpacity, c->borderWidth, c->borderGlow, c->panelOpacity, c->panelRound);
     if (withLastRom && c->skinName[0]) fprintf(f, "skin=%s\n", c->skinName);
-    if (withLastRom) fprintf(f, "volumegame=%d\nvolumemusic=%d\n", c->volumeGame, c->volumeMusic);
+    if (withLastRom) fprintf(f, "volumegame=%d\nvolumemusic=%d\nvolumesfx=%d\nmusicmode=%d\n", c->volumeGame, c->volumeMusic, c->volumeSfx, c->musicMode);
+    if (withLastRom && c->musicTrack[0]) fprintf(f, "musictrack=%s\n", c->musicTrack);
+    if (withLastRom) fprintf(f, "startrommode=%d\n", c->startRomMode);
+    if (withLastRom && c->startRom[0]) fprintf(f, "startrom=%s\n", c->startRom);
+    fprintf(f, "audiomono=%d\n", c->audioMono);
     // Controls: "map=default" first (a game's profile then undoes custom
     // controls of settings.ini), then every key of a changed mapping.
     for (i = 0; i < 4; i++)

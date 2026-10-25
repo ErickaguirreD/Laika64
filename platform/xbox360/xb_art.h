@@ -68,6 +68,10 @@ void ArtForgetAll(void);
 // (a summary only when something new came).
 void ArtBulkStart(const char *const *paths, int count, int retry);
 void ArtGetStatus(ArtStatus *s);
+// What is known about a ROM (its <key>.txt), read now on the calling thread
+// (the ROM's header, then the file: nothing downloaded). 1 when the game was
+// identified (the browser's categories), 0 otherwise. After ArtStart.
+int ArtReadInfo(const char *romPath, H64GameInfo *info);
 // A message for the user once ("No network connection", the bulk summary).
 int ArtTakeNote(char *text, int size);
 

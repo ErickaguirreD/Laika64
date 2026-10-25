@@ -58,9 +58,34 @@ struct Config
     char browserSel[128]; // browsersel=FILE: the ROM browser starts on that file name (console checks), over lastrom=
     int artAll;         // artall=1: the ROM browser starts "Get box art for all games" by itself (checks)
     int browserDesign;  // browserdesign=0..3: the ROM browser's layout, the list+card of old (0), a covers grid (1), big covers (2), a carousel (3)
+    int bgEffect;       // bgeffect=0..29: the ROM browser's animated background, none (0), the waves (1, default) ... (xb_menu.cpp BGFX_*)
+    int fxColor[3];     // fxcolor1..3=0..13: the effect's colours, from xb_menu.cpp's palette; fxcolor1=0: the effect's own, 2 and 3 = 0: unused
+    int fxOpacity;      // fxopacity=10..200: how strongly the effect shows, in % (default 100)
+    int fxSpeed;        // fxspeed=25..300: how fast it moves, in % (default 100)
+    int selColor;       // selcolor=0..8: the menus' selection colour (xb_menu.cpp s_selColors; 0: light blue)
+    int wallCustom;     // wallcustom=1: the pictures of game:\wallpapers\ (and its folders) behind the menus, in turn
+    char wallFile[128]; // wallfile=NAME: the wallpaper shown (under game:\wallpapers\, "folder\pic.jpg" too), the others after it
+    int wallInterval;   // wallinterval=SECONDS: how long each wallpaper shows (default 30; 0: it never changes)
+    int wallTransition; // walltransition=0..5: fade, slide, zoom, wipe, blinds, random (xb_ui.h UI_TRANS_*)
+    int wallDim;        // walldim=0..80: how much the wallpaper is darkened, in % (default 40)
+    int wallFit;        // wallfit=0..4: fill, fit, stretch, centre, tile (xb_ui.h UI_FIT_*)
+    int wallShuffle;    // wallshuffle=1: the wallpapers at random, not in name order
+    int borderColor;    // bordercolor=0..13: the menus' edges - the selection's colour (0), or xb_menu.cpp's swatches
+    int borderOpacity;  // borderopacity=0..100: how strong the edges are, in % (default 100)
+    int borderWidth;    // borderwidth=0..4: the panels' own edge in pixels (0: none; default 1)
+    int borderGlow;     // borderglow=0|1|2: the glow around the menus - pulsing, steady, none
+    int panelOpacity;   // panelopacity=20..100: how solid the panels are, in % (default 70)
+    int panelRound;     // panelround=0..3: the panels' corners - square, soft, round (default), rounder
+    int uiSoundStyle;   // uisoundstyle=0..3: the interface sounds' style - glass, soft, retro, digital (xb_audio.h XB_SFX_STYLE_*)
+    int saverMode;      // savermode=0..4: the screen saver - none, the background effect, the wallpapers, the logo, a clock
+    int saverTime;      // savertime=MINUTES: idle time in the ROM list before it starts (default 5)
     char skinName[64];  // skin=NAME: folder under game:\skins\<NAME>\ for the logo/background/music override (empty: none)
     int volumeGame;     // volumegame=0..100: the game's audio (default 100)
-    int volumeMusic;    // volumemusic=0..100: the menu's skin music (default 100)
+    int volumeMusic;    // volumemusic=0..100: the menus' music, game:\music\ (default 100)
+    int volumeSfx;      // volumesfx=0..100: the menus' button sounds (default 100)
+    int audioMono;      // audiomono=0|1: the game's and the music's sound mixed into both speakers (default 0: stereo)
+    int musicMode;      // musicmode=0|1|2|3: game:\music\ in name order, at random, musictrack over and over, or none
+    char musicTrack[96];    // musictrack=FILE: the track of musicmode=2 (a file name in game:\music\)
     int asyncGfx;       // asyncgfx=0: graphics tasks and presents on the CPU thread
     int parseWorker;    // parseworker=0: display lists parsed on the graphics worker too (no second worker)
     int asyncAudio;     // asyncaudio=0: audio HLE tasks on the CPU thread
@@ -93,6 +118,10 @@ struct Config
     int autoSaveSlot;   // autosaveslot=1..9: that save's slot (9 by default), kept for it while padloss=1
     int batteryWarn;    // batterywarn=0|10|25|50: a message when a wireless controller's battery is at or under
                         // that percent (0: off, the default)
+    int uiSounds;       // uisounds=0|1: the menus' button sounds (default 1)
+    int startRomMode;   // startrommode=0|1|2: when the emulator starts, the ROM list (0), the last game played (1)
+                        // or startrom (2) - BACK held at start skips it
+    char startRom[256]; // startrom=PATH: the game of startrommode=2
     H64PadMap padMap[4];    // controls of N64 ports 1-4 (map_a=xa,... ; p2_map_a=... for port 2; core/pif/h64_padmap.h)
     int shotBtn1, shotBtn2; // shotbtn1=, shotbtn2=: H64_SRC_* source held together to take a screenshot (-1: not set)
 };
