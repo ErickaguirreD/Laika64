@@ -227,6 +227,7 @@ static void volume_draw(const UiMenu *m);
 static void fxpage_draw(const UiMenu *m);
 static void wallpage_draw(const UiMenu *m);
 static void borderpage_draw(const UiMenu *m);
+static void perfpage_draw(const UiMenu *m);
 
 static int s_browser;   // opened from the ROM list: the box art rows are shown (also: UiMenuDraw skips the dim behind it in-game, over the frozen frame)
 
@@ -508,6 +509,7 @@ void UiMenuDraw(const UiMenu *m)
     if (m->page == UI_PAGE_FX) { fxpage_draw(m); lastTitle[0] = 0; return; }
     if (m->page == UI_PAGE_WALL) { wallpage_draw(m); lastTitle[0] = 0; return; }
     if (m->page == UI_PAGE_BORDER) { borderpage_draw(m); lastTitle[0] = 0; return; }
+    if (m->page == UI_PAGE_PERF) { perfpage_draw(m); lastTitle[0] = 0; return; }
     // A short entrance: the bar slides in from the left as the menu opens (it
     // was not drawn a moment ago: the pause menu, Settings from the ROM list),
     // and its rows slide in when the page changes.
@@ -625,7 +627,6 @@ static float s_fxClock = 50.0f, s_fxLast = -1.0f;   // the effects' own time (ru
 static void browser_effect(void);
 static void settings_fx(UiMenu *m, const Config *c);   // Interface > Background effect's own page (below, after Volumen)
 static void settings_wall(UiMenu *m, const Config *c);   // Interface > Wallpapers and > Borders (below, after Volumen)
-static void wall_choice_text(const Config *c, char *out, size_t size, float maxW);
 static void settings_saver(UiMenu *m, const Config *c);
 static void settings_borders(UiMenu *m, const Config *c);
 static void saver_values(UiMenu *m, const Config *c);
@@ -660,7 +661,8 @@ static void ui_from_config(const Config *c)
 // The System page: what a controller unplugged in game does, the slot it saves to, the low battery
 // warning, then CPU and RSP (both apply at the next game start, so the ROM list only shows them -
 // last, so the rows before keep their place in game). B goes back, no row for it.
-enum { SYS_PADLOSS = 0, SYS_AUTOSLOT, SYS_BATTERY, SYS_CPU, SYS_RSP, SYS_STARTROM };   // SYS_STARTROM: ROM list only too
+enum { SYS_PADLOSS = 0, SYS_AUTOSLOT, SYS_BATTERY, SYS_PERF, SYS_CPU, SYS_RSP, SYS_STARTROM };   // SYS_CPU..SYS_STARTROM: ROM list only
+static void settings_perf(UiMenu *m, const Config *c);   // System > On-screen performance (below, with the other graphical pages)
 static std::string s_browserSel;   // the ROM selected in the list when Settings opened (Game at start: that game)
 static std::string clean_name(const char *name, size_t len);   // the list's name of a file (below)
 
@@ -688,12 +690,10 @@ static void start_rom_text(const Config *c, char *out, size_t size)
 enum { SND_VOLUME = 0, SND_AUDIO, SND_MONO, SND_UISOUNDS, SND_SFXSTYLE, SND_MUSIC };
 static const int s_sfxStyleLabels[XB_SFX_STYLE_COUNT] = { T_STYLE_GLASS, T_STYLE_SOFT, T_STYLE_RETRO, T_STYLE_DIGITAL };
 #define MUSIC_DIR "game:\\music"   // the menus' music: every .mp3/.wav in it
-enum { G_PRESET = 0, G_FILTER, G_HIRES, G_SMOOTH, G_SHARPEN, G_BLUR, G_FPS };   // the Graphics page; B goes back, no row for it
+enum { G_PRESET = 0, G_FILTER, G_HIRES, G_SMOOTH, G_SHARPEN, G_BLUR };   // the Graphics page; B goes back, no row for it
 enum { SCR_RES = 0, SCR_STRETCH, SCR_CAL, SCR_BRIGHT, SCR_VSYNC, SCR_DEFLICKER, SCR_SCREEN };   // the Screen page (SCR_CAL opens the calibration page below); B goes back, no row for it
 enum { CAL_SIZE = 0, CAL_LR, CAL_UD };   // the Image calibration page, opened from Screen > SCR_CAL; B goes back, no row for it
 
-// Shown FPS levels (off, FPS, +CPU/RAM, +resolution, +GPU load) - the Graphics page's inline cycle.
-static const int s_fpsLabels[5] = { T_OFF, T_FPS_ONLY, T_FPS_CPU, T_FPS_ALL, T_FPS_GPU };
 
 // Graphics presets (the user's table): texture filter, smoothing, sharpening,
 // blur, screen effect. The resolution stays as it is.
@@ -726,9 +726,11 @@ static int s_soundPage;
 static int s_systemPage;
 static int s_perGame;
 static char s_langPath[160];   // where a language change is kept (SettingsSetLangFile)
-// The save rows follow Interface, which only the ROM list shows (in game the
-// menus' look cannot be seen, so there is nothing to set).
-#define S_SAVE_ALL (s_browser ? S_INTERFACE + 1 : S_INTERFACE)
+// The save rows: in game only, after Controls - "this game only" (when the
+// game has a profile), then "all games". From the ROM list there are none:
+// what is changed there is kept on leaving (settings_loop). Their places,
+// set by settings_main (-1: not shown).
+static int s_rowSaveGame = -1, s_rowSaveAll = -1;
 
 static const char *onoff(int v) { return Tr(v ? T_ON : T_OFF); }
 
@@ -761,16 +763,12 @@ static void settings_values(UiMenu *m, const Config *c)
             if (sn > 1) sprintf(m->value[I_SKINS], "< %s (%d/%d) >", SkinName(si), si + 1, sn);
             else sprintf(m->value[I_SKINS], "< %s >", SkinName(si));
         }
-        sprintf(m->value[I_EFFECT], "< %s >", Tr(s_fxLabels[c->bgEffect >= 0 && c->bgEffect < BGFX_COUNT ? c->bgEffect : 0]));
+        // Background effect and Wallpapers show nothing here: both are chosen on their own pages (A), where the
+        // choice shows. Other rows that open a page show their value plainly, without the "< >" of one changed in place.
         sprintf(m->value[I_SELCOLOR], "< %s >", Tr(s_selLabels[c->selColor >= 0 && c->selColor < SEL_COLORS ? c->selColor : 0]));
-        {
-            char wall[64];
-            wall_choice_text(c, wall, sizeof(wall), 200);
-            strcpy(m->value[I_WALLPAPERS], wall);
-        }
-        sprintf(m->value[I_SAVER], "< %s >", Tr(c->saverMode == SAVER_EFFECT ? T_BG_EFFECT : c->saverMode == SAVER_WALL ? T_WALLPAPERS :
+        sprintf(m->value[I_SAVER], "%s", Tr(c->saverMode == SAVER_EFFECT ? T_BG_EFFECT : c->saverMode == SAVER_WALL ? T_WALLPAPERS :
                                                 c->saverMode == SAVER_LOGO ? T_SAVER_LOGO : c->saverMode == SAVER_CLOCK ? T_SAVER_CLOCK : T_OFF));
-        sprintf(m->value[I_LANGUAGE], "< %s >", Tr(T_LANG_NAME));
+        sprintf(m->value[I_LANGUAGE], "%s", Tr(T_LANG_NAME));   // A: the list with the flags
         if (s_browser) sprintf(m->value[I_ART], "< %s >", onoff(c->artDownload));
         return;
     }
@@ -867,7 +865,6 @@ static void settings_values(UiMenu *m, const Config *c)
         sprintf(m->value[G_SMOOTH], "< %s >", onoff(c->smooth));
         sprintf(m->value[G_SHARPEN], "< %s >", lvl[c->sharpen < 0 || c->sharpen > 2 ? 0 : c->sharpen]);
         sprintf(m->value[G_BLUR], "< %s >", blr[c->blur < 0 || c->blur > 2 ? 0 : c->blur]);
-        sprintf(m->value[G_FPS], "< %s >", Tr(s_fpsLabels[c->showFps < 0 || c->showFps > 4 ? 0 : c->showFps]));
         return;
     }
     {
@@ -895,9 +892,14 @@ static void settings_main(UiMenu *m, const Config *c)
     UiMenuAdd(m, Tr(T_SOUND), "");
     UiMenuAdd(m, Tr(T_CONTROLS), "");
     UiMenuIcons(m, icons, sizeof(icons));
-    if (s_browser) m->icon[UiMenuAdd(m, Tr(T_INTERFACE), "")] = UI_ICON_INTERFACE;   // not in game (S_SAVE_ALL)
-    m->icon[UiMenuAdd(m, Tr(T_SAVE_ALL), "")] = UI_ICON_SAVE;
-    if (s_perGame) m->icon[UiMenuAdd(m, Tr(T_SAVE_GAME), "")] = UI_ICON_SAVE;
+    s_rowSaveGame = s_rowSaveAll = -1;
+    if (s_browser) m->icon[UiMenuAdd(m, Tr(T_INTERFACE), "")] = UI_ICON_INTERFACE;   // not in game: its look cannot be seen there
+    else
+    {
+        // In game: save for this game, or for all of them (main.cpp asks first).
+        if (s_perGame) m->icon[s_rowSaveGame = UiMenuAdd(m, Tr(T_SAVE_GAME), "")] = UI_ICON_SAVE;
+        m->icon[s_rowSaveAll = UiMenuAdd(m, Tr(T_SAVE_ALL), "")] = UI_ICON_SAVE;
+    }
     settings_values(m, c);   // no Back row: B goes back
 }
 
@@ -1004,13 +1006,6 @@ static int interface_input(UiMenu *m, Config *c, WORD down)
         settings_fx(m, c);   // its colours, opacity and speed (the page below)
         return SET_NONE;
     }
-    if (m->sel == I_EFFECT && dir)
-    {
-        c->bgEffect = ((c->bgEffect >= 0 && c->bgEffect < BGFX_COUNT ? c->bgEffect : 0) + dir + BGFX_COUNT) % BGFX_COUNT;
-        ui_from_config(c);   // shows at once behind the settings
-        settings_values(m, c);
-        return SET_CHANGED;
-    }
     if (m->sel == I_LANGUAGE && (dir || (down & XINPUT_GAMEPAD_A)))
     {
         // From the ROM list, A opens the list with the flags; left/right (and A in game) step through the languages.
@@ -1098,6 +1093,7 @@ static void settings_system(UiMenu *m, const Config *c)
     UiMenuAdd(m, Tr(T_PAD_LOSS), "");
     UiMenuAdd(m, Tr(T_AUTOSAVE_SLOT), "");
     UiMenuAdd(m, Tr(T_BATTERY_WARN), "");
+    UiMenuAdd(m, Tr(T_PERF_OVERLAY), "");   // opens its page: no value shown
     if (s_browser)
     {
         // For the next game only: nothing to change in the one running.
@@ -1106,7 +1102,7 @@ static void settings_system(UiMenu *m, const Config *c)
         UiMenuAdd(m, Tr(T_START_ROM), "");
     }
     {
-        static const unsigned char icons[] = { UI_ICON_CONTROLS, UI_ICON_SAVE, UI_ICON_BATTERY, UI_ICON_SYSTEM, UI_ICON_SYSTEM, UI_ICON_PLAY };
+        static const unsigned char icons[] = { UI_ICON_CONTROLS, UI_ICON_SAVE, UI_ICON_BATTERY, UI_ICON_CHART, UI_ICON_SYSTEM, UI_ICON_SYSTEM, UI_ICON_PLAY };
         UiMenuIcons(m, icons, sizeof(icons));
     }
     settings_values(m, c);
@@ -1157,6 +1153,11 @@ static int system_input(UiMenu *m, Config *c, WORD down)
         }
         settings_values(m, c);
         return SET_CHANGED;
+    }
+    if (m->sel == SYS_PERF && (down & XINPUT_GAMEPAD_A))
+    {
+        settings_perf(m, c);
+        return SET_NONE;
     }
     if (m->sel == SYS_BATTERY && (dir || (down & XINPUT_GAMEPAD_A)))
     {
@@ -1403,7 +1404,7 @@ static void fxpage_draw(const UiMenu *m)
 // on the right a live preview of the backdrop and a thumbnail of each layout.
 #define WALL_DIR "game:\\wallpapers"
 enum { WP_PICTURE = 0, WP_FIT, WP_INTERVAL, WP_TRANSITION, WP_ORDER, WP_DIM, WP_RESET, WP_COUNT };
-static const int s_wallSecsList[] = { 0, 10, 20, 30, 60, 120, 300, 600 };   // 0: never changes
+static const int s_wallSecsList[] = { 0, 5, 10, 20, 30, 60, 120, 300, 600 };   // 0: never changes
 
 // The background chosen: 0 none, else 1 + its place among the pictures.
 static int wall_choice(const Config *c)
@@ -1741,6 +1742,177 @@ static void borderpage_draw(const UiMenu *m)
     UiFooter(x + 40, y + h - foot * 0.5f, m->footer);
 }
 
+// ---- On-screen performance page (System > On-screen performance, A): what
+// the box shows (each item ticked on or off), and how - where, its text's
+// size and colour, its body's opacity, degrees C or F. One wide panel: the
+// items on the left, on the right a preview of the box on a screen and the
+// rest under it. In game every change shows on the real box too.
+enum { PP_ITEMS = 8, PP_POS = PP_ITEMS, PP_SIZE, PP_UNIT, PP_BOX, PP_COLOR, PP_RESET, PP_COUNT };
+static const int s_perfItemLabels[PP_ITEMS] = { T_PERF_FPS, T_PERF_CPU, T_PERF_RAM, T_PERF_RES, T_PERF_GPU, T_PERF_TCPU, T_PERF_TGPU, T_PERF_TRAM };
+static const int s_perfPosLabels[UI_PERF_POS_COUNT] = { T_POS_TL, T_POS_TC, T_POS_TR, T_POS_BL, T_POS_BR };
+static const int s_perfSizeLabels[4] = { T_SIZE_S, T_SIZE_M, T_SIZE_L, T_SIZE_XL };
+static const float s_perfSizes[4] = { 14, 17, 21, 26 };
+static const Config *s_perfCfg;
+
+void PerfStyleApply(const Config *c)
+{
+    int k = c->perfColor > 0 && c->perfColor <= FX_PALETTE_COUNT ? c->perfColor : 0;
+    D3DCOLOR col = k ? D3DCOLOR_ARGB(255, s_fxPalette[k][0], s_fxPalette[k][1], s_fxPalette[k][2]) : UI_COL_TEXT;
+    UiSetPerfStyle(c->perfPos, s_perfSizes[c->perfSize >= 0 && c->perfSize < 4 ? c->perfSize : 1], col, c->perfBox);
+}
+
+static void settings_perf(UiMenu *m, const Config *c)
+{
+    s_systemPage = 0;
+    UiMenuClear(m, Tr(T_PERF_OVERLAY), Tr(T_FOOT_SELECT));
+    m->page = UI_PAGE_PERF;
+    m->count = PP_COUNT;
+    m->sel = 0;
+    s_perfCfg = c;
+}
+
+static int perf_input(UiMenu *m, Config *c, WORD down)
+{
+    int dir = (down & XINPUT_GAMEPAD_DPAD_RIGHT) ? 1 : (down & XINPUT_GAMEPAD_DPAD_LEFT) ? -1 : 0, a = (down & XINPUT_GAMEPAD_A) != 0;
+    UiMenuNavigate(m, down);
+    if (down & XINPUT_GAMEPAD_B)
+    {
+        settings_system(m, c);
+        m->sel = SYS_PERF;
+        return SET_NONE;
+    }
+    if (!dir && !a) return SET_NONE;
+    if (m->sel < PP_ITEMS) c->perfItems ^= 1 << m->sel;   // ticked on or off
+    else switch (m->sel)
+    {
+    case PP_POS: c->perfPos = ((c->perfPos >= 0 && c->perfPos < UI_PERF_POS_COUNT ? c->perfPos : 2) + (dir ? dir : 1) + UI_PERF_POS_COUNT) % UI_PERF_POS_COUNT; break;
+    case PP_SIZE: c->perfSize = ((c->perfSize >= 0 && c->perfSize < 4 ? c->perfSize : 1) + (dir ? dir : 1) + 4) % 4; break;
+    case PP_UNIT: c->perfFahrenheit = !c->perfFahrenheit; break;
+    case PP_BOX:
+        if (!dir) return SET_NONE;
+        c->perfBox += dir * 10;
+        if (c->perfBox < 0) c->perfBox = 0;
+        if (c->perfBox > 100) c->perfBox = 100;
+        break;
+    case PP_COLOR:
+        c->perfColor = ((c->perfColor >= 0 && c->perfColor <= FX_PALETTE_COUNT ? c->perfColor : 0) + (dir ? dir : 1) + FX_PALETTE_COUNT + 1) % (FX_PALETTE_COUNT + 1);
+        break;
+    case PP_RESET:
+        if (!a) return SET_NONE;   // what is shown stays: only how
+        c->perfPos = UI_PERF_TOP_RIGHT;
+        c->perfSize = 1;
+        c->perfColor = 0;
+        c->perfBox = 75;
+        c->perfFahrenheit = 0;
+        break;
+    }
+    c->showFps = c->perfItems ? 1 : 0;
+    PerfStyleApply(c);
+    return SET_CHANGED;
+}
+
+// The box's text with sample figures (the real temperatures when they can be read).
+static void perf_sample(const Config *c, char *out, size_t size)
+{
+    float t[3] = { 52, 58, 49 };
+    int k, n = 0;
+    out[0] = 0;
+    UiTemperatures(!c->xenia, &t[0], &t[1], &t[2]);
+    for (k = 0; k < PP_ITEMS; k++)
+    {
+        char line[48];
+        if (!(c->perfItems & (1 << k))) continue;
+        switch (k)
+        {
+        case 0: strcpy(line, "60.0 FPS"); break;
+        case 1: strcpy(line, "CPU 42%"); break;
+        case 2: strcpy(line, "RAM 236 / 512 MB"); break;
+        case 3: strcpy(line, "1280x720 (N64 320x240)"); break;
+        case 4: strcpy(line, "GPU 35%"); break;
+        default:
+        {
+            float v = t[k - 5];
+            sprintf(line, "%s %d\xC2\xB0%c", k == 5 ? "CPU" : k == 6 ? "GPU" : "RAM", (int)(c->perfFahrenheit ? v * 9 / 5 + 32 + 0.5f : v + 0.5f),
+                    c->perfFahrenheit ? 'F' : 'C');
+            break;
+        }
+        }
+        if (n++) strncat(out, "\n", size - strlen(out) - 1);
+        strncat(out, line, size - strlen(out) - 1);
+    }
+}
+
+static void perfpage_draw(const UiMenu *m)
+{
+    static UiAnim fill;
+    const float w = 1232, h = 680, x = 24, y = 20, foot = 78, lw = 600;
+    const float px = x + lw + 10, pw = w - lw - 54, ph = pw * UI_HEIGHT / UI_WIDTH, py = y + 96, rx = px - 44, rw = pw + 88;
+    const Config *c = s_perfCfg;
+    float ry = y + 92;
+    char buf[300];
+    int i, v;
+    if (!c) return;
+    edge_glow(x, y, w, h, 22);
+    UiPanel(x, y, w, h, 22);
+    UiText(UI_BOLD, 30, x + 40, y + 48, UI_COL_TEXT, m->title, UI_LEFT);
+    // ---- What it shows, ticked: on the left.
+    for (i = 0; i < PP_ITEMS; i++)
+    {
+        int on = (c->perfItems >> i) & 1, sel = m->sel == i;
+        const float bx = x + lw - 80, by = ry + 8;
+        if (sel) selection_bar(x + 28, ry, lw - 56, 34);
+        UiText(UI_BOLD, 20, x + 44, ry + 17, sel ? UI_COL_TEXT : UI_COL_TEXT2, Tr(s_perfItemLabels[i]), UI_LEFT);
+        // The tick box.
+        UiRoundRect(bx, by, 18, 18, 5, on ? SEL_HI(255) : D3DCOLOR_ARGB(255, 34, 36, 47), on ? SEL_LO(255) : D3DCOLOR_ARGB(255, 27, 29, 38));
+        UiRoundRing(bx, by, 18, 18, 5, 1.5f, on ? SEL_HI(255) : UI_COL_TEXT3);
+        if (on)
+        {
+            UiLine(bx + 4, by + 9.5f, bx + 7.5f, by + 13, 2.2f, D3DCOLOR_ARGB(255, 15, 16, 22));
+            UiLine(bx + 7.5f, by + 13, bx + 14, by + 5.5f, 2.2f, D3DCOLOR_ARGB(255, 15, 16, 22));
+        }
+        ry += 38;
+    }
+    ry += 6;
+    _snprintf(buf, sizeof(buf) - 1, "< %s >", Tr(s_perfPosLabels[c->perfPos >= 0 && c->perfPos < UI_PERF_POS_COUNT ? c->perfPos : 2]));
+    buf[sizeof(buf) - 1] = 0;
+    page_row(x, lw, ry, 40, Tr(T_PERF_POS), buf, m->sel == PP_POS);
+    ry += 44;
+    _snprintf(buf, sizeof(buf) - 1, "< %s >", Tr(s_perfSizeLabels[c->perfSize >= 0 && c->perfSize < 4 ? c->perfSize : 1]));
+    buf[sizeof(buf) - 1] = 0;
+    page_row(x, lw, ry, 40, Tr(T_PERF_SIZE), buf, m->sel == PP_SIZE);
+    ry += 44;
+    _snprintf(buf, sizeof(buf) - 1, "< %s >", c->perfFahrenheit ? "\xC2\xB0" "F" : "\xC2\xB0" "C");
+    buf[sizeof(buf) - 1] = 0;
+    page_row(x, lw, ry, 40, Tr(T_PERF_UNIT), buf, m->sel == PP_UNIT);
+    // ---- The preview, then the box's opacity, its text colour and the reset: on the right.
+    UiRect(x + lw - 8, y + 90, 1, h - foot - 110, UI_COL_LINE);
+    UiText(UI_BOLD, 20, px, py - 22, UI_COL_TEXT2, Tr(T_SAVER_PREVIEW), UI_LEFT);
+    UiRoundRect(px, py, pw, ph, 8, D3DCOLOR_ARGB(255, 46, 70, 110), D3DCOLOR_ARGB(255, 22, 30, 48));   // a "game" behind it
+    UiShadow(px + pw * 0.3f, py + ph * 0.45f, pw * 0.4f, ph * 0.35f, 20, 40, D3DCOLOR_ARGB(70, 120, 200, 120));
+    perf_sample(c, buf, sizeof(buf));
+    if (buf[0]) UiPerfPreview(buf, px, py, pw, ph);
+    else UiText(UI_REGULAR, 19, px + pw * 0.5f, py + ph * 0.5f, UI_COL_TEXT2, Tr(T_OFF), UI_CENTER);
+    UiRoundRing(px, py, pw, ph, 8, 1.0f, UI_COL_LINE);
+    ry = py + ph + 14;
+    volume_bar_draw(px, ry, pw, Tr(T_PERF_BOX), c->perfBox, 100, m->sel == PP_BOX, &fill);
+    ry += 76;
+    v = c->perfColor >= 0 && c->perfColor <= FX_PALETTE_COUNT ? c->perfColor : 0;
+    if (m->sel == PP_COLOR) selection_bar(rx + 28, ry - 4, rw - 56, 66);
+    UiText(UI_BOLD, 20, px, ry + 14, m->sel == PP_COLOR ? UI_COL_TEXT : UI_COL_TEXT2, Tr(T_PERF_COLOR), UI_LEFT);
+    if (!v) UiText(UI_REGULAR, 19, px + pw, ry + 14, UI_COL_TEXT3, Tr(T_COL_WHITE), UI_RIGHT);
+    fx_swatches(px, ry + 44, v, m->sel == PP_COLOR);
+    UiCircle(px + 12, ry + 44, 12, UI_COL_TEXT);   // swatch 0 here: the usual white, not "none"
+    {
+        // Reset: on the left, under the rows.
+        float bw = UiTextWidth(UI_BOLD, 20, Tr(T_FX_RESET)) + 60, bx = x + (lw - bw) * 0.5f, by = y + h - foot - 60;
+        if (m->sel == PP_RESET) selection_bar(bx, by, bw, 40);
+        else UiRoundRing(bx, by, bw, 40, 12, 1.0f, UI_COL_LINE);
+        UiText(UI_BOLD, 20, x + lw * 0.5f, by + 20, m->sel == PP_RESET ? UI_COL_TEXT : UI_COL_TEXT2, Tr(T_FX_RESET), UI_CENTER);
+    }
+    UiRect(x + 24, y + h - foot, w - 48, 1, UI_COL_LINE);
+    UiFooter(x + 40, y + h - foot * 0.5f, m->footer);
+}
+
 // ---- Sound page: Volumen (opens the bars page above) and Margen de audio
 // (an inline "< N ms >" cycle, moved here from the main page).
 static void settings_sound(UiMenu *m, const Config *c)
@@ -1845,9 +2017,8 @@ static void settings_graphics(UiMenu *m, const Config *c)
     UiMenuAdd(m, Tr(T_FXAA), "");
     UiMenuAdd(m, Tr(T_SHARPEN), "");
     UiMenuAdd(m, Tr(T_BLUR), "");
-    UiMenuAdd(m, Tr(T_SHOW_FPS), "");
     {
-        static const unsigned char icons[] = { UI_ICON_SLIDERS, UI_ICON_TEXTURE, UI_ICON_HD, UI_ICON_SMOOTH, UI_ICON_SHARP, UI_ICON_BLUR, UI_ICON_CHART };
+        static const unsigned char icons[] = { UI_ICON_SLIDERS, UI_ICON_TEXTURE, UI_ICON_HD, UI_ICON_SMOOTH, UI_ICON_SHARP, UI_ICON_BLUR };
         UiMenuIcons(m, icons, sizeof(icons));
     }
     settings_values(m, c);
@@ -3327,7 +3498,6 @@ static int graphics_input(UiMenu *m, Config *c, WORD down)
         case G_SMOOTH: c->smooth = !c->smooth; break;
         case G_SHARPEN: c->sharpen = (c->sharpen + dir + 3) % 3; if (c->sharpen) c->blur = 0; break;
         case G_BLUR: c->blur = (c->blur + dir + 3) % 3; if (c->blur) c->sharpen = 0; break;
-        case G_FPS: c->showFps = ((c->showFps < 0 || c->showFps > 4 ? 0 : c->showFps) + dir + 5) % 5; break;   // off, FPS, + CPU/RAM, + resolution, + GPU
         }
         settings_values(m, c);
         return SET_CHANGED;
@@ -3342,7 +3512,6 @@ int SettingsInput(UiMenu *m, Config *c, int perGame, WORD down)
     int r = settings_input(m, c, perGame, down);
     if (r == SET_CHANGED && (down & (XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT)))
         xb_audio_ui_sound_instead((down & XINPUT_GAMEPAD_DPAD_LEFT) ? XB_SFX_VALUE_DOWN : XB_SFX_VALUE_UP);
-    else if (r == SET_SAVE_ALL || r == SET_SAVE_GAME) xb_audio_ui_sound_instead(XB_SFX_SAVE);
     return r;
 }
 
@@ -3363,6 +3532,7 @@ static int settings_input(UiMenu *m, Config *c, int perGame, WORD down)
     if (m->page == UI_PAGE_FX) return fx_input(m, c, down);
     if (m->page == UI_PAGE_WALL) return wall_input(m, c, down);
     if (m->page == UI_PAGE_BORDER) return border_input(m, c, down);
+    if (m->page == UI_PAGE_PERF) return perf_input(m, c, down);
     if (s_soundPage) return sound_input(m, c, down);
     if (s_systemPage) return system_input(m, c, down);
     UiMenuNavigate(m, down);
@@ -3400,8 +3570,8 @@ static int settings_input(UiMenu *m, Config *c, int perGame, WORD down)
     settings_values(m, c);
     if (down & XINPUT_GAMEPAD_A)
     {
-        if (m->sel == S_SAVE_ALL) return SET_SAVE_ALL;
-        if (perGame && m->sel == S_SAVE_ALL + 1) return SET_SAVE_GAME;
+        if (m->sel == s_rowSaveAll) return SET_SAVE_ALL;
+        if (m->sel == s_rowSaveGame) return SET_SAVE_GAME;
     }
     return SET_NONE;
 }

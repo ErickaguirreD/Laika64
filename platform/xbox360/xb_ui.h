@@ -179,10 +179,18 @@ void UiScreenFooter(const char *hints);
 // ---- Notifications ----
 // A toast at the bottom centre; `age` and `life` in ms (it slides in and fades out).
 void UiToast(const char *text, float age, float life);
-// The frames-per-second badge in the top-right corner.
+// The frames-per-second badge, where UiSetPerfStyle puts it (top right at first).
 void UiFpsBadge(const char *text);
-// The same corner with several lines ("\n"-separated): FPS, CPU, RAM, resolution.
+// The same place with several lines ("\n"-separated): FPS, CPU, RAM, resolution, temperatures.
 void UiPerfPanel(const char *text);
+// Where the performance box goes, its text's size (pixels) and colour, its body's opacity in percent.
+enum { UI_PERF_TOP_LEFT = 0, UI_PERF_TOP_CENTER, UI_PERF_TOP_RIGHT, UI_PERF_BOTTOM_LEFT, UI_PERF_BOTTOM_RIGHT, UI_PERF_POS_COUNT };
+void UiSetPerfStyle(int pos, float textSize, D3DCOLOR color, int boxPercent);
+// The box as it would be on screen, scaled into (x, y, w, h) (the settings' preview).
+void UiPerfPreview(const char *text, float x, float y, float w, float h);
+// The CPU, GPU and memory (EDRAM) temperatures in degrees C, read at most once
+// a second; 0 when not `allowed` (Xenia) or they cannot be read.
+int UiTemperatures(int allowed, float *cpu, float *gpu, float *mem);
 
 // Controller 1 for menus: buttons pressed since the last call, with
 // auto-repeat for the D-pad and the left stick (as D-pad directions).

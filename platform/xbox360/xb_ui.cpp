@@ -1448,27 +1448,82 @@ void UiToast(const char *text, float age, float life)
     UiText(UI_REGULAR, 21, x + 46, y + h * 0.5f, with_alpha(UI_COL_TEXT, a), text, UI_LEFT);
 }
 
-void UiFpsBadge(const char *text)
+// ---- The performance box (Settings > System > On-screen performance) ----
+// Where it goes (UI_PERF_*), its text's size and colour, its body's opacity.
+static int s_perfPos = UI_PERF_TOP_RIGHT, s_perfAlpha = 190;
+static float s_perfSize = 17;
+static D3DCOLOR s_perfColor = UI_COL_TEXT;
+
+void UiSetPerfStyle(int pos, float textSize, D3DCOLOR color, int boxPercent)
 {
-    float w = UiTextWidth(UI_BOLD, 17, text) + 26, h = 32, x = UI_WIDTH - UI_SAFE_X - w, y = UI_SAFE_Y;
-    UiRoundRect(x, y, w, h, h * 0.5f, D3DCOLOR_ARGB(190, 24, 26, 34), D3DCOLOR_ARGB(190, 16, 17, 23));
-    UiRoundRing(x, y, w, h, h * 0.5f, 1.0f, UI_COL_LINE);
-    UiText(UI_BOLD, 17, x + w * 0.5f, y + h * 0.5f, UI_COL_TEXT, text, UI_CENTER);
+    s_perfPos = pos >= 0 && pos < UI_PERF_POS_COUNT ? pos : UI_PERF_TOP_RIGHT;
+    s_perfSize = textSize < 10 ? 10 : textSize;
+    s_perfColor = color;
+    s_perfAlpha = (boxPercent < 0 ? 0 : boxPercent > 100 ? 100 : boxPercent) * 255 / 100;
 }
 
-void UiPerfPanel(const char *text)
+// The box over the area (ax, ay, aw, ah) - the screen, or a preview of it at
+// `k` of its size: one line as a pill, several as a panel, in its corner.
+static void perf_box(const char *text, float ax, float ay, float aw, float ah, float k)
 {
+    const float size = s_perfSize * k, mx = UI_SAFE_X * k, my = UI_SAFE_Y * k;
     int lines = 1;
     const char *p;
-    float w, h, x, y;
+    float w, h, x, y, r;
     for (p = text; *p; p++) lines += *p == '\n';
-    w = UiTextWidth(UI_BOLD, 17, text) + 30;
-    h = 14 + lines * 17 * 1.35f;
-    x = UI_WIDTH - UI_SAFE_X - w;
-    y = UI_SAFE_Y;
-    UiRoundRect(x, y, w, h, 14, D3DCOLOR_ARGB(190, 24, 26, 34), D3DCOLOR_ARGB(190, 16, 17, 23));
-    UiRoundRing(x, y, w, h, 14, 1.0f, UI_COL_LINE);
-    UiText(UI_BOLD, 17, x + 15, y + 7 + 17 * 1.35f * 0.5f, UI_COL_TEXT, text, UI_LEFT);
+    w = UiTextWidth(UI_BOLD, size, text) + (lines > 1 ? 30 : 26) * k * s_perfSize / 17;
+    h = lines > 1 ? 14 * k + lines * size * 1.35f : size * 1.9f;
+    r = lines > 1 ? 14 * k : h * 0.5f;
+    switch (s_perfPos)
+    {
+    case UI_PERF_TOP_LEFT: case UI_PERF_BOTTOM_LEFT: x = ax + mx; break;
+    case UI_PERF_TOP_CENTER: x = ax + (aw - w) * 0.5f; break;
+    default: x = ax + aw - mx - w; break;
+    }
+    y = s_perfPos == UI_PERF_BOTTOM_LEFT || s_perfPos == UI_PERF_BOTTOM_RIGHT ? ay + ah - my - h : ay + my;
+    if (s_perfAlpha)
+    {
+        UiRoundRect(x, y, w, h, r, (D3DCOLOR_ARGB(255, 24, 26, 34) & 0x00FFFFFF) | ((u32)s_perfAlpha << 24),
+                    (D3DCOLOR_ARGB(255, 16, 17, 23) & 0x00FFFFFF) | ((u32)s_perfAlpha << 24));
+        UiRoundRing(x, y, w, h, r, 1.0f, D3DCOLOR_ARGB(26 * s_perfAlpha / 190 > 255 ? 255 : 26 * s_perfAlpha / 190, 255, 255, 255));
+    }
+    if (lines > 1) UiTextShadowed(UI_BOLD, size, x + 15 * k * s_perfSize / 17, y + 7 * k + size * 1.35f * 0.5f, s_perfColor, text, UI_LEFT);
+    else UiTextShadowed(UI_BOLD, size, x + w * 0.5f, y + h * 0.5f, s_perfColor, text, UI_CENTER);
+}
+
+void UiFpsBadge(const char *text) { perf_box(text, 0, 0, UI_WIDTH, UI_HEIGHT, 1.0f); }
+
+void UiPerfPanel(const char *text) { perf_box(text, 0, 0, UI_WIDTH, UI_HEIGHT, 1.0f); }
+
+void UiPerfPreview(const char *text, float x, float y, float w, float h) { perf_box(text, x, y, w, h, w / UI_WIDTH); }
+
+// The console's temperatures from its system controller (SMC command 0x07:
+// CPU, GPU, EDRAM - the memory - and the board, each in 1/256 degree C),
+// asked at most once a second. 0 when they cannot be read (Xenia).
+extern "C" VOID HalSendSMCMessage(LPVOID pCommandBuffer, LPVOID pRecvBuffer);
+int UiTemperatures(int allowed, float *cpu, float *gpu, float *mem)
+{
+    static DWORD at;
+    static float t[3];
+    static int ok;
+    DWORD now = GetTickCount();
+    if (!allowed) return 0;
+    if (!at || now - at >= 1000)
+    {
+        unsigned char in[16], out[16];
+        int i;
+        memset(in, 0, sizeof(in));
+        memset(out, 0, sizeof(out));
+        in[0] = 0x07;
+        HalSendSMCMessage(in, out);
+        for (i = 0; i < 3; i++) t[i] = (out[1 + i * 2] | (out[2 + i * 2] << 8)) / 256.0f;
+        ok = t[0] > 1.0f && t[0] < 150.0f;   // nothing sensible came back: none
+        at = now;
+    }
+    if (cpu) *cpu = t[0];
+    if (gpu) *gpu = t[1];
+    if (mem) *mem = t[2];
+    return ok;
 }
 
 // ---- Menu input ----

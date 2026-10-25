@@ -49,6 +49,13 @@ struct Config
     int offsetX, offsetY;   // posx=, posy=: picture position in output pixels (default 0)
     int stretch;        // stretch=0|1: the picture stretched to 16:9 (any resolution; HD then stretches instead of widening)
     int showFps;        // showfps=1: frames shown per second in a corner; 2: also CPU and RAM; 3: and the resolution; 4: and the GPU (graphics worker) load
+                        // (read from older files into perfItems; written as 1 when anything is shown)
+    int perfItems;      // perfitems=BITS: what the performance box shows (CONFIG_PERF_*; 0: no box)
+    int perfPos;        // perfpos=0..4: where - top left, top centre, top right (default), bottom left, bottom right
+    int perfSize;       // perfsize=0..3: its text - small, normal (default), big, bigger
+    int perfColor;      // perfcolor=0..13: its text's colour - white (0), or xb_menu.cpp's swatches
+    int perfBox;        // perfbox=0..100: its body's opacity in % (default 75)
+    int perfFahrenheit; // perffahrenheit=1: temperatures in degrees F, not C
     int logCpu;         // logcpu=N: hardware thread of the log writer (5)
     int gameFlags;      // gameflags=HEX: the game's profile flags instead of the table's (checks; -1: the table)
     int updateCheck;    // updatecheck=0: do not ask GitHub for a newer release (xb_update.cpp); 2: as if running 0.0.0 (testing)
@@ -131,6 +138,10 @@ enum { PADLOSS_OFF = 0, PADLOSS_SAVE, PADLOSS_PAUSE, PADLOSS_COUNT };   // Confi
 void ConfigDefaults(Config *c);
 // Applies the key=value lines of a file over *c. Returns 0 when the file is missing.
 int ConfigParseFile(Config *c, const char *path);
+// What the performance box can show (Config::perfItems), in its order.
+enum { CONFIG_PERF_FPS = 1, CONFIG_PERF_CPU = 2, CONFIG_PERF_RAM = 4, CONFIG_PERF_RES = 8, CONFIG_PERF_GPU = 16,
+       CONFIG_PERF_TCPU = 32, CONFIG_PERF_TGPU = 64, CONFIG_PERF_TRAM = 128, CONFIG_PERF_ALL = 255 };
+
 // Writes the keys the menu edits (cpu, hle, audioms, showfps, the graphics
 // keys, the controls, and lastrom and lang when `withLastRom`). Returns 0 on failure.
 int ConfigWriteMenuKeys(const Config *c, const char *path, int withLastRom);

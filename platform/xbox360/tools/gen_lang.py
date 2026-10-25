@@ -259,6 +259,7 @@ def main():
             "system": [("CPU_NEXT", [t["RECOMPILER"], t["INTERPRETER"]], 1), ("RSP_NEXT", ["HLE"], 1),
                        ("PAD_LOSS", [t["OFF"], t["PAD_LOSS_SAVE"], t["PAD_LOSS_PAUSE"]], 1), ("AUTOSAVE_SLOT", ["9"], 1),
                        ("BATTERY_WARN", [t["OFF"], "50%"], 1),
+                       ("PERF_OVERLAY", [], 1),
                        # a game's name is cut to 230 pixels (start_rom_text)
                        ("START_ROM", [t["OFF"], t["START_LAST"], "W" * 10], 1)],
             "sound": [("VOLUME", [], 1), ("AUDIO_MARGIN", ["500 ms"], 1), ("UI_SOUNDS", onoff, 1),
@@ -268,8 +269,7 @@ def main():
                       ("AUDIO_OUTPUT", [t["AUDIO_STEREO"], t["AUDIO_MONO"]], 1)],
             "graphics": [("PRESET", [t["PRESET_ORIGINAL"], t["PRESET_ENHANCED"], t["PRESET_SMOOTH"], t["PRESET_CRT"], t["CUSTOM"]], 1),
                          ("TEXFILTER", [t["FILTER_3POINT"], t["FILTER_BILINEAR"], t["FILTER_NEAREST"]], 1), ("FXAA", onoff, 1),
-                         ("SHARPEN", [t["OFF"], t["LOW"], t["HIGH"]], 1), ("BLUR", [t["OFF"], t["SOFT"], t["STRONG"]], 1),
-                         ("SHOW_FPS", [t["OFF"], t["FPS_ONLY"], t["FPS_CPU"], t["FPS_ALL"], t["FPS_GPU"]], 1)],
+                         ("SHARPEN", [t["OFF"], t["LOW"], t["HIGH"]], 1), ("BLUR", [t["OFF"], t["SOFT"], t["STRONG"]], 1)],
             "screen": [("RESOLUTION", [t["RES_NATIVE"], "HD 1280x720 (16:9)"], 1), ("STRETCH", onoff, 1), ("PIC_CAL", [], 1),
                        ("BRIGHTNESS", [t["NORMAL"], t["LIGHTER"], t["MUCH_LIGHTER"]], 1), ("VSYNC", onoff, 1), ("ANTIFLICKER", onoff, 1),
                        ("SCREEN_EFFECT", [t["SCREEN_NONE"], t["SCANLINES"], t["CRT"], t["CRT_CURVED"], t["LCD_GRID"], t["LIGHT_SCANLINES"]], 1)],
@@ -322,6 +322,16 @@ def main():
         # the wallpapers' preview: its hints wrapped in 3 lines of the 578-pixel box less 60
         for key in ("WALL_HINT", "WALL_OFF_HINT"):
             check(code, key + " in 3 lines", width(t[key], 19, False), 3 * (578 - 60) * 0.9)
+        # On-screen performance page (perfpage_draw): the items with their tick box
+        # 80 from the left column's right end, the rows' values; the right column 578 wide.
+        for key in ("PERF_FPS", "PERF_CPU", "PERF_RAM", "PERF_RES", "PERF_GPU", "PERF_TCPU", "PERF_TGPU", "PERF_TRAM"):
+            check(code, "performance item " + key, width(t[key], 20, True), 600 - 44 - 90)
+        for key, values in (("PERF_POS", [t[k] for k in ("POS_TL", "POS_TC", "POS_TR", "POS_BL", "POS_BR")]),
+                            ("PERF_SIZE", [t[k] for k in ("SIZE_S", "SIZE_M", "SIZE_L", "SIZE_XL")]), ("PERF_UNIT", ["\u00b0F"])):
+            check(code, "performance row " + key, width(t[key], 20, True) + max(chev(v) for v in values) + 24, 600 - 88)
+        check(code, "performance bar PERF_BOX", width(t["PERF_BOX"], 20, True) + width("100%", 20, True) + 24, 578)
+        check(code, "performance row PERF_COLOR", width(t["PERF_COLOR"], 20, True) + width(t["COL_WHITE"], 19, False) + 24, 578)
+        check(code, "title PERF_OVERLAY in capitals", width(t["PERF_OVERLAY"].upper(), 30, True), 1232 - 80)
         check(code, "panel row BORDER_COLOR", width(t["BORDER_COLOR"], 20, True) + width(t["COL_SELECTION"], 19, False) + 24, 600 - 88)
         for key in ("WALL_DIM", "BORDER_OPACITY", "PANEL_OPACITY"):
             check(code, "panel bar " + key, width(t[key], 20, True) + width("100%", 20, True) + 24, 600 - 88)

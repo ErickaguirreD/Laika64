@@ -19,7 +19,7 @@ struct UiMenu
     int page;                      // UI_PAGE_*: how UiMenuDraw shows it
     unsigned char icon[UI_MENU_MAX];   // UI_ICON_*: a small white symbol left of the label (0: none)
 };
-enum { UI_PAGE_LIST = 0, UI_PAGE_CONTROLS, UI_PAGE_VOLUME, UI_PAGE_CALIB, UI_PAGE_FX, UI_PAGE_WALL, UI_PAGE_BORDER };
+enum { UI_PAGE_LIST = 0, UI_PAGE_CONTROLS, UI_PAGE_VOLUME, UI_PAGE_CALIB, UI_PAGE_FX, UI_PAGE_WALL, UI_PAGE_BORDER, UI_PAGE_PERF };
 enum { UI_ICON_NONE = 0, UI_ICON_SYSTEM, UI_ICON_GRAPHICS, UI_ICON_SCREEN, UI_ICON_SOUND, UI_ICON_CONTROLS,
        UI_ICON_INTERFACE, UI_ICON_SAVE, UI_ICON_PLAY, UI_ICON_STATES, UI_ICON_GEAR, UI_ICON_RESET, UI_ICON_LIST,
        UI_ICON_POWER, UI_ICON_SLOT, UI_ICON_LOAD, UI_ICON_BATTERY, UI_ICON_SLIDERS, UI_ICON_TEXTURE, UI_ICON_HD,
@@ -53,6 +53,8 @@ void SettingsBuild(UiMenu *m, const Config *c, int perGame);
 // SettingsSetLangFile); from the ROM list, A on it returns SET_LANGUAGE (the
 // list with the flags).
 int SettingsInput(UiMenu *m, Config *c, int perGame, WORD down);
+// The performance box's place, text size and colour, opacity, from *c (UiSetPerfStyle).
+void PerfStyleApply(const Config *c);
 // The menu settings file where a language change is kept (lang=); "" for none.
 void SettingsSetLangFile(const char *path);
 

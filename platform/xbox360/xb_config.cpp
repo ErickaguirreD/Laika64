@@ -32,6 +32,12 @@ void ConfigDefaults(Config *c)
     c->rom[0] = 0;
     c->lastRom[0] = 0;
     c->showFps = 0;
+    c->perfItems = 0;
+    c->perfPos = 2;
+    c->perfSize = 1;
+    c->perfColor = 0;
+    c->perfBox = 75;
+    c->perfFahrenheit = 0;
     c->updateCheck = 0;   // off by default while the GitHub repo's name/URL is still in flux (LAIKA 64 rebrand)
     c->artDownload = 1;
     c->browserDemo = 0;
@@ -156,7 +162,21 @@ int ConfigParseFile(Config *c, const char *path)
         else if (!strcmp(line, "cpu")) { strncpy(c->cpu, eq + 1, sizeof(c->cpu) - 1); c->cpu[sizeof(c->cpu) - 1] = 0; }
         else if (!strcmp(line, "rom")) { strncpy(c->rom, eq + 1, sizeof(c->rom) - 1); c->rom[sizeof(c->rom) - 1] = 0; }
         else if (!strcmp(line, "lastrom")) { strncpy(c->lastRom, eq + 1, sizeof(c->lastRom) - 1); c->lastRom[sizeof(c->lastRom) - 1] = 0; }
-        else if (!strcmp(line, "showfps")) c->showFps = atoi(eq + 1);
+        else if (!strcmp(line, "showfps"))
+        {
+            // The old levels as items (a perfitems= further on wins).
+            static const int levels[5] = { 0, CONFIG_PERF_FPS, CONFIG_PERF_FPS | CONFIG_PERF_CPU | CONFIG_PERF_RAM,
+                                           CONFIG_PERF_FPS | CONFIG_PERF_CPU | CONFIG_PERF_RAM | CONFIG_PERF_RES,
+                                           CONFIG_PERF_FPS | CONFIG_PERF_CPU | CONFIG_PERF_RAM | CONFIG_PERF_RES | CONFIG_PERF_GPU };
+            c->showFps = atoi(eq + 1);
+            c->perfItems = levels[c->showFps >= 0 && c->showFps <= 4 ? c->showFps : 0];
+        }
+        else if (!strcmp(line, "perfitems")) c->perfItems = atoi(eq + 1) & CONFIG_PERF_ALL;
+        else if (!strcmp(line, "perfpos")) c->perfPos = atoi(eq + 1);
+        else if (!strcmp(line, "perfsize")) c->perfSize = atoi(eq + 1);
+        else if (!strcmp(line, "perfcolor")) c->perfColor = atoi(eq + 1);
+        else if (!strcmp(line, "perfbox")) c->perfBox = atoi(eq + 1);
+        else if (!strcmp(line, "perffahrenheit")) c->perfFahrenheit = atoi(eq + 1);
         else if (!strcmp(line, "updatecheck")) c->updateCheck = atoi(eq + 1);
         else if (!strcmp(line, "artdownload")) c->artDownload = atoi(eq + 1);
         else if (!strcmp(line, "browserdemo")) c->browserDemo = atoi(eq + 1);
@@ -311,7 +331,9 @@ int ConfigWriteMenuKeys(const Config *c, const char *path, int withLastRom)
     int i;
     if (!f) return 0;
     fprintf(f, "# Written by the Harissa64 V2 menu\nsettingsver=2\ncpu=%s\nhle=%d\naudioms=%d\nsmooth=%d\nshowfps=%d\n", c->cpu, c->hle, c->audioMs,
-            c->smooth, c->showFps);
+            c->smooth, c->perfItems ? 1 : 0);
+    fprintf(f, "perfitems=%d\nperfpos=%d\nperfsize=%d\nperfcolor=%d\nperfbox=%d\nperffahrenheit=%d\n", c->perfItems, c->perfPos, c->perfSize,
+            c->perfColor, c->perfBox, c->perfFahrenheit);
     fprintf(f, "resolution=%d\ntexfilter=%d\nsharpen=%d\nblur=%d\nscreen=%d\nbrightness=%d\nvsync=%d\nstretch=%d\ndeflicker=%d\n", c->resScale,
             c->texFilter, c->sharpen, c->blur, c->screen, c->brightness, c->vsync, c->stretch, c->deflicker);
     fprintf(f, "hirestex=%d\n", c->hiTex);

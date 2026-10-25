@@ -17,6 +17,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
+#include <stdarg.h>
 
 #include <string>
 #include <ppcintrinsics.h>
@@ -941,14 +942,27 @@ static int s_statesOpen;            // the States page is up
 static IDirect3DTexture9 *s_stateThumb;
 static int s_stateThumbSlot = -1;   // the slot s_stateThumb is of (-1: load again)
 
-static int s_showFps;               // showfps=1: frames shown per second in the top-right corner
-static char s_fpsText[160];          // "60.0 FPS"; showfps=2: also CPU and RAM; 3: and the resolution
+static int s_showFps;               // what the performance box shows (Config::perfItems, CONFIG_PERF_*; 0: no box)
+static int s_perfF, s_perfTemps;    // temperatures in degrees F; they can be read (not Xenia)
+static char s_fpsText[256];          // its lines: "60.0 FPS", "CPU 42%", ... as chosen
+
+// One more line of the performance box.
+static void PerfAdd(const char *fmt, ...)
+{
+    size_t n = strlen(s_fpsText);
+    va_list ap;
+    if (n && n < sizeof(s_fpsText) - 2) { s_fpsText[n++] = '\n'; s_fpsText[n] = 0; }
+    va_start(ap, fmt);
+    _vsnprintf(s_fpsText + n, sizeof(s_fpsText) - 1 - n, fmt, ap);
+    va_end(ap);
+    s_fpsText[sizeof(s_fpsText) - 1] = 0;
+}
 static UiMenu s_menu;
 static int s_menuOpen;              // the in-game menu is drawn over the frozen frame
 static int s_aboutOpen;             // ... showing the About panel
 static int s_hiresPreviewOpen;      // ... showing the hi-res pack preview (HiresPreviewOpen already called)
-static int s_confirmOpen;           // ... asking before leaving the game: CONFIRM_LIST or CONFIRM_DASHBOARD (0: not asking)
-enum { CONFIRM_LIST = 1, CONFIRM_DASHBOARD, CONFIRM_RESET };
+static int s_confirmOpen;           // ... asking first: CONFIRM_* (0: not asking)
+enum { CONFIRM_LIST = 1, CONFIRM_DASHBOARD, CONFIRM_RESET, CONFIRM_SAVE_GAME, CONFIRM_SAVE_ALL };
 
 // <save folder>\state<N>.thm: the picture of save state N - "H64T", width,
 // height (u32 each), then RGBA rows. Written with the state, at most THUMB_W x THUMB_H.
@@ -990,8 +1004,7 @@ static void OverlayHook(void *, IDirect3DDevice9 *dev)
     int fps = s_showFps && s_fpsText[0], osd = s_osd[0] && left >= 0;
     if (!fps && !osd && !s_menuOpen) return;
     UiBegin(dev);
-    if (fps && s_showFps >= 2) UiPerfPanel(s_fpsText);
-    else if (fps) UiFpsBadge(s_fpsText);
+    if (fps) UiPerfPanel(s_fpsText);   // one line: a pill, more: a panel (Settings > System > On-screen performance)
     if (s_menuOpen && s_hiresPreviewOpen) HiresPreviewDraw(dev);
     else if (s_menuOpen && s_aboutOpen) AboutDraw();
     else if (s_menuOpen)
@@ -1008,6 +1021,8 @@ static void OverlayHook(void *, IDirect3DDevice9 *dev)
         if (s_confirmOpen == CONFIRM_DASHBOARD) UiConfirmDraw(T_QUIT_TITLE, T_QUIT_ASK, T_FOOT_QUIT);
         else if (s_confirmOpen == CONFIRM_LIST) UiConfirmDraw(-1, T_LIST_ASK, T_FOOT_QUIT);
         else if (s_confirmOpen == CONFIRM_RESET) UiConfirmDraw(-1, T_RESET_ASK, T_FOOT_RESET_ASK);
+        else if (s_confirmOpen == CONFIRM_SAVE_GAME) UiConfirmDraw(-1, T_SAVE_GAME_ASK, T_FOOT_SAVE_ASK);
+        else if (s_confirmOpen == CONFIRM_SAVE_ALL) UiConfirmDraw(-1, T_SAVE_ALL_ASK, T_FOOT_SAVE_ASK);
     }
     if (osd) UiToast(s_osd, (float)(OSD_MS - left), (float)OSD_MS);
     UiEnd();
@@ -1171,7 +1186,24 @@ static int GameMenu(H64System *sys, H64Renderer *renderer, Config *c)
         {
             // "Back to the ROM list?" / "Quit to the dashboard?" / "Reset the game?": A does it, B or BACK
             // stays in the menu.
-            if ((down & XINPUT_GAMEPAD_A) && s_confirmOpen == CONFIRM_RESET) { s_confirmOpen = 0; ResetGame(sys); result = RG_CONTINUE; }
+            if ((down & XINPUT_GAMEPAD_A) && (s_confirmOpen == CONFIRM_SAVE_GAME || s_confirmOpen == CONFIRM_SAVE_ALL))
+            {
+                // "Save for this game / for all games?": A saves and goes back to the menu, B stays in Settings.
+                int all = s_confirmOpen == CONFIRM_SAVE_ALL;
+                const char *path = all ? s_settingsPath : s_profilePath;
+                s_confirmOpen = 0;
+                if (!path[0]) OsdT(T_NOT_SAVED_SCRIPT, 0);
+                else if (ConfigWriteMenuKeys(c, path, all))
+                {
+                    OsdT(all ? T_SAVED_ALL : T_SAVED_GAME, 0);
+                    xb_audio_ui_sound_instead(XB_SFX_SAVE);
+                }
+                else OsdT(T_SETTINGS_WRITE_FAILED, 0);
+                settings = 0;
+                BuildGameMenu();
+                s_menu.sel = M_SETTINGS;
+            }
+            else if ((down & XINPUT_GAMEPAD_A) && s_confirmOpen == CONFIRM_RESET) { s_confirmOpen = 0; ResetGame(sys); result = RG_CONTINUE; }
             else if (down & XINPUT_GAMEPAD_A) result = s_confirmOpen == CONFIRM_DASHBOARD ? RG_DASHBOARD : RG_BROWSER;
             else if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) s_confirmOpen = 0;
         }
@@ -1185,7 +1217,7 @@ static int GameMenu(H64System *sys, H64Renderer *renderer, Config *c)
         }
         else if (settings)
         {
-            int r = SettingsInput(&s_menu, c, s_settingsPath[0] != 0, down);
+            int r = SettingsInput(&s_menu, c, s_profilePath[0] != 0, down);
             if (r == SET_PREVIEW) { HiresPreviewOpen(c); s_hiresPreviewOpen = 1; }
             else if (r == SET_CHANGED)
             {
@@ -1198,17 +1230,13 @@ static int GameMenu(H64System *sys, H64Renderer *renderer, Config *c)
                     strncpy(hiTexFileApplied, c->hiTexFile, sizeof(hiTexFileApplied) - 1);
                     hiTexFileApplied[sizeof(hiTexFileApplied) - 1] = 0;
                 }
-                s_showFps = c->showFps;
+                s_showFps = c->perfItems;
+                s_perfF = c->perfFahrenheit;
+                PerfStyleApply(c);
                 s_rumbleOn = c->rumble;
             }
-            else if (r == SET_SAVE_ALL || r == SET_SAVE_GAME)
-            {
-                const char *path = r == SET_SAVE_ALL ? s_settingsPath : s_profilePath;
-                if (!path[0]) OsdT(T_NOT_SAVED_SCRIPT, 0);
-                else OsdT(ConfigWriteMenuKeys(c, path, r == SET_SAVE_ALL) ? (r == SET_SAVE_ALL ? T_SAVED_ALL : T_SAVED_GAME)
-                                                                         : T_SETTINGS_WRITE_FAILED, 0);
-            }
-            if (r == SET_BACK || r == SET_SAVE_ALL || r == SET_SAVE_GAME)
+            else if (r == SET_SAVE_ALL || r == SET_SAVE_GAME) s_confirmOpen = r == SET_SAVE_ALL ? CONFIRM_SAVE_ALL : CONFIRM_SAVE_GAME;   // asked first (above)
+            if (r == SET_BACK)
             {
                 settings = 0;
                 BuildGameMenu();
@@ -1355,7 +1383,10 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
     u64 instrAtPerf = 0;
 
     s_crashed = 0;
-    s_showFps = c->showFps;
+    s_showFps = c->perfItems;
+    s_perfF = c->perfFahrenheit;
+    s_perfTemps = !c->xenia;
+    PerfStyleApply(c);
     s_fpsText[0] = 0;
     if (romPath)
     {
@@ -1679,25 +1710,31 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
         if (QpcMs() - fpsStart >= 1000.0)
         {
             double nowMs = QpcMs();
-            if (s_showFps >= 2)
+            if (s_showFps)
             {
-                // Details (Settings > Show FPS): the emulation thread's load
-                // (time spent running the N64 and presenting, not waiting for
-                // the next frame), memory in use, the internal resolution and
-                // the N64's picture.
+                // The lines chosen (Settings > System > On-screen performance), in this order:
+                // frames per second; the emulation thread's load (time spent running the N64
+                // and presenting, not waiting for the next frame); memory in use; the internal
+                // resolution and the N64's picture; the graphics worker's load; the console's
+                // temperatures.
                 MEMORYSTATUS ms;
                 u32 rw = 0, rh = 0, vw = sys->vi.regs[2] & 0xFFF, vs = sys->vi.regs[10], ys = sys->vi.regs[13] & 0xFFF;   // width, V_START, Y_SCALE
                 u32 vh = (((vs & 0x3FF) - ((vs >> 16) & 0x3FF)) / 2) * ys / 1024;
                 double load = busyTicks * 100000.0 / (double)freq.QuadPart / (nowMs - fpsStart);
-                GlobalMemoryStatus(&ms);
-                h64_xenos_internal_size(renderer, &rw, &rh);
-                _snprintf(s_fpsText, sizeof(s_fpsText) - 1, "%.1f FPS\nCPU %d%%\nRAM %u / %u MB",
-                          fpsFrames * 1000.0 / (nowMs - fpsStart), (int)(load > 100.0 ? 100.0 : load),
-                          (u32)((ms.dwTotalPhys - ms.dwAvailPhys) >> 20), (u32)(ms.dwTotalPhys >> 20));
-                s_fpsText[sizeof(s_fpsText) - 1] = 0;
-                if (s_showFps >= 3)   // and the resolution
-                    _snprintf(s_fpsText + strlen(s_fpsText), sizeof(s_fpsText) - 1 - strlen(s_fpsText), "\n%ux%u (N64 %ux%u)", rw, rh, vw, vh);
-                if (s_showFps >= 4)
+                s_fpsText[0] = 0;
+                if (s_showFps & CONFIG_PERF_FPS) PerfAdd("%.1f FPS", fpsFrames * 1000.0 / (nowMs - fpsStart));
+                if (s_showFps & CONFIG_PERF_CPU) PerfAdd("CPU %d%%", (int)(load > 100.0 ? 100.0 : load));
+                if (s_showFps & CONFIG_PERF_RAM)
+                {
+                    GlobalMemoryStatus(&ms);
+                    PerfAdd("RAM %u / %u MB", (u32)((ms.dwTotalPhys - ms.dwAvailPhys) >> 20), (u32)(ms.dwTotalPhys >> 20));
+                }
+                if (s_showFps & CONFIG_PERF_RES)
+                {
+                    h64_xenos_internal_size(renderer, &rw, &rh);
+                    PerfAdd("%ux%u (N64 %ux%u)", rw, rh, vw, vh);
+                }
+                if (s_showFps & CONFIG_PERF_GPU)
                 {
                     // The graphics worker's own load: not a hardware occupancy
                     // counter (the XDK exposes none) - the same "busy time /
@@ -1705,13 +1742,20 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
                     // H64_PROF_GFX_HLE (graphics tasks, rendering included)
                     // instead of the main thread's run+present time.
                     double gfxLoad = (double)(sys->prof[H64_PROF_GFX_HLE] - gfxProfAt) * 100000.0 / (double)freq.QuadPart / (nowMs - fpsStart);
-                    _snprintf(s_fpsText + strlen(s_fpsText), sizeof(s_fpsText) - 1 - strlen(s_fpsText), "\nGPU %d%%",
-                              (int)(gfxLoad > 100.0 ? 100.0 : gfxLoad));
+                    PerfAdd("GPU %d%%", (int)(gfxLoad > 100.0 ? 100.0 : gfxLoad));
                 }
-                s_fpsText[sizeof(s_fpsText) - 1] = 0;
+                if (s_showFps & (CONFIG_PERF_TCPU | CONFIG_PERF_TGPU | CONFIG_PERF_TRAM))
+                {
+                    float t[3];
+                    static const char *const names[3] = { "CPU", "GPU", "RAM" };
+                    static const int bits[3] = { CONFIG_PERF_TCPU, CONFIG_PERF_TGPU, CONFIG_PERF_TRAM };
+                    int k;
+                    if (UiTemperatures(s_perfTemps, &t[0], &t[1], &t[2]))
+                        for (k = 0; k < 3; k++)
+                            if (s_showFps & bits[k])
+                                PerfAdd("%s %d\xC2\xB0%c", names[k], (int)(s_perfF ? t[k] * 9.0f / 5.0f + 32.0f + 0.5f : t[k] + 0.5f), s_perfF ? 'F' : 'C');
+                }
             }
-            else
-                sprintf(s_fpsText, "%.1f FPS", fpsFrames * 1000.0 / (nowMs - fpsStart));
             busyTicks = 0;
             gfxProfAt = sys->prof[H64_PROF_GFX_HLE];
             fpsFrames = 0;
