@@ -101,7 +101,8 @@ struct TexEntry
     IDirect3DTexture9 *tex;
     u32 w, h;
     int chunk;         // arena chunk (-1: a CreateTexture texture)
-    int htsDeferred;   // the N64 picture, shown while its pack replacement waits for a frame with room (see hts_budget_ok)
+    int htsDeferred;   // the N64 picture, shown while its pack replacement loads or waits for a frame with room (see hts_budget_ok)
+    u64 htsKey;        // that replacement's pack key
 };
 
 struct TexBinding
@@ -131,7 +132,8 @@ struct Xenos
     float uMax, vMax;   // rtW / RT_WIDTH, rtH / RT_HEIGHT: that part in a frame texture
     int texFilter;      // 0 the N64's 3-point filter, 1 bilinear, 2 nearest
     int sharpen, blur, screen;  // display: sharpening 0-2, blur 0-2, screen effect (H64XenosOptions)
-    int brightness;             // display: 0-2 (H64XenosOptions)
+    int brightness;             // display: 0-4 (H64XenosOptions)
+    int colorStyle;             // display: 0-7 (H64XenosOptions)
     int vsync, vsyncSet;        // display: V-Sync wanted (H64XenosOptions), and what the device has (-1: unknown)
     int viGamma;                // the VI's gamma bit at this present (VI_CONTROL bit 3)
     int aspect;                 // 0 4:3, 1 16:9 widescreen (wider 3D), 2 16:9 stretched
@@ -245,6 +247,7 @@ struct Xenos
     int hiTex;               // the pack is used (menu option)
     u32 htsHits, htsMisses, htsLookups, htsLogged, htsDetail, htsDeferredCount, htsBudgetFrame;
     s32 htsBudget;           // pixels of pack textures that may still be loaded this frame
+    std::map<u64, int> htsMissLog;   // pack misses already logged (each checksum once)
     std::map<u64, int> modeLog;   // xenosdebug=4
     int deferNotify;              // running on the graphics worker (h64_xenos_set_worker)
     u32 pendingLo, pendingHi;     // RDRAM written meanwhile (copy-backs), for the recompiler
@@ -763,7 +766,7 @@ static void resolve_loads(Xenos *x);
 // of them; a texture that finds the budget spent is shown as the N64 picture for now
 // (marked htsDeferred) and replaced by the pack's one in a later frame.
 #ifndef HTS_PIXELS_PER_FRAME
-#define HTS_PIXELS_PER_FRAME 200000
+#define HTS_PIXELS_PER_FRAME 500000
 #endif
 static int hts_budget_ok(Xenos *x)
 {
@@ -771,14 +774,22 @@ static int hts_budget_ok(Xenos *x)
     return x->htsBudget > 0;
 }
 
-static const u32 *hts_replacement(Xenos *x, const H64RdpTile *t, const TexBinding *b, u32 *hw, u32 *hh, u32 *realW, u32 *realH, int *deferred)
+// A put-off replacement can be swapped in: loaded and (unless shown before) a frame with room; or it failed.
+static int hts_retry_ok(Xenos *x, u64 key)
+{
+    int r = h64_hts_ready(x->hts, key);
+    return r == 2 || r < 0 || (r == 1 && hts_budget_ok(x));
+}
+
+static const u32 *hts_replacement(Xenos *x, const H64RdpTile *t, const TexBinding *b, u32 *hw, u32 *hh, u32 *realW, u32 *realH, int *deferred,
+                                  u64 *pendingKey)
 {
     const H64RdpState *st = x->st;
     const u8 *ram = st->loadRam ? st->loadRam : x->sys->rdram;
     const H64RdpLoadSrc *ls = NULL;
     const u16 *pal = NULL;
     const u32 *px;
-    u32 n, tw = tile_extent(t->slo, t->shi), th = tile_extent(t->tlo, t->thi), rowBytes, pw, ph;
+    u32 n, tw = tile_extent(t->slo, t->shi), th = tile_extent(t->tlo, t->thi), cw, chh, rowBytes, pw, ph;
     u32 ms = t->maskS ? 1u << (t->maskS > 10 ? 10 : t->maskS) : 0, mt = t->maskT ? 1u << (t->maskT > 10 ? 10 : t->maskT) : 0;
     int ci = 0;
     u64 crc;
@@ -808,45 +819,90 @@ static const u32 *hts_replacement(Xenos *x, const H64RdpTile *t, const TexBindin
     if (ms && ms < tw) tw = ms;   // the size the game uses (verify against GlideN64 on odd sizes)
     if (x->debug == 25 && (b->w != tw || b->h != th) && !b->ox && !b->oy) return NULL;   // 25: only plain cases (decoded size = image size)
     if (mt && mt < th) th = mt;
-    rowBytes = ls->block ? ((tw << t->size) + 1) >> 1 : ls->rowBytes;
-    if (!rowBytes || (u64)ls->addr + (u64)(th - 1) * rowBytes + (((tw << t->size) + 1) >> 1) > H64_RDRAM_SIZE)
+    // The area the checksum covers, as GLideN64 (TextureCache::_loadHiresTexture)
+    // takes it - the packs are made with it. A LOAD_TILE texture is the area
+    // loaded (not the render tile's: OoT's sky is loaded in parts, and most of its
+    // panels missed); a LOAD_BLOCK one the mask, unless the axis is clamped (a tile
+    // without a mask counts as clamped) and at most 256 texels. tw x th stays the
+    // N64 texture's size the replacement is scaled to. xenosdebug=27: the old area.
+    cw = tw; chh = th;
+    if (x->debug == 27) rowBytes = ls->block ? ((tw << t->size) + 1) >> 1 : ls->rowBytes;
+    else if (!ls->block)
+    {
+        cw = ls->w < ls->imgWidth ? ls->w : ls->imgWidth;
+        if (ls->size > t->size) cw <<= ls->size - t->size;
+        chh = ls->h;
+        rowBytes = ls->rowBytes;
+    }
+    else
+    {
+        u32 fullW = tile_extent(t->slo, t->shi), fullH = tile_extent(t->tlo, t->thi);
+        u32 maskW = ms ? ms : fullW, maskH = mt ? mt : fullH;
+        int clampS = (t->flags & TILE_CLAMP_S) || !t->maskS, clampT = (t->flags & TILE_CLAMP_T) || !t->maskT;
+        cw = clampS && fullW <= 256 ? (maskW < fullW ? maskW : fullW) : maskW;
+        chh = (clampT && fullH <= 256) || maskH > 256 ? (maskH < fullH ? maskH : fullH) : maskH;
+        rowBytes = t->stride ? (t->size == 3 ? t->stride * 2 : t->stride) : ((cw << t->size) + 1) >> 1;
+    }
+    if (!cw || !chh || !rowBytes || (u64)ls->addr + (u64)(chh - 1) * rowBytes + (((cw << t->size) + 1) >> 1) > H64_RDRAM_SIZE)
     {
         if (x->htsLogged < 40)
         {
             x->htsLogged++;
-            H64_INFO("[hts] source out of range: addr %06X rowBytes %u %ux%u size %u block %d", ls->addr, rowBytes, tw, th, t->size, ls->block);
+            H64_INFO("[hts] source out of range: addr %06X rowBytes %u %ux%u size %u block %d", ls->addr, rowBytes, cw, chh, t->size, ls->block);
         }
         return NULL;
     }
-    if (t->fmt == 2 && (st->rasterFlags & RS_TLUT) && t->size <= 1)
+    if (t->size <= 1 && (x->debug == 27 ? t->fmt == 2 && (st->rasterFlags & RS_TLUT)
+                                          : t->fmt == 2 || (st->rasterFlags & RS_TLUT)))   // GLideN64: a TLUT or a CI format
     {
         ci = t->size == 0 ? 4 : 8;
         pal = st->tlutEntries + (t->size == 0 ? (t->palette & 15) * 16 : 0);
     }
-    crc = h64_hts_checksum(ram + ls->addr, tw, th, t->size, rowBytes, pal, ci);
+    crc = h64_hts_checksum(ram + ls->addr, cw, chh, t->size, rowBytes, pal, ci);
     px = NULL;
     {
         u64 use = 0;
         if (crc && h64_hts_has(x->hts, crc)) use = crc;
         else if (pal && h64_hts_has(x->hts, crc & 0xFFFFFFFFull)) use = crc & 0xFFFFFFFFull;   // packs made without the palette checksum
+        // The texels match but not the palette: games animate palette colours (Smash
+        // Remix's stages: one texture came with 4 palette checksums in a match, none
+        // the pack's), and the pack holds the one the dumper saw - HD only on the frames
+        // that matched it, flickering. Taken when the pack has that texture with a
+        // single palette (OoT's sky has 4, by time of day: left alone). xenosdebug=27: not.
+        else if (pal && x->debug != 27) use = h64_hts_by_texture(x->hts, (u32)crc);
         if (use)
         {
-            if (!hts_budget_ok(x)) { x->htsDeferredCount++; *deferred = 1; return NULL; }
-            if (h64_hts_find(x->hts, use, &px, &pw, &ph)) x->htsBudget -= (s32)(pw * ph);
-            else px = NULL;
+            // Read and unpacked on the pack's worker threads (h64_hts_request): the N64
+            // picture is drawn until it is ready, then swapped in a frame with room. One
+            // shown before (palette animation, the cache dropped it) needs no room.
+            int got = h64_hts_take(x->hts, use, hts_budget_ok(x), &px, &pw, &ph);
+            if (got == 0)
+            {
+                h64_hts_request(x->hts, use);
+                x->htsDeferredCount++; *deferred = 1; *pendingKey = use;
+                // A palette that animates asks for one pack texture after another: until
+                // this one is in, the one shown for the previous colours stands in (the
+                // N64 picture between them flickered). Only small enough to land in the
+                // arena: those are swapped for the right one later (see e.htsDeferred).
+                if (!(pal && h64_hts_take_alike(x->hts, (u32)use, use, &px, &pw, &ph) && pw * ph * 4 <= ARENA_CHUNK / 2)) return NULL;
+            }
+            else if (got == 1) x->htsBudget -= (s32)(pw * ph);
+            else if (got < 0) px = NULL;
         }
     }
     if (!px)
     {
         x->htsMisses++;
-        if (x->htsLogged < 40)
+        // Each checksum once, for the first 300: the first 40 lines alone were
+        // gone before the game reached the textures that matter (OoT's sky).
+        if (x->htsMissLog.size() < 300 && x->htsMissLog.insert(std::make_pair(crc, 1)).second)
         {
-            x->htsLogged++;
-            H64_INFO("[hts] miss %016llX: %ux%u fmt %u size %u rowBytes %u src %06X%s", (unsigned long long)crc, tw, th, t->fmt, t->size,
-                     rowBytes, ls->addr, pal ? " (palette)" : "");
+            H64_INFO("[hts] miss %016llX: %ux%u (tile %ux%u) fmt %u size %u rowBytes %u src %06X %s%s; load %ux%u size %u img %u, tmem %X", (unsigned long long)crc,
+                     cw, chh, tw, th, t->fmt, t->size, rowBytes, ls->addr, ls->block ? "block" : "tile", pal ? " (palette)" : "",
+                     ls->w, ls->h, ls->size, ls->imgWidth, t->offset);
             if (pal)
                 H64_INFO("[hts]   palette %u (cimax %u): %04X %04X %04X %04X %04X %04X %04X %04X %04X %04X %04X %04X %04X %04X %04X %04X",
-                         t->palette, h64_hts_cimax(ram + ls->addr, tw, th, t->size, rowBytes, ci), pal[0], pal[1], pal[2], pal[3], pal[4], pal[5],
+                         t->palette, h64_hts_cimax(ram + ls->addr, cw, chh, t->size, rowBytes, ci), pal[0], pal[1], pal[2], pal[3], pal[4], pal[5],
                          pal[6], pal[7], pal[8], pal[9], pal[10], pal[11], pal[12], pal[13], pal[14], pal[15]);
         }
         return NULL;
@@ -874,11 +930,22 @@ static const u32 *hts_replacement(Xenos *x, const H64RdpTile *t, const TexBindin
 // clamped axis to n-1 instead of wrapping stretched the replacement to its last
 // column/row for the part past the first repeat (deformed faces, shields), so a
 // clamped axis is never held at the edge here, only wrapped or mirrored.
-static u32 hts_fold(u32 v, u32 n, int mirror)
+//
+// The position is folded whole (texel and the part inside it): folding only the
+// texel turned a mirrored period's texels around but left the pack's pixels inside
+// each one in their forward order - in the mirrored half every N64 texel's block
+// of pack pixels came out backwards, a saw-tooth that tore Smash Remix's Mario
+// (the right half of the face, the cap's M).
+static float hts_fold(float v, u32 n, int mirror)
 {
-    if (v < n) return v;
-    if (mirror) { u32 m = v % (2 * n); return m < n ? m : 2 * n - 1 - m; }
-    return v % n;
+    float fn = (float)n, m;
+    if (v < fn) return v;
+    if (mirror)
+    {
+        m = fmodf(v, 2.0f * fn);
+        return m < fn ? m : 2.0f * fn - m;
+    }
+    return fmodf(v, fn);
 }
 
 // mirrorS/mirrorT: the tile's real TILE_MIRROR_S/T bits (not b->mirrorS/b->mirrorT,
@@ -902,22 +969,20 @@ static void hts_fill(u32 *dst, u32 uw, u32 uh, const u32 *src, u32 pw, u32 ph, c
     colmap.resize(uw);
     for (X = 0; X < uw; X++)   // computed once per column, not per pixel
     {
-        float fx = (float)b->ox + (float)X * (float)b->w / (float)uw;   // in N64 texels
-        u32 tx = (u32)fx, sx;
-        fx -= (float)tx;
-        tx = hts_fold(tx, tw, mirrorS);   // a clamped axis repeats past tw (see hts_fold), never holds the edge
-        sx = (u32)(((float)tx + fx) * (float)pw / (float)tw);
+        float fx = (float)b->ox + ((float)X + 0.5f) * (float)b->w / (float)uw;   // in N64 texels, the pixel's centre (exact under a mirror)
+        u32 sx;
+        fx = hts_fold(fx, tw, mirrorS);   // a clamped axis repeats past tw (see hts_fold), never holds the edge
+        sx = (u32)(fx * (float)pw / (float)tw);
         colmap[X] = sx >= pw ? pw - 1 : sx;
     }
     for (Y = 0; Y < uh; Y++)
     {
-        float fy = (float)b->oy + (float)Y * (float)b->h / (float)uh;
-        u32 ty = (u32)fy, sy;
+        float fy = (float)b->oy + ((float)Y + 0.5f) * (float)b->h / (float)uh;
+        u32 sy;
         const u32 *row;
         u32 *out = dst + (size_t)Y * uw;
-        fy -= (float)ty;
-        ty = hts_fold(ty, th, mirrorT);   // a clamped axis repeats past th (see hts_fold), never holds the edge
-        sy = (u32)(((float)ty + fy) * (float)ph / (float)th);
+        fy = hts_fold(fy, th, mirrorT);   // a clamped axis repeats past th (see hts_fold), never holds the edge
+        sy = (u32)(fy * (float)ph / (float)th);
         row = src + (size_t)(sy >= ph ? ph - 1 : sy) * pw;
         for (X = 0; X < uw; X++) out[X] = row[colmap[X]];
     }
@@ -1036,8 +1101,10 @@ static IDirect3DTexture9 *lookup_texture(Xenos *x, u32 tileIndex, TexBinding *b)
         else key = mem_hash(key, st->tmem + 0x800, 0x800);
     }
     it = x->textures.find(key);
+    // A put-off replacement whose loaded pixels were dropped untaken (HTS_READY_BYTES) is asked for again.
+    if (it != x->textures.end() && it->second.htsDeferred && x->hts && x->hiTex) h64_hts_request(x->hts, it->second.htsKey);
     if (it != x->textures.end() && x->debug != 12 &&   // xenosdebug=12: every texture decoded again (diagnosis)
-        !(it->second.htsDeferred && x->hts && x->hiTex && hts_budget_ok(x)))   // a put-off replacement: this frame has room for it
+        !(it->second.htsDeferred && x->hts && x->hiTex && hts_retry_ok(x, it->second.htsKey)))   // a put-off replacement that can come now
         return it->second.tex;
     if (it != x->textures.end()) x->textures.erase(it);
     if (x->debug == 8 && x->presentCount >= x->debugFrom && x->presentCount < x->debugFrom + 2)
@@ -1053,13 +1120,14 @@ static IDirect3DTexture9 *lookup_texture(Xenos *x, u32 tileIndex, TexBinding *b)
 
     u32 uw = b->w, uh = b->h, hrW = 0, hrH = 0, hrRealW = 1, hrRealH = 1;
     int hrDeferred = 0;
+    u64 hrKey = 0;
     const u32 *hires = NULL;
     if (x->hts && x->hiTex && !(t->fmt == 1 && t->size == 2) &&
         !(x->debug == 26 && (x->win.active || b->ox || b->oy)) &&         // 26: none for flat objects (rectangles)
         !(x->debug == 22 && (st->rasterFlags & RS_COPY)) &&              // xenosdebug=22: no packs in copy mode
         !(x->debug == 24 && (b->wrapS || b->mirrorS || b->wrapT || b->mirrorT)))   // 24: none on wrapped or mirrored axes
     {
-        hires = hts_replacement(x, t, b, &hrW, &hrH, &hrRealW, &hrRealH, &hrDeferred);
+        hires = hts_replacement(x, t, b, &hrW, &hrH, &hrRealW, &hrRealH, &hrDeferred, &hrKey);
         // A window (a rectangle samples part of the tile) must lie inside the image: past it the tile's own
         // addressing would apply, which the plain mapping does not reproduce.
         if (hires && (b->ox < 0 || b->oy < 0 || (u32)b->ox + b->w > hrRealW || (u32)b->oy + b->h > hrRealH) && (b->ox || b->oy)) hires = NULL;
@@ -1090,6 +1158,7 @@ static IDirect3DTexture9 *lookup_texture(Xenos *x, u32 tileIndex, TexBinding *b)
     u64 d0 = h64_prof_now(x->sys);
     e.tex = NULL;
     e.htsDeferred = 0;
+    e.htsKey = 0;
     e.w = uw;
     e.h = uh;
     e.chunk = -1;
@@ -1192,6 +1261,7 @@ static IDirect3DTexture9 *lookup_texture(Xenos *x, u32 tileIndex, TexBinding *b)
         x->textureBytes += e.w * e.h * 4;
     }
     e.htsDeferred = hrDeferred && e.chunk >= 0;   // only arena pictures can be dropped safely when the replacement is ready
+    e.htsKey = hrKey;
     x->textures[key] = e;
     x->stats.tDecode += h64_prof_now(x->sys) - d0;
     x->stats.textureUploads++;
@@ -1464,6 +1534,9 @@ static IDirect3DPixelShader9 *display_shader(Xenos *x)
         "float4 prm : register(c1);\n"
         "float4 prm2 : register(c2);\n"
         "float4 prm3 : register(c3);\n"
+        "float4 cm0 : register(c4);\n"   // the colour style: a 3x3 colour matrix, one row a register
+        "float4 cm1 : register(c5);\n"
+        "float4 cm2 : register(c6);\n"
         "float luma(float3 c) { return dot(c, float3(0.299, 0.587, 0.114)); }\n"
         "float3 tap(float2 uv) { return tex2D(t0, clamp(uv, prm3.xy + 0.5 * rcp.xy, prm.xy - 0.5 * rcp.xy)).rgb; }\n"
         "float3 base(float2 uv) {\n"
@@ -1551,6 +1624,7 @@ static IDirect3DPixelShader9 *display_shader(Xenos *x)
         // The VI's gamma (the N64 output brightens dark tones when the game
         // sets VI_CONTROL bit 3: square root, h64_vi_gamma_table) and the
         // Brightness setting, as one power: prm2.y.
+        "  c = float3(dot(c, cm0.xyz), dot(c, cm1.xyz), dot(c, cm2.xyz));\n"
         "  return float4(pow(saturate(c), prm2.yyy), 1.0);\n"
         "}\n";
     x->psDisplay[key] = compile_ps(x->dev, src.c_str());
@@ -1655,11 +1729,38 @@ static void draw_display(Xenos *x, IDirect3DTexture9 *tex, const ViGeom *g, floa
     x->dev->SetPixelShaderConstantF(1, c, 1);
     c[0] = (float)(lines > 300 ? lines / 2 : lines);
     {
-        static const float bright[3] = { 1.0f, 0.8f, 0.65f };
+        // A power on the picture: under 1 lifts the dark tones, over 1 deepens them (white stays white).
+        static const float bright[5] = { 1.0f, 0.8f, 0.65f, 1.25f, 1.55f };
         c[1] = (x->viGamma ? 0.5f : 1.0f) * bright[x->brightness];
     }
     c[2] = c[3] = 0;
     x->dev->SetPixelShaderConstantF(2, c, 1);
+    {
+        // The colour style's matrix (rows): saturation around the luma, sepia, warm and cool casts, a green screen.
+        static const float lr = 0.299f, lg = 0.587f, lb = 0.114f;
+        float m[12];
+        int k;
+        float sat = x->colorStyle == 1 ? 1.35f : x->colorStyle == 2 ? 1.7f : x->colorStyle == 3 || x->colorStyle == 7 ? 0.0f : 1.0f;
+        for (k = 0; k < 3; k++)
+        {
+            m[k * 4 + 0] = (1 - sat) * lr + (k == 0 ? sat : 0);
+            m[k * 4 + 1] = (1 - sat) * lg + (k == 1 ? sat : 0);
+            m[k * 4 + 2] = (1 - sat) * lb + (k == 2 ? sat : 0);
+            m[k * 4 + 3] = 0;
+        }
+        if (x->colorStyle == 4)
+        {
+            static const float sepia[12] = { 0.393f, 0.769f, 0.189f, 0, 0.349f, 0.686f, 0.168f, 0, 0.272f, 0.534f, 0.131f, 0 };
+            memcpy(m, sepia, sizeof(m));
+        }
+        else if (x->colorStyle == 5 || x->colorStyle == 6 || x->colorStyle == 7)
+        {
+            static const float cast[3][3] = { { 1.08f, 1.0f, 0.86f }, { 0.88f, 0.98f, 1.12f }, { 0.62f, 0.78f, 0.36f } };
+            const float *f = cast[x->colorStyle - 5];
+            for (k = 0; k < 3; k++) { m[k * 4] *= f[k]; m[k * 4 + 1] *= f[k]; m[k * 4 + 2] *= f[k]; }
+        }
+        x->dev->SetPixelShaderConstantF(4, m, 3);
+    }
     c[0] = u0; c[1] = v0; c[2] = c[3] = 0;
     x->dev->SetPixelShaderConstantF(3, c, 1);
     draw_textured_uv(x, ps, tex, u0, v0, u1, v1, px0, py0, pw, ph, bw, bh);
@@ -3621,6 +3722,7 @@ H64Renderer *h64_xenos_create(H64System *sys, IDirect3DDevice9 *dev)
     x->texFilter = 1;
     x->sharpen = x->blur = x->screen = x->aspect = x->wsMain = 0;
     x->brightness = x->viGamma = 0;
+    x->colorStyle = 0;
     x->vsync = 0;
     x->vsyncSet = -1;
     x->deferNotify = 0;
@@ -3910,6 +4012,7 @@ int h64_xenos_load_hts(H64Renderer *r, const char *path)
     Xenos *x = X(r);
     if (x->hts) { h64_hts_close(x->hts); x->hts = NULL; }
     x->htsHits = x->htsMisses = x->htsLookups = x->htsLogged = x->htsDetail = x->htsDeferredCount = 0;
+    x->htsMissLog.clear();
     x->htsBudgetFrame = 0xFFFFFFFFu;
     x->htsBudget = 0;
     if (!path || !path[0]) return 0;
@@ -3938,7 +4041,8 @@ void h64_xenos_set_options(H64Renderer *r, const H64XenosOptions *o)
     x->sharpen = o->sharpen < 0 || o->sharpen > 2 ? 0 : o->sharpen;
     x->blur = o->blur < 0 || o->blur > 2 ? 0 : o->blur;
     x->screen = o->screen < 0 || o->screen > 5 ? 0 : o->screen;
-    x->brightness = o->brightness < 0 || o->brightness > 2 ? 0 : o->brightness;
+    x->brightness = o->brightness < 0 || o->brightness > 4 ? 0 : o->brightness;
+    x->colorStyle = o->colorStyle < 0 || o->colorStyle > 7 ? 0 : o->colorStyle;
     x->vsync = o->vsync;
     if (!o->deflicker) x->dfValid = 0;
     x->deflicker = o->deflicker != 0;

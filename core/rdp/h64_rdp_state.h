@@ -78,6 +78,9 @@ struct H64RdpLoadSrc
     u32 rowBytes;           // RDRAM bytes between texel rows (LOAD_TILE; 0 for LOAD_BLOCK)
     u8 size;                // texel size of the texture image (0 4-bit .. 3 32-bit)
     u8 valid, block;
+    // LOAD_TILE: the texels loaded (the load tile's mask applied) and the image's
+    // width - GLideN64 checksums this area, not the render tile's.
+    u16 w, h, imgWidth;
 };
 
 struct H64RdpState

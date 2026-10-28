@@ -38,6 +38,10 @@ void ConfigDefaults(Config *c)
     c->perfColor = 0;
     c->perfBox = 75;
     c->perfFahrenheit = 0;
+    c->artKind = 0;
+    c->uiFont = 0;
+    memset(c->path, 0, sizeof(c->path));
+    c->colorStyle = 0;
     c->updateCheck = 0;   // off by default while the GitHub repo's name/URL is still in flux (LAIKA 64 rebrand)
     c->artDownload = 1;
     c->browserDemo = 0;
@@ -177,6 +181,23 @@ int ConfigParseFile(Config *c, const char *path)
         else if (!strcmp(line, "perfcolor")) c->perfColor = atoi(eq + 1);
         else if (!strcmp(line, "perfbox")) c->perfBox = atoi(eq + 1);
         else if (!strcmp(line, "perffahrenheit")) c->perfFahrenheit = atoi(eq + 1);
+        else if (!strcmp(line, "artkind")) c->artKind = atoi(eq + 1);
+        else if (!strcmp(line, "uifont")) c->uiFont = atoi(eq + 1);
+        else if (!strcmp(line, "romdir") || !strcmp(line, "musicdir") || !strcmp(line, "sounddir") || !strcmp(line, "walldir") ||
+                 !strcmp(line, "savedir") || !strcmp(line, "shotdir") || !strcmp(line, "texdir"))
+        {
+            static const char *const keys[CONFIG_PATH_COUNT] = { "romdir", "musicdir", "sounddir", "walldir", "savedir", "shotdir", "texdir" };
+            int k;
+            for (k = 0; k < CONFIG_PATH_COUNT; k++)
+                if (!strcmp(line, keys[k]))
+                {
+                    size_t n = strlen(eq + 1);
+                    strncpy(c->path[k], eq + 1, sizeof(c->path[k]) - 1);
+                    c->path[k][sizeof(c->path[k]) - 1] = 0;
+                    if (n && n < sizeof(c->path[k]) && c->path[k][n - 1] == '\\') c->path[k][n - 1] = 0;   // no trailing backslash
+                }
+        }
+        else if (!strcmp(line, "colorstyle")) c->colorStyle = atoi(eq + 1);
         else if (!strcmp(line, "updatecheck")) c->updateCheck = atoi(eq + 1);
         else if (!strcmp(line, "artdownload")) c->artDownload = atoi(eq + 1);
         else if (!strcmp(line, "browserdemo")) c->browserDemo = atoi(eq + 1);
@@ -349,7 +370,14 @@ int ConfigWriteMenuKeys(const Config *c, const char *path, int withLastRom)
     if (withLastRom)
         fprintf(f, "selcolor=%d\nwallinterval=%d\nwalltransition=%d\nwalldim=%d\nsavermode=%d\nsavertime=%d\n", c->selColor, c->wallInterval,
                 c->wallTransition, c->wallDim, c->saverMode, c->saverTime);
-    if (withLastRom) fprintf(f, "wallcustom=%d\nuisoundstyle=%d\n", c->wallCustom, c->uiSoundStyle);
+    if (withLastRom) fprintf(f, "wallcustom=%d\nuisoundstyle=%d\nartkind=%d\n", c->wallCustom, c->uiSoundStyle, c->artKind);
+    fprintf(f, "uifont=%d\ncolorstyle=%d\n", c->uiFont, c->colorStyle);
+    {
+        static const char *const keys[CONFIG_PATH_COUNT] = { "romdir", "musicdir", "sounddir", "walldir", "savedir", "shotdir", "texdir" };
+        int k;
+        for (k = 0; k < CONFIG_PATH_COUNT; k++)
+            if (c->path[k][0]) fprintf(f, "%s=%s\n", keys[k], c->path[k]);
+    }
     if (withLastRom && c->wallFile[0]) fprintf(f, "wallfile=%s\n", c->wallFile);
     if (withLastRom)
         fprintf(f, "wallfit=%d\nwallshuffle=%d\nbordercolor=%d\nborderopacity=%d\nborderwidth=%d\nborderglow=%d\npanelopacity=%d\npanelround=%d\n",
@@ -432,4 +460,17 @@ int ConfigWriteLang(const char *path, const char *code)
     if (fwrite(out, 1, used, f) != used) { fclose(f); return 0; }
     fclose(f);
     return 1;
+}
+
+const char *ConfigPath(const Config *c, int which, const char *drive)
+{
+    static const char *const names[CONFIG_PATH_COUNT] = { "roms", "music", "sounds", "wallpapers", "saves", "screenshots", "hires_texture" };
+    static char usual[CONFIG_PATH_COUNT][32];
+    if (which < 0 || which >= CONFIG_PATH_COUNT) return "";
+    if (c && c->path[which][0]) return c->path[which];
+    // The ROMs, music, sounds, wallpapers and textures sit next to the emulator; saves and screenshots on `drive`.
+    _snprintf(usual[which], sizeof(usual[which]) - 1, "%s:\\%s",
+              which <= CONFIG_PATH_WALLS || which == CONFIG_PATH_TEXTURES || !drive || !drive[0] ? "game" : drive, names[which]);
+    usual[which][sizeof(usual[which]) - 1] = 0;
+    return usual[which];
 }

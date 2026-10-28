@@ -2749,8 +2749,14 @@ H64JitBlock *h64_jit_compile(H64System *sys, u32 pc, u32 paddr)
     if (j->blockCount >= j->blockCap || j->memUsed + MAX_BLOCK_BYTES + 64 > j->coldBase ||
         j->coldUsed + MAX_COLD_BYTES + 64 > j->memSize)
     {
+        u32 hot = j->memUsed, cold = j->coldUsed - j->coldBase;
         H64_INFO("[jit] code cache full (%u blocks, hot %u KB, cold %u KB): flushed", j->blockCount, j->memUsed >> 10,
                  (j->coldUsed - j->coldBase) >> 10);
+        if (hot + cold > j->memSize / 2)   // a part filled (not the block table): split as this game uses them
+        {
+            u32 share = (u32)((u64)hot * 1000 / (hot + cold));
+            j->hotPermille = share < 200 ? 200 : share > 600 ? 600 : share;
+        }
         h64_jit_reset(sys);
     }
 

@@ -88,7 +88,7 @@ static void load_body(H64System *sys, u32 tileIndex, u32 sl, u32 tl, u32 sh, u32
         int split = tile->size == 3 || tile->fmt == TEX_YUV;   // lower/upper halves
         u32 lines, wordsPerLine, srcStride, y, w;
         u32 srcBase, tmemBase = tile->offset;
-        u32 dxtCounter = 0;
+        u32 dxtCounter = 0, loadW = 0, loadH = 0;
         const u8 *ram = st->loadRam ? st->loadRam : sys->rdram;
         if (mode == 2)   // LOAD_BLOCK: sh is the last texel, th is dxt (1.11)
         {
@@ -107,6 +107,8 @@ static void load_body(H64System *sys, u32 tileIndex, u32 sl, u32 tl, u32 sh, u32
             wordsPerLine = ((pixels << texSize) + 15) >> 4;
             srcBase = st->texAddr + (((tl >> 2) * st->texWidth + (sl >> 2)) << (texSize - 1));
             srcStride = st->texWidth << (texSize - 1);
+            loadW = tile->maskS && pixels > (1u << tile->maskS) ? 1u << tile->maskS : pixels;
+            loadH = tile->maskT && lines > (1u << tile->maskT) ? 1u << tile->maskT : lines;
         }
 
         {
@@ -118,6 +120,7 @@ static void load_body(H64System *sys, u32 tileIndex, u32 sl, u32 tl, u32 sh, u32
             ls = &st->loadSrc[st->loadSrcNext++ & 15];
             ls->tmemOff = lo; ls->tmemEnd = hi; ls->addr = srcBase; ls->rowBytes = srcStride;
             ls->size = (u8)texSize; ls->block = mode == 2; ls->valid = 1;
+            ls->w = (u16)loadW; ls->h = (u16)loadH; ls->imgWidth = (u16)st->texWidth;
         }
         sys->prof[H64_PROF_TMEM_LOADS]++;
         sys->prof[H64_PROF_TMEM_WORDS] += (u64)lines * wordsPerLine;

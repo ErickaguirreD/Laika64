@@ -86,6 +86,7 @@ struct H64Jit
     u8 *mem;                        // executable code memory (from the platform)
     u32 memSize, memUsed;           // hot code grows from the start...
     u32 coldBase, coldUsed;         // ...and the slow paths from coldBase (half of the memory)
+    u32 hotPermille;                // the hot code's share of the memory (0: 5/12), from the last fill (h64_jit_reset)
     void (*flushIcache)(void *addr, u32 len);
 
     H64JitBlock *blocks;            // block pool

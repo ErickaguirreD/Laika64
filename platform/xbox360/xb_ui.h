@@ -49,6 +49,14 @@ void UiBegin(IDirect3DDevice9 *dev);
 void UiEnd(void);
 // Seconds since the first UI call (animations).
 float UiTime(void);
+// The menus' font (Settings > Interface > Font): 0 Inter, then the others of
+// xb_ui_fonts.h; it changes at the next UiBegin. Their count and names.
+void UiSetFont(int index);
+int UiFontCount(void);
+const char *UiFontName(int index);
+// Frames drawn so far (UiEnd calls): whether something was drawn in the frame
+// just before, whatever time a slow frame took.
+unsigned UiFrameCount(void);
 
 // ---- Shapes ----
 // Rounded rectangle with a vertical gradient (top colour, bottom colour).
@@ -122,6 +130,10 @@ float UiLogo(float x, float y, float size);
 // and vertical middle, `size` the old title's size (the logo is 1.9x as
 // high). Returns the width.
 float UiBrand(float x, float cy, float size);
+// Its width at `size` (UiBrand's), and the logo as large as fits the box
+// (x, y, w, h), centred across it, its bottom on the box's bottom.
+float UiBrandWidth(float size);
+void UiBrandFit(float x, float y, float w, float h);
 
 // ---- Wallpapers (game:\wallpapers\<folder>\, over a skin's background) ----
 // The transitions between two wallpapers (Config::wallTransition).
@@ -130,13 +142,13 @@ enum { UI_TRANS_FADE = 0, UI_TRANS_SLIDE, UI_TRANS_ZOOM, UI_TRANS_WIPE, UI_TRANS
 // fit), all of it inside the screen, stretched to it, at its own size in the
 // middle, repeated as tiles.
 enum { UI_FIT_FILL = 0, UI_FIT_FIT, UI_FIT_STRETCH, UI_FIT_CENTER, UI_FIT_TILE, UI_FIT_COUNT };
-// The pictures UiBackdrop shows: `folder` "" for none, anything else for
-// those of game:\wallpapers\ and its folders; `pick` the one to show (a name
+// The pictures UiBackdrop shows: those of `folder` (Settings > Paths) and its
+// folders, when `on` (else only listed, for Settings to choose from); `pick` the one to show (a name
 // from UiWallpaperName; "": the first), then the others in turn, each for
 // `seconds` (0: never changes), darkened by `dim` percent, laid out by `fit`,
 // in name order or at random (shuffle). Cheap to call every frame: the folder
 // is read again only when the choice changes (or after UiWallpaperRescan).
-void UiSetWallpapers(const char *folder, const char *pick, int seconds, int transition, int dim, int fit, int shuffle);
+void UiSetWallpapers(const char *folder, int on, const char *pick, int seconds, int transition, int dim, int fit, int shuffle);
 // The i-th picture's name ("pic.jpg", "folder\pic.jpg"; "" past the end), and a name's place (-1: not there).
 const char *UiWallpaperName(int i);
 int UiWallpaperFind(const char *name);
@@ -155,6 +167,9 @@ int UiWallpaperPreview(float x, float y, float w, float h);
 int UiWallpaperThumb(float x, float y, float w, float h, int fit);
 // 1 when `name` is a picture the wallpapers can show (.jpg, .jpeg, .png, .bmp).
 int UiWallpaperIsImage(const char *name);
+// Part (u0..u1, v0..v1) of a picture over four corners (top left, top right,
+// bottom left, bottom right as xy[8]): a box's faces seen at an angle.
+void UiImageQuad(IDirect3DTexture9 *tex, const float *xy, float u0, float v0, float u1, float v1, D3DCOLOR color);
 // Part (u0..u1, v0..v1, 0..1) of a picture stretched over (x, y, w, h).
 void UiImagePart(IDirect3DTexture9 *tex, float x, float y, float w, float h, float u0, float v0, float u1, float v1, D3DCOLOR color);
 
@@ -186,6 +201,11 @@ void UiPerfPanel(const char *text);
 // Where the performance box goes, its text's size (pixels) and colour, its body's opacity in percent.
 enum { UI_PERF_TOP_LEFT = 0, UI_PERF_TOP_CENTER, UI_PERF_TOP_RIGHT, UI_PERF_BOTTOM_LEFT, UI_PERF_BOTTOM_RIGHT, UI_PERF_POS_COUNT };
 void UiSetPerfStyle(int pos, float textSize, D3DCOLOR color, int boxPercent);
+// The icons a line of the box may start with (that byte first): FPS, CPU, RAM, resolution, GPU, a
+// temperature normal (under 70 C), high (70-75 C), hot (over 75 C). UiPerfIcon draws one, `s` high.
+enum { UI_PERF_ICON_FPS = 1, UI_PERF_ICON_CPU, UI_PERF_ICON_RAM, UI_PERF_ICON_RES, UI_PERF_ICON_GPU,
+       UI_PERF_ICON_TEMP_OK, UI_PERF_ICON_TEMP_WARN, UI_PERF_ICON_TEMP_HOT, UI_PERF_ICON_COUNT };
+void UiPerfIcon(int kind, float x, float cy, float s, D3DCOLOR col);
 // The box as it would be on screen, scaled into (x, y, w, h) (the settings' preview).
 void UiPerfPreview(const char *text, float x, float y, float w, float h);
 // The CPU, GPU and memory (EDRAM) temperatures in degrees C, read at most once

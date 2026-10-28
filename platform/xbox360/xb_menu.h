@@ -36,6 +36,12 @@ void UiMenuDraw(const UiMenu *m);   // between UiBegin and UiEnd
 // After UiMenuDraw: a picture under its rows, framed like the selected cover
 // (the States page's slot picture); NULL tex: an empty box with emptyText.
 void UiMenuThumb(const UiMenu *m, IDirect3DTexture9 *tex, const char *emptyText);
+// The pause menu's main page, under its rows: "NOW PLAYING", the game's name
+// and its picture (tex NULL: the name alone), framed like the selected cover.
+void UiMenuNowPlaying(const UiMenu *m, IDirect3DTexture9 *tex, int texW, int texH, const char *title, int box);
+// The game's name for it (its title in the game information, else the file's
+// name as the list shows it) and its picture (RGBA, free() it; NULL when none).
+void NowPlayingLoad(const char *romPath, char *title, int titleSize, u8 **rgba, int *w, int *h, int *box);   // box: it is the game's box (3D then)
 // Up/down move the selection (wrapping).
 void UiMenuNavigate(UiMenu *m, WORD down);
 // A button was pressed on the selected row: its highlight shows it for a moment.
@@ -45,7 +51,7 @@ void UiMenuPress(void);
 void UiConfirmDraw(int title, int question, int footer);
 
 // ---- Settings (cpu, hle, audio margin, FPS display, the Graphics and Controls pages) ----
-enum { SET_NONE = 0, SET_CHANGED, SET_BACK, SET_SAVE_ALL, SET_SAVE_GAME, SET_ART_ASK, SET_LANGUAGE, SET_PREVIEW, SET_SAVER };
+enum { SET_NONE = 0, SET_CHANGED, SET_BACK, SET_SAVE_ALL, SET_SAVE_GAME, SET_ART_ASK, SET_LANGUAGE, SET_PREVIEW, SET_SAVER, SET_WIZARD, SET_PICK_PATH };
 // Fills the menu from *c; `perGame` adds "Save for this game".
 void SettingsBuild(UiMenu *m, const Config *c, int perGame);
 // Applies one input to *c and the menu; returns SET_*. The Language row
@@ -57,6 +63,17 @@ int SettingsInput(UiMenu *m, Config *c, int perGame, WORD down);
 void PerfStyleApply(const Config *c);
 // The menu settings file where a language change is kept (lang=); "" for none.
 void SettingsSetLangFile(const char *path);
+
+// A folder chosen among the drives' (game:, Hdd1:, Usb0: ...), opened at `start`: 1 and its
+// path in `out` ("Usb0:\\Games\\N64") when one is taken (Y), 0 when left (B).
+int FolderPicker(IDirect3DDevice9 *dev, const char *start, char *out, int outSize);
+
+// ---- Welcome ----
+// The first start: the LAIKA 64 logo (`splash`), then a short set-up
+// (language, controller, picture, colour, borders and panels, wallpaper,
+// background effect; Y skips it) into *c - the menu's settings, to be
+// written by the caller. System > Setup assistant opens it without the logo.
+void WelcomeScreen(IDirect3DDevice9 *dev, Config *c, int splash);
 
 // ---- Language ----
 // The list of languages with their flags, full screen: returns the language
@@ -95,7 +112,9 @@ void AboutScreen(IDirect3DDevice9 *dev);
 void HiresScanPacks(const char *romName);
 int HiresPackCount(void);
 const char *HiresPackName(int i);   // i: 0..HiresPackCount()-1, just the .hts file name
-const char *HiresPackPath(int i);   // the full game:\hires_texture\... path, to open it
+const char *HiresPackPath(int i);   // the full <textures folder>\<rom>\... path, to open it
+// The folder the packs are in (Settings > Paths > Textures; game:\hires_texture by default).
+void HiresSetFolder(const char *folder);
 
 // A preview of the pack G_HIRES currently points at (Config::hiTex/hiTexFile):
 // one representative texture, decoded from the pack itself (packs carry no

@@ -25,9 +25,16 @@
 #define ART_GLOW_W 16
 #define ART_GLOW_H 10
 
+// Which picture of a game the browser shows (libretro-thumbnails' folders):
+// the box, a picture from the game, its title screen, its logo.
+enum { ART_KIND_BOX = 0, ART_KIND_SNAP, ART_KIND_TITLE, ART_KIND_LOGO, ART_KIND_COUNT };
+
 struct ArtResult
 {
     char path[256];         // the ROM file
+    int kind;               // ART_KIND_* asked for when it was read (the box when the other is not there)
+    int kinds;              // the ART_KIND_* pictures there are of it (bit 1 << kind)
+    int shownKind;          // the one in `cover` (`kind`, or the box when that one is not there)
     char key[16];
     int hasInfo;            // `info` read from the cache (else only `key` is known)
     H64GameInfo info;
@@ -72,6 +79,21 @@ void ArtGetStatus(ArtStatus *s);
 // (the ROM's header, then the file: nothing downloaded). 1 when the game was
 // identified (the browser's categories), 0 otherwise. After ArtStart.
 int ArtReadInfo(const char *romPath, H64GameInfo *info);
+// The picture shown (ART_KIND_*): the ones already sent are sent again in it,
+// downloads look for it from now on. Any time, from the browser's thread.
+void ArtSetKind(int kind);
+int ArtGetKind(void);
+// The menus' language (a code: "es"): the games' descriptions in it (from that
+// Wikipedia, kept beside the English one) where there is one; Arabic stays English.
+void ArtSetLang(const char *code);
+// One game's picture in another kind (the browser's right stick): it is sent
+// again in it; -1 goes back to ArtSetKind's. And the kind asked for it now.
+void ArtShowKind(const char *romPath, int kind);
+int ArtKindFor(const char *romPath);
+// A game's picture as the list shows it (kind, else the box), decoded and
+// scaled (ART_COVER_W x ART_COVER_H at most, RGBA, free() it), read now on the
+// calling thread - the pause menu's "Now playing". 0 when there is none. After ArtStart.
+int ArtReadCover(const char *romPath, int kind, u8 **rgba, int *w, int *h, int *gotKind);   // gotKind: the one read (the box as a fallback)
 // A message for the user once ("No network connection", the bulk summary).
 int ArtTakeNote(char *text, int size);
 

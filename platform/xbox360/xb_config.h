@@ -56,6 +56,14 @@ struct Config
     int perfColor;      // perfcolor=0..13: its text's colour - white (0), or xb_menu.cpp's swatches
     int perfBox;        // perfbox=0..100: its body's opacity in % (default 75)
     int perfFahrenheit; // perffahrenheit=1: temperatures in degrees F, not C
+    int colorStyle;     // colorstyle=0..7: the picture's colours - as they are, saturated, vivid, black and white, sepia, warm, cool, green
+    // Settings > Paths: the folders the emulator uses ("": the usual one, ConfigPath): roms=, musicdir=,
+    // sounddir= (the user's own interface sounds), walldir=, savedir= (saves and save states), shotdir=,
+    // texdir= (the hi-res texture packs: <texdir>\<ROM's internal name>\*.hts).
+    char path[7][128];
+    int uiFont;         // uifont=0..5: the menus' letters - Inter (0), or xb_ui_fonts.h's (Roboto, Montserrat, ...)
+    int artKind;        // artkind=0..4: the games' picture in the ROM list - the box, the box in 3D, a picture from the game,
+                        // the title screen, the logo (CONFIG_ART_*)
     int logCpu;         // logcpu=N: hardware thread of the log writer (5)
     int gameFlags;      // gameflags=HEX: the game's profile flags instead of the table's (checks; -1: the table)
     int updateCheck;    // updatecheck=0: do not ask GitHub for a newer release (xb_update.cpp); 2: as if running 0.0.0 (testing)
@@ -141,6 +149,16 @@ int ConfigParseFile(Config *c, const char *path);
 // What the performance box can show (Config::perfItems), in its order.
 enum { CONFIG_PERF_FPS = 1, CONFIG_PERF_CPU = 2, CONFIG_PERF_RAM = 4, CONFIG_PERF_RES = 8, CONFIG_PERF_GPU = 16,
        CONFIG_PERF_TCPU = 32, CONFIG_PERF_TGPU = 64, CONFIG_PERF_TRAM = 128, CONFIG_PERF_ALL = 255 };
+
+// The games' picture in the ROM list (Config::artKind).
+enum { CONFIG_ART_BOX = 0, CONFIG_ART_BOX3D, CONFIG_ART_SNAP, CONFIG_ART_TITLE, CONFIG_ART_LOGO, CONFIG_ART_COUNT };
+
+// The folders of Config::path, and each one's file key.
+enum { CONFIG_PATH_ROMS = 0, CONFIG_PATH_MUSIC, CONFIG_PATH_SOUNDS, CONFIG_PATH_WALLS, CONFIG_PATH_SAVES, CONFIG_PATH_SHOTS, CONFIG_PATH_TEXTURES,
+       CONFIG_PATH_COUNT };
+// The folder in use for `which`: the one chosen, else the usual one on `drive`
+// ("game", or "cache" in Xenia for saves and screenshots), as "drive:\name".
+const char *ConfigPath(const Config *c, int which, const char *drive);
 
 // Writes the keys the menu edits (cpu, hle, audioms, showfps, the graphics
 // keys, the controls, and lastrom and lang when `withLastRom`). Returns 0 on failure.

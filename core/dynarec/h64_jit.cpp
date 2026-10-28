@@ -40,7 +40,10 @@ void h64_jit_reset(H64System *sys)
     j->memUsed = 0;
     // Slow paths take about 1.4 times the hot code (DK64: 48 hot and 69 cold
     // bytes per MIPS instruction; with half each the cold half filled first).
-    j->coldBase = (j->memSize / 12 * 5) & ~63u;
+    // Games differ (OoT: 2.5 times - its cold part filled with the hot part at
+    // 7.5 of 13 MB, a flush every few minutes), so after a full cache the split
+    // follows what that game used (hotPermille, set where the cache filled).
+    j->coldBase = (j->hotPermille ? j->memSize / 1000 * j->hotPermille : j->memSize / 12 * 5) & ~63u;
     j->coldUsed = j->coldBase;
     h64_jit_emit_runtime(sys);   // sets memUsed past the shared code
     j->curInvalidated = 1;

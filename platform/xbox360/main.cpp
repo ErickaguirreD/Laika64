@@ -187,6 +187,35 @@ static void file_sink(int level, const char *line)
     if (level <= H64_LOG_WARN || !s_logThread) LogFlush();
 }
 
+// The console's drives under names the folder picker (Settings > Paths) can
+// open, as dashboards name them: the hard disk's data partition, the USB
+// drives, the disc. A drive that is not there is skipped (its link answers nothing).
+extern "C" LONG __stdcall ObCreateSymbolicLink(void *link, void *device);
+struct KString { USHORT Length, MaximumLength; char *Buffer; };
+
+static void MountDrives(void)
+{
+    static const char *const map[][2] = {
+        { "Hdd1:", "\\Device\\Harddisk0\\Partition1" }, { "Usb0:", "\\Device\\Mass0" }, { "Usb1:", "\\Device\\Mass1" },
+        { "Usb2:", "\\Device\\Mass2" }, { "Dvd:", "\\Device\\Cdrom0" },
+    };
+    int i;
+    for (i = 0; i < (int)(sizeof(map) / sizeof(map[0])); i++)
+    {
+        char link[32], dev[64];
+        KString l, d;
+        LONG st;
+        _snprintf(link, sizeof(link) - 1, "\\??\\%s", map[i][0]);
+        link[sizeof(link) - 1] = 0;
+        strncpy(dev, map[i][1], sizeof(dev) - 1);
+        dev[sizeof(dev) - 1] = 0;
+        l.Buffer = link; l.Length = (USHORT)strlen(link); l.MaximumLength = l.Length + 1;
+        d.Buffer = dev; d.Length = (USHORT)strlen(dev); d.MaximumLength = d.Length + 1;
+        st = ObCreateSymbolicLink(&l, &d);
+        H64_INFO("[main] %s -> %s: %s", map[i][0], map[i][1], st >= 0 ? "mounted" : "not there");
+    }
+}
+
 // ---- Configuration: xb_config.cpp ----
 
 static void LoadConfig(Config *c)
@@ -732,6 +761,7 @@ static void ApplyGraphics(H64System *sys, H64Renderer *renderer, const Config *c
     o.blur = c->blur;
     o.screen = c->screen;
     o.brightness = c->brightness;
+    o.colorStyle = c->colorStyle;
     o.vsync = c->vsync;
     o.deflicker = c->deflicker;
     o.zoom = c->zoom;
@@ -885,17 +915,19 @@ static void HiresOpen(H64System *sys, H64Renderer *renderer, const Config *c)
 // One folder per game: <drive>:\saves\<name> <game code>\ with eeprom.bin,
 // sram.bin, flash.bin and pak1.bin (the drive of the log: game:, or cache:
 // in Xenia). Written 2 s after the game first changes them, and on leaving.
-static char s_saveDir[128];
+static char s_saveDir[192];
+static char s_savesRoot[128];   // Settings > Paths > Saves (RunGame: ConfigPath)
+static char s_shotsRoot[128];   // Settings > Paths > Screenshots
 static u32 s_saveDirtyAt;
 
 static void SavesOpen(H64System *sys)
 {
     char folder[64];
     h64_save_folder_name(&sys->rom, folder, sizeof(folder));
-    _snprintf(s_saveDir, sizeof(s_saveDir), "%s:\\saves", s_logDrive);
-    s_saveDir[sizeof(s_saveDir) - 1] = 0;
+    if (!s_savesRoot[0]) _snprintf(s_savesRoot, sizeof(s_savesRoot) - 1, "%s:\\saves", s_logDrive);
+    strcpy(s_saveDir, s_savesRoot);
     CreateDirectory(s_saveDir, NULL);
-    _snprintf(s_saveDir, sizeof(s_saveDir), "%s:\\saves\\%s", s_logDrive, folder);
+    _snprintf(s_saveDir, sizeof(s_saveDir), "%s\\%s", s_savesRoot, folder);
     s_saveDir[sizeof(s_saveDir) - 2] = 0;
     CreateDirectory(s_saveDir, NULL);
     strcat(s_saveDir, "\\");
@@ -939,6 +971,12 @@ static void OsdT(int id, int num)
 // The States page's picture of the slot shown (state<N>.thm, see SaveStateThumb):
 // loaded by the overlay, on the menu's thread, when the slot changes.
 static int s_statesOpen;            // the States page is up
+static int s_pauseMain;             // the pause menu's own page is up (its "Now playing" under the rows)
+static char s_romNow[256];          // the game running (its "Now playing")
+static char s_npTitle[160];         // its name ...
+static u8 *s_npRgba;                // ... its picture, loaded as the menu opens, made a texture by the overlay
+static int s_npW, s_npH, s_npBox;
+static IDirect3DTexture9 *s_npTex;
 static IDirect3DTexture9 *s_stateThumb;
 static int s_stateThumbSlot = -1;   // the slot s_stateThumb is of (-1: load again)
 
@@ -1010,6 +1048,16 @@ static void OverlayHook(void *, IDirect3DDevice9 *dev)
     else if (s_menuOpen)
     {
         UiMenuDraw(&s_menu);
+        if (s_pauseMain && !s_confirmOpen)
+        {
+            if (s_npRgba && !s_npTex)
+            {
+                s_npTex = UiImageCreate(dev, s_npRgba, s_npW, s_npH);   // on the menu's thread (the device is its own then)
+                free(s_npRgba);
+                s_npRgba = NULL;
+            }
+            UiMenuNowPlaying(&s_menu, s_npTex, s_npW, s_npH, s_npTitle, s_npBox);
+        }
         if (s_statesOpen)
         {
             char empty[160];
@@ -1173,6 +1221,11 @@ static int GameMenu(H64System *sys, H64Renderer *renderer, Config *c)
     hiTexFileApplied[sizeof(hiTexFileApplied) - 1] = 0;
     if (s_gfxQ.thread) WorkWaitAll(NULL);   // the device is this thread's while the menu shows
     BuildGameMenu();
+    if (!s_npTitle[0] && s_romNow[0])
+    {
+        // "Now playing": the game's name and picture, once per game (the texture stays until it ends).
+        NowPlayingLoad(s_romNow, s_npTitle, sizeof(s_npTitle), &s_npRgba, &s_npW, &s_npH, &s_npBox);
+    }
     UiInputInit(&in);
     s_menuOpen = 1;
     xb_audio_ui_sound(XB_SFX_OPEN);   // the pause menu opens (Settings > Sound > Interface sounds)
@@ -1293,10 +1346,12 @@ static int GameMenu(H64System *sys, H64Renderer *renderer, Config *c)
             }
         }
         s_statesOpen = states;   // the overlay shows the slot's picture under the rows
+        s_pauseMain = !states && !settings && !s_aboutOpen && !s_hiresPreviewOpen;   // ... or the game's, on the main page
         h64_xenos_present(renderer);   // the frozen frame, the menu (overlay) on top
         Sleep(16);
     }
     s_statesOpen = 0;
+    s_pauseMain = 0;
     s_menuOpen = 0;
     s_aboutOpen = 0;
     s_hiresPreviewOpen = 0;
@@ -1346,8 +1401,9 @@ static int GameMenuSafe(H64System *sys, H64Renderer *renderer, Config *c)
 // (made the first time, like xb_art.cpp's art\ folder).
 static void TakeManualScreenshot(H64System *sys, H64Renderer *renderer)
 {
-    char dir[32], path[64];
-    _snprintf(dir, sizeof(dir) - 1, "%s:\\screenshots", s_logDrive);
+    char dir[128], path[160];
+    if (s_shotsRoot[0]) strcpy(dir, s_shotsRoot);   // Settings > Paths > Screenshots
+    else _snprintf(dir, sizeof(dir) - 1, "%s:\\screenshots", s_logDrive);
     dir[sizeof(dir) - 1] = 0;
     CreateDirectoryA(dir, NULL);
     _snprintf(path, sizeof(path) - 1, "%s\\shot_%08u.bmp", dir, GetTickCount());
@@ -1386,6 +1442,9 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
     s_showFps = c->perfItems;
     s_perfF = c->perfFahrenheit;
     s_perfTemps = !c->xenia;
+    strncpy(s_savesRoot, ConfigPath(c, CONFIG_PATH_SAVES, s_logDrive), sizeof(s_savesRoot) - 1);
+    strncpy(s_shotsRoot, ConfigPath(c, CONFIG_PATH_SHOTS, s_logDrive), sizeof(s_shotsRoot) - 1);
+    HiresSetFolder(ConfigPath(c, CONFIG_PATH_TEXTURES, s_logDrive));   // the texture packs (also for a game started without the ROM list)
     PerfStyleApply(c);
     s_fpsText[0] = 0;
     if (romPath)
@@ -1400,6 +1459,9 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
     }
     data = RomFileLoad(rom, &size);
     if (!data) { MessageScreen(dev, Tr(T_CANNOT_READ), rom, D3DCOLOR_XRGB(240, 60, 60)); return RG_BROWSER; }
+    strncpy(s_romNow, rom, sizeof(s_romNow) - 1);   // the pause menu's "Now playing" (read when it first opens)
+    s_romNow[sizeof(s_romNow) - 1] = 0;
+    s_npTitle[0] = 0;
     sys = MakeSystem(data, size, jit);
     free(data);
     if (!sys) { MessageScreen(dev, Tr(T_NOT_N64), rom, D3DCOLOR_XRGB(240, 60, 60)); return RG_BROWSER; }
@@ -1431,6 +1493,7 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
     xb_audio_set_target_ms(c->audioMs);
     xb_audio_ui_enable(c->uiSounds);   // the pause menu's button sounds (also for a game started without the ROM list)
     xb_audio_ui_style(c->uiSoundStyle);
+    UiSetFont(c->uiFont);   // the menus' letters, also for a game started without the ROM list
     H64_INFO("[main] audio queue target %d ms", xb_audio_target_ms());
     if (xb_audio_init() == 0)
     {
@@ -1722,17 +1785,17 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
                 u32 vh = (((vs & 0x3FF) - ((vs >> 16) & 0x3FF)) / 2) * ys / 1024;
                 double load = busyTicks * 100000.0 / (double)freq.QuadPart / (nowMs - fpsStart);
                 s_fpsText[0] = 0;
-                if (s_showFps & CONFIG_PERF_FPS) PerfAdd("%.1f FPS", fpsFrames * 1000.0 / (nowMs - fpsStart));
-                if (s_showFps & CONFIG_PERF_CPU) PerfAdd("CPU %d%%", (int)(load > 100.0 ? 100.0 : load));
+                if (s_showFps & CONFIG_PERF_FPS) PerfAdd("\x01" "%.1f FPS", fpsFrames * 1000.0 / (nowMs - fpsStart));
+                if (s_showFps & CONFIG_PERF_CPU) PerfAdd("\x02" "CPU %d%%", (int)(load > 100.0 ? 100.0 : load));
                 if (s_showFps & CONFIG_PERF_RAM)
                 {
                     GlobalMemoryStatus(&ms);
-                    PerfAdd("RAM %u / %u MB", (u32)((ms.dwTotalPhys - ms.dwAvailPhys) >> 20), (u32)(ms.dwTotalPhys >> 20));
+                    PerfAdd("\x03" "RAM %u / %u MB", (u32)((ms.dwTotalPhys - ms.dwAvailPhys) >> 20), (u32)(ms.dwTotalPhys >> 20));
                 }
                 if (s_showFps & CONFIG_PERF_RES)
                 {
                     h64_xenos_internal_size(renderer, &rw, &rh);
-                    PerfAdd("%ux%u (N64 %ux%u)", rw, rh, vw, vh);
+                    PerfAdd("\x04" "%ux%u (N64 %ux%u)", rw, rh, vw, vh);
                 }
                 if (s_showFps & CONFIG_PERF_GPU)
                 {
@@ -1742,7 +1805,7 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
                     // H64_PROF_GFX_HLE (graphics tasks, rendering included)
                     // instead of the main thread's run+present time.
                     double gfxLoad = (double)(sys->prof[H64_PROF_GFX_HLE] - gfxProfAt) * 100000.0 / (double)freq.QuadPart / (nowMs - fpsStart);
-                    PerfAdd("GPU %d%%", (int)(gfxLoad > 100.0 ? 100.0 : gfxLoad));
+                    PerfAdd("\x05" "GPU %d%%", (int)(gfxLoad > 100.0 ? 100.0 : gfxLoad));
                 }
                 if (s_showFps & (CONFIG_PERF_TCPU | CONFIG_PERF_TGPU | CONFIG_PERF_TRAM))
                 {
@@ -1753,7 +1816,12 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
                     if (UiTemperatures(s_perfTemps, &t[0], &t[1], &t[2]))
                         for (k = 0; k < 3; k++)
                             if (s_showFps & bits[k])
-                                PerfAdd("%s %d\xC2\xB0%c", names[k], (int)(s_perfF ? t[k] * 9.0f / 5.0f + 32.0f + 0.5f : t[k] + 0.5f), s_perfF ? 'F' : 'C');
+                            {
+                                // The thermometer by how warm it is: normal under 70 C, high to 75, hot above.
+                                int icon = t[k] > 75.0f ? UI_PERF_ICON_TEMP_HOT : t[k] >= 70.0f ? UI_PERF_ICON_TEMP_WARN : UI_PERF_ICON_TEMP_OK;
+                                PerfAdd("%c%s %d\xC2\xB0%c", icon, names[k], (int)(s_perfF ? t[k] * 9.0f / 5.0f + 32.0f + 0.5f : t[k] + 0.5f),
+                                        s_perfF ? 'F' : 'C');
+                            }
                 }
             }
             busyTicks = 0;
@@ -1947,6 +2015,10 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
     LogFlush();
     if (s_stateThumb) { UiImageRelease(dev, s_stateThumb); s_stateThumb = NULL; }
     s_stateThumbSlot = -1;   // another game, other pictures
+    if (s_npTex) { UiImageRelease(dev, s_npTex); s_npTex = NULL; }
+    free(s_npRgba);
+    s_npRgba = NULL;
+    s_npTitle[0] = 0;
     sys->renderer = NULL;
     h64_xenos_free(renderer);
     xb_audio_game_stop();
@@ -1988,6 +2060,7 @@ int __cdecl main()
     H64_INFO("[main] LAIKA 64 V2 %s (Xbox 360), %s-endian, %d-bit pointers", H64_VERSION_STRING,
              H64_HOST_BIG_ENDIAN ? "big" : "little", (int)(sizeof(void *) * 8));
     LoadConfig(&cfg);
+    if (!cfg.xenia) MountDrives();   // Hdd1:, Usb0: ... for Settings > Paths (and paths chosen on them)
     UiSetSkinWant(cfg.skinName);   // set early: UiBrand/UiBackdrop lazily load it on first use (even the language screen)
     xb_audio_set_game_volume(cfg.volumeGame);     // remembered even before the engine exists - applied to each voice as it's created
     xb_audio_set_music_volume(cfg.volumeMusic);
@@ -2075,14 +2148,34 @@ int __cdecl main()
             char path[256], folder[64];
             CreateDirectoryA(dir, NULL);
             strcpy(s_settingsPath, menuFile);
-            ChooseLanguage(dev, &cfg, s_settingsPath, !checks);
+            {
+                // The first start (no language chosen yet): the welcome and its set-up, written to the
+                // menu's settings (System > Setup assistant opens it again); else the language as chosen.
+                static Config menu;
+                int first;
+                menu = cfg;
+                ConfigParseFile(&menu, s_settingsPath);
+                first = LangFromCode(menu.lang) < 0;
+                if (!checks && !cfg.uiLang[0] && first)
+                {
+                    xb_audio_init();   // its button sounds
+                    SettingsSetLangFile(s_settingsPath);
+                    WelcomeScreen(dev, &menu, 1);
+                    if (!ConfigWriteMenuKeys(&menu, s_settingsPath, 1)) H64_WARN("[main] cannot write %s", s_settingsPath);
+                }
+                else ChooseLanguage(dev, &cfg, s_settingsPath, !checks);
+            }
             SettingsSetLangFile(s_settingsPath);
             xb_audio_init();   // the engine must be up before the browser's music (game:\music\); a game's own call then does nothing
             for (;;)
             {
                 base = cfg;
                 ConfigParseFile(&base, s_settingsPath);
-                if (!RomBrowser(dev, &base, s_settingsPath, path, sizeof(path))) break;
+                {
+                    int rb = RomBrowser(dev, &base, s_settingsPath, path, sizeof(path));
+                    if (rb == 2) continue;   // Settings > Paths: another ROMs folder, the list made again
+                    if (!rb) break;
+                }
                 if (cfg.autoStart > 0) { cfg.autoStart--; cfg.autoIndex++; }
                 game = base;
                 s_profilePath[0] = 0;

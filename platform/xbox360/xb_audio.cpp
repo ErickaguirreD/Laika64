@@ -32,9 +32,15 @@
 #define SLOT_BYTES 16384
 static int s_targetMs = XB_AUDIO_DEFAULT_MS;   // fill the rate control aims for (the pacing threshold)
 #define TARGET_MS s_targetMs
-#define START_MS (s_targetMs * 3 / 5)          // queued before (re)starting playback
-#define RATE_GAIN 0.10f                    // rate change at an empty queue
-#define RATE_MIN 0.90f
+// Queued before (re)starting playback: the whole target. Starting at 3/5 of it left
+// the rate control to make up the rest by playing slower - 3.6 % at a game's start
+// (OoT, Smash Remix: the narrator's voice dragged for seconds).
+#define START_MS s_targetMs
+// Rate change at an empty queue. The emulation's pacing (main.cpp) already refills
+// the queue by running up to 1 % faster; at 0.10 a dip after a slow frame (a JIT
+// flush) pulled the pitch down 1.3 % and the sound behind the picture.
+#define RATE_GAIN 0.03f
+#define RATE_MIN 0.97f
 #define RATE_MAX 1.02f
 #define RATE_SMOOTH 0.05f                  // per submit, to avoid audible wobble
 
@@ -51,7 +57,7 @@ static int s_playing;
 static float s_ratio, s_ratioApplied;
 static u64 s_periodFrames;   // frames submitted since the last stats reset
 static float s_gameVolume = 1.0f;   // Settings > Volumen - reapplied to each new game voice (create_voice)
-static float s_musicVolume = 1.0f;  // reapplied to each new music voice (music_play_file)
+static float s_musicVolume = 1.0f;  // reapplied to each new music voice (music_open)
 static float s_sfxVolume = 1.0f;    // the interface sounds (xb_audio_ui_sound)
 static int s_mono;                  // Settings > Sound > Audio output: mono
 
@@ -269,7 +275,6 @@ int xb_audio_target_ms(void) { return s_targetMs; }
 // multi-byte field is read one byte at a time (never through a pointer cast).
 #define MUSIC_MAX_TRACKS 64
 static IXAudio2SourceVoice *s_musicVoice;
-static u8 *s_musicData;         // the whole track, kept alive while the voice reads from it
 static char s_musicFolder[96];  // the folder playing now ("": none)
 static char s_musicTracks[MUSIC_MAX_TRACKS][96];   // its tracks' file names, sorted
 static int s_musicCount, s_musicIndex, s_musicMode;
@@ -311,172 +316,7 @@ static int wav_parse(const u8 *buf, u32 size, WavInfo *out)
     return haveFmt && haveData ? 0 : -1;
 }
 
-static void music_voice_stop(void)
-{
-    if (s_musicVoice)
-    {
-        s_musicVoice->Stop(0);
-        s_musicVoice->FlushSourceBuffers();
-        s_musicVoice->DestroyVoice();
-        s_musicVoice = NULL;
-    }
-    free(s_musicData);
-    s_musicData = NULL;
-}
-
-static void music_stop_internal(void)
-{
-    music_voice_stop();
-    s_musicFolder[0] = 0;
-    s_musicCount = 0;
-}
-
-void xb_audio_music_stop(void) { music_stop_internal(); }
-
-static int ends_with(const char *s, const char *ext)
-{
-    size_t n = strlen(s), e = strlen(ext);
-    return n > e && !_stricmp(s + n - e, ext);
-}
-
-// One track (.wav, or .mp3 through minimp3 - see the include above) on a
-// fresh voice: decoded into s_musicData as plain PCM16 ready for XAudio2, at
-// (pcmData, pcmBytes), rate and channels. `loop`: round and round (a folder
-// of one track); otherwise it plays once and xb_audio_music_tick moves on.
-static int music_play_file(const char *path, int loop)
-{
-    FILE *f;
-    long size;
-    u8 *fileData;
-    int isMp3 = ends_with(path, ".mp3");
-    WAVEFORMATEX wf;
-    XAUDIO2_BUFFER b;
-    const void *pcmData;
-    u32 pcmBytes, rate;
-    int channels;
-
-    if (!s_xa || !s_master) return -1;
-    f = fopen(path, "rb");
-    if (!f) return -1;
-    fseek(f, 0, SEEK_END);
-    size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (size <= 0 || size > 32 * 1024 * 1024) { fclose(f); return -1; }
-    fileData = (u8 *)malloc((size_t)size);
-    if (!fileData || fread(fileData, 1, (size_t)size, f) != (size_t)size)
-    {
-        fclose(f);
-        free(fileData);
-        return -1;
-    }
-    fclose(f);
-    music_voice_stop();   // the new file read fine - now drop whatever was playing
-
-    if (isMp3)
-    {
-        mp3dec_t dec;
-        mp3dec_file_info_t info;
-        mp3dec_init(&dec);
-        memset(&info, 0, sizeof(info));
-        // Unlike a .wav's data chunk, minimp3 writes samples through plain
-        // C int16_t stores: on this big-endian host they come out already
-        // in XAudio2's native byte order - no swap needed, unlike the WAV path.
-        if (mp3dec_load_buf(&dec, fileData, (size_t)size, &info, NULL, NULL) || !info.buffer || !info.samples ||
-            (info.channels != 1 && info.channels != 2))
-        {
-            H64_WARN("[audio] music %s: MP3 decode failed", path);
-            free(fileData);
-            free(info.buffer);
-            return -1;
-        }
-        free(fileData);
-        s_musicData = (u8 *)info.buffer;
-        pcmData = s_musicData;
-        pcmBytes = (u32)(info.samples * sizeof(mp3d_sample_t));
-        rate = (u32)info.hz;
-        channels = info.channels;
-    }
-    else
-    {
-        WavInfo wav;
-        if (wav_parse(fileData, (u32)size, &wav) || wav.format != 1 /* PCM */ || wav.bits != 16 ||
-            (wav.channels != 1 && wav.channels != 2))
-        {
-            H64_WARN("[audio] music %s: not a supported WAV (PCM 16-bit mono/stereo)", path);
-            free(fileData);
-            return -1;
-        }
-        // A .wav's data chunk is always little-endian (the RIFF format
-        // itself, whatever machine wrote it) - but this console's XAudio2
-        // wants PCM in its own native byte order, big-endian, exactly like
-        // the N64's AI buffers that xb_audio_sink passes through unmodified
-        // (see the top of xb_audio.h). Every 16-bit sample needs swapping
-        // once, here, or the voice plays noise instead of the tone.
-        {
-            u8 *s = fileData + wav.dataOffset, *end = s + (wav.dataSize & ~1u);
-            for (; s < end; s += 2)
-            {
-                u8 t = s[0];
-                s[0] = s[1];
-                s[1] = t;
-            }
-        }
-        s_musicData = fileData;
-        pcmData = s_musicData + wav.dataOffset;
-        pcmBytes = wav.dataSize;
-        rate = wav.rate;
-        channels = wav.channels;
-    }
-
-    memset(&wf, 0, sizeof(wf));
-    wf.wFormatTag = WAVE_FORMAT_PCM;
-    wf.nChannels = (WORD)channels;
-    wf.nSamplesPerSec = rate;
-    wf.wBitsPerSample = 16;
-    wf.nBlockAlign = (WORD)(channels * 2);
-    wf.nAvgBytesPerSec = rate * wf.nBlockAlign;
-    if (FAILED(s_xa->CreateSourceVoice(&s_musicVoice, &wf, 0, XAUDIO2_DEFAULT_FREQ_RATIO, NULL, NULL, NULL)))
-    {
-        H64_ERROR("[audio] music %s: CreateSourceVoice failed", path);
-        free(s_musicData);
-        s_musicData = NULL;
-        s_musicVoice = NULL;
-        return -1;
-    }
-    s_musicVoice->SetVolume(s_musicVolume);
-    apply_output_matrix(s_musicVoice, channels);
-    memset(&b, 0, sizeof(b));
-    b.AudioBytes = pcmBytes;
-    b.pAudioData = (const BYTE *)pcmData;
-    if (loop) b.LoopCount = XAUDIO2_LOOP_INFINITE;   // LoopBegin/LoopLength left 0: loops the whole buffer
-    else b.Flags = XAUDIO2_END_OF_STREAM;
-    s_musicVoice->SubmitSourceBuffer(&b, NULL);
-    s_musicVoice->Start(0, XAUDIO2_COMMIT_NOW);
-    H64_INFO("[audio] music: %s (%u Hz, %d ch)", path, rate, channels);
-    return 0;
-}
-
-// The next track that plays (past any that cannot be played): the following
-// one in name order, a different one at random, or the chosen one again.
-static void music_next(void)
-{
-    int tries;
-    for (tries = 0; tries < s_musicCount; tries++)
-    {
-        char path[200];
-        if (s_musicMode == XB_MUSIC_RANDOM && s_musicCount > 1)
-        {
-            int k = rand() % (s_musicCount - 1);
-            s_musicIndex = s_musicIndex < 0 || k < s_musicIndex ? k : k + 1;   // never the same one twice in a row
-        }
-        else if (s_musicMode != XB_MUSIC_TRACK || s_musicIndex < 0) s_musicIndex = (s_musicIndex + 1) % s_musicCount;
-        _snprintf(path, sizeof(path) - 1, "%s\\%s", s_musicFolder, s_musicTracks[s_musicIndex]);
-        path[sizeof(path) - 1] = 0;
-        if (!music_play_file(path, s_musicCount == 1 || s_musicMode == XB_MUSIC_TRACK)) return;
-        if (s_musicMode == XB_MUSIC_TRACK) s_musicMode = XB_MUSIC_ORDER;   // the chosen one does not play: the others instead
-    }
-    music_voice_stop();   // none of them plays
-}
+static int ends_with(const char *s, const char *ext);   // below
 
 static int track_cmp(const void *a, const void *b) { return _stricmp((const char *)a, (const char *)b); }
 
@@ -508,16 +348,297 @@ int xb_audio_music_scan(const char *folder)
 
 const char *xb_audio_music_track(int i) { return i >= 0 && i < s_musicCount ? s_musicTracks[i] : ""; }
 
+// ---- Streaming ----
+// A track is played as it is decoded, a few short buffers ahead, on a thread
+// of its own: reading a file and decoding a whole MP3 at once (40 MB of PCM
+// for four minutes) held the menus for seconds at each change of track. The
+// file's bytes stay in memory (a few MB of MP3), the PCM goes through a ring
+// of MUS_BUFS buffers; the next track follows with no gap when its format
+// is the same (else its own voice). s_musLock guards the voice and the
+// track list against the menus' thread (start, stop, volume, mono).
+#define MUS_BUFS 6
+#define MUS_FRAMES 8192   // per buffer (per channel): ~0.19 s at 44.1 kHz
+static CRITICAL_SECTION s_musLock;
+static int s_musLockReady;
+static HANDLE s_musThread;
+static volatile LONG s_musQuit;
+static s16 *s_musBuf[MUS_BUFS];
+static int s_musBufNext;
+static u8 *s_musFile;           // the track playing: its file's bytes
+static long s_musSize, s_musPos;  // and how far it is decoded (MP3: bytes; WAV: into its data)
+static int s_musIsMp3, s_musLoop, s_musCh;
+static u32 s_musRate, s_musDataStart, s_musDataEnd;
+static mp3dec_t s_musDec;
+
+static void music_lock(void)
+{
+    if (!s_musLockReady) { InitializeCriticalSection(&s_musLock); s_musLockReady = 1; }
+    EnterCriticalSection(&s_musLock);
+}
+
+static void music_unlock(void) { LeaveCriticalSection(&s_musLock); }
+
+static void music_voice_stop(void)
+{
+    if (s_musicVoice)
+    {
+        s_musicVoice->Stop(0);
+        s_musicVoice->FlushSourceBuffers();
+        s_musicVoice->DestroyVoice();
+        s_musicVoice = NULL;
+    }
+    free(s_musFile);
+    s_musFile = NULL;
+}
+
+static void music_thread_stop(void)
+{
+    if (s_musThread)
+    {
+        InterlockedExchange(&s_musQuit, 1);
+        WaitForSingleObject(s_musThread, INFINITE);
+        CloseHandle(s_musThread);
+        s_musThread = NULL;
+    }
+}
+
+static void music_stop_internal(void)
+{
+    music_thread_stop();
+    music_lock();
+    music_voice_stop();
+    s_musicFolder[0] = 0;
+    s_musicCount = 0;
+    music_unlock();
+}
+
+void xb_audio_music_stop(void) { music_stop_internal(); }
+
+static int ends_with(const char *s, const char *ext)
+{
+    size_t n = strlen(s), e = strlen(ext);
+    return n > e && !_stricmp(s + n - e, ext);
+}
+
+// The track's file read in and its format found (decoding starts at its beginning). 0 when it plays.
+static int music_open(const char *path, int loop)
+{
+    FILE *f;
+    long size;
+    u8 *data;
+    int mp3 = ends_with(path, ".mp3"), ch;
+    u32 rate, start = 0, end = 0;
+    f = fopen(path, "rb");
+    if (!f) return -1;
+    fseek(f, 0, SEEK_END);
+    size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (size <= 0 || size > 64 * 1024 * 1024) { fclose(f); return -1; }
+    data = (u8 *)malloc((size_t)size);
+    if (!data || fread(data, 1, (size_t)size, f) != (size_t)size)
+    {
+        fclose(f);
+        free(data);
+        return -1;
+    }
+    fclose(f);
+    if (mp3)
+    {
+        // The first frame gives the format (the rest are decoded as they are wanted).
+        mp3dec_frame_info_t info;
+        mp3d_sample_t pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
+        long pos = 0;
+        mp3dec_init(&s_musDec);
+        memset(&info, 0, sizeof(info));
+        while (pos < size)
+        {
+            int n = mp3dec_decode_frame(&s_musDec, data + pos, (int)(size - pos), pcm, &info);
+            if (!info.frame_bytes) break;
+            if (n > 0) break;
+            pos += info.frame_bytes;   // ID3 tags and the like
+        }
+        if (!info.frame_bytes || (info.channels != 1 && info.channels != 2) || !info.hz)
+        {
+            H64_WARN("[audio] music %s: MP3 decode failed", path);
+            free(data);
+            return -1;
+        }
+        mp3dec_init(&s_musDec);
+        rate = (u32)info.hz;
+        ch = info.channels;
+        start = 0;
+    }
+    else
+    {
+        WavInfo wav;
+        if (wav_parse(data, (u32)size, &wav) || wav.format != 1 /* PCM */ || wav.bits != 16 || (wav.channels != 1 && wav.channels != 2))
+        {
+            H64_WARN("[audio] music %s: not a supported WAV (PCM 16-bit mono/stereo)", path);
+            free(data);
+            return -1;
+        }
+        rate = wav.rate;
+        ch = wav.channels;
+        start = wav.dataOffset;
+        end = wav.dataOffset + (wav.dataSize & ~1u);
+    }
+    if (s_musicVoice && (rate != s_musRate || ch != s_musCh))
+    {
+        // Another format: the next one on a voice of its own, once this one has played out.
+        XAUDIO2_VOICE_STATE st;
+        for (;;)
+        {
+            s_musicVoice->GetState(&st);
+            if (!st.BuffersQueued || s_musQuit) break;
+            music_unlock();
+            Sleep(10);
+            music_lock();
+        }
+        s_musicVoice->DestroyVoice();
+        s_musicVoice = NULL;
+    }
+    free(s_musFile);
+    s_musFile = data;
+    s_musSize = size;
+    s_musPos = start;
+    s_musDataStart = start;
+    s_musDataEnd = end;
+    s_musIsMp3 = mp3;
+    s_musLoop = loop;
+    s_musRate = rate;
+    s_musCh = ch;
+    if (!s_musicVoice)
+    {
+        WAVEFORMATEX wf;
+        memset(&wf, 0, sizeof(wf));
+        wf.wFormatTag = WAVE_FORMAT_PCM;
+        wf.nChannels = (WORD)ch;
+        wf.nSamplesPerSec = rate;
+        wf.wBitsPerSample = 16;
+        wf.nBlockAlign = (WORD)(ch * 2);
+        wf.nAvgBytesPerSec = rate * wf.nBlockAlign;
+        if (FAILED(s_xa->CreateSourceVoice(&s_musicVoice, &wf, 0, XAUDIO2_DEFAULT_FREQ_RATIO, NULL, NULL, NULL)))
+        {
+            H64_ERROR("[audio] music %s: CreateSourceVoice failed", path);
+            s_musicVoice = NULL;
+            return -1;
+        }
+        s_musicVoice->SetVolume(s_musicVolume);
+        apply_output_matrix(s_musicVoice, ch);
+        s_musicVoice->Start(0, XAUDIO2_COMMIT_NOW);
+    }
+    H64_INFO("[audio] music: %s (%u Hz, %d ch)", path, rate, ch);
+    return 0;
+}
+
+// The next track that plays (past any that cannot be played): the following
+// one in name order, a different one at random, or the chosen one again.
+static int music_next(void)
+{
+    int tries;
+    for (tries = 0; tries < s_musicCount; tries++)
+    {
+        char path[200];
+        if (s_musicMode == XB_MUSIC_RANDOM && s_musicCount > 1)
+        {
+            int k = rand() % (s_musicCount - 1);
+            s_musicIndex = s_musicIndex < 0 || k < s_musicIndex ? k : k + 1;   // never the same one twice in a row
+        }
+        else if (s_musicMode != XB_MUSIC_TRACK || s_musicIndex < 0) s_musicIndex = (s_musicIndex + 1) % s_musicCount;
+        _snprintf(path, sizeof(path) - 1, "%s\\%s", s_musicFolder, s_musicTracks[s_musicIndex]);
+        path[sizeof(path) - 1] = 0;
+        if (!music_open(path, s_musicCount == 1 || s_musicMode == XB_MUSIC_TRACK)) return 0;
+        if (s_musicMode == XB_MUSIC_TRACK) s_musicMode = XB_MUSIC_ORDER;   // the chosen one does not play: the others instead
+    }
+    return -1;   // none of them plays
+}
+
+// One buffer of the track's PCM (frames per channel; 0 at its end).
+static int music_decode(s16 *out)
+{
+    int frames = 0;
+    if (s_musIsMp3)
+    {
+        while (frames + MINIMP3_MAX_SAMPLES_PER_FRAME / 2 <= MUS_FRAMES && s_musPos < s_musSize)
+        {
+            mp3dec_frame_info_t info;
+            // minimp3 writes plain C int16_t: already in XAudio2's (big-endian) byte order here.
+            int n = mp3dec_decode_frame(&s_musDec, s_musFile + s_musPos, (int)(s_musSize - s_musPos), out + frames * s_musCh, &info);
+            if (!info.frame_bytes) { s_musPos = s_musSize; break; }
+            s_musPos += info.frame_bytes;
+            if (n > 0 && info.channels == s_musCh) frames += n;
+        }
+    }
+    else
+    {
+        // A .wav's data is little-endian (RIFF): each sample swapped to the console's order.
+        u32 bytes = (u32)MUS_FRAMES * s_musCh * 2, left = s_musDataEnd > (u32)s_musPos ? s_musDataEnd - (u32)s_musPos : 0, i;
+        const u8 *s = s_musFile + s_musPos;
+        u8 *d = (u8 *)out;
+        if (bytes > left) bytes = left;
+        for (i = 0; i + 1 < bytes; i += 2) { d[i] = s[i + 1]; d[i + 1] = s[i]; }
+        s_musPos += bytes;
+        frames = (int)(bytes / (s_musCh * 2));
+    }
+    return frames;
+}
+
+static DWORD WINAPI music_thread(LPVOID)
+{
+    while (!s_musQuit)
+    {
+        XAUDIO2_VOICE_STATE st;
+        music_lock();
+        if (s_musicVoice && s_musFile)
+        {
+            s_musicVoice->GetState(&st);
+            while (st.BuffersQueued < MUS_BUFS - 1 && !s_musQuit)
+            {
+                s16 *buf = s_musBuf[s_musBufNext];
+                int frames = music_decode(buf);
+                if (!frames)
+                {
+                    // The end of the track: again (one alone, or the one chosen), else the next one.
+                    if (s_musLoop)
+                    {
+                        s_musPos = (long)s_musDataStart;
+                        if (s_musIsMp3) mp3dec_init(&s_musDec);
+                    }
+                    else if (music_next() || !s_musicVoice) { music_voice_stop(); break; }
+                    if (!s_musicVoice) break;
+                    s_musicVoice->GetState(&st);
+                    continue;
+                }
+                {
+                    XAUDIO2_BUFFER b;
+                    memset(&b, 0, sizeof(b));
+                    b.AudioBytes = (UINT32)(frames * s_musCh * 2);
+                    b.pAudioData = (const BYTE *)buf;
+                    if (FAILED(s_musicVoice->SubmitSourceBuffer(&b, NULL))) break;
+                }
+                s_musBufNext = (s_musBufNext + 1) % MUS_BUFS;
+                s_musicVoice->GetState(&st);
+            }
+        }
+        music_unlock();
+        Sleep(15);
+    }
+    return 0;
+}
+
+int xb_audio_music_scan(const char *folder);   // below
+
 int xb_audio_music_start(const char *folder, int mode, const char *track)
 {
-    int i;
+    int i, ok;
     if (!track) track = "";
     if (!folder || !folder[0] || mode == XB_MUSIC_OFF) { music_stop_internal(); return 0; }
-    if (s_musicVoice && !strcmp(folder, s_musicFolder) && mode == s_musicMode && (mode != XB_MUSIC_TRACK || !_stricmp(track, s_musicPick)))
+    if (s_musicVoice && s_musThread && !strcmp(folder, s_musicFolder) && mode == s_musicMode && (mode != XB_MUSIC_TRACK || !_stricmp(track, s_musicPick)))
         return 0;   // already playing that
     if (!s_xa || !s_master) return -1;
     music_stop_internal();
     if (!xb_audio_music_scan(folder)) { H64_INFO("[audio] music: no .mp3/.wav in %s", folder); return -1; }
+    music_lock();
     strncpy(s_musicFolder, folder, sizeof(s_musicFolder) - 1);
     s_musicFolder[sizeof(s_musicFolder) - 1] = 0;
     strncpy(s_musicPick, track, sizeof(s_musicPick) - 1);
@@ -531,17 +652,18 @@ int xb_audio_music_start(const char *folder, int mode, const char *track)
         if (s_musicIndex < 0) s_musicMode = XB_MUSIC_ORDER;   // gone from the folder: in order instead
     }
     else if (mode == XB_MUSIC_RANDOM) srand(GetTickCount());
-    music_next();
-    return s_musicVoice ? 0 : -1;
+    for (i = 0; i < MUS_BUFS; i++)
+        if (!s_musBuf[i]) s_musBuf[i] = (s16 *)malloc(MUS_FRAMES * 2 * sizeof(s16));
+    ok = !music_next() && s_musicVoice;
+    music_unlock();
+    if (!ok) { music_stop_internal(); return -1; }
+    InterlockedExchange(&s_musQuit, 0);
+    s_musThread = CreateThread(NULL, 0, music_thread, NULL, 0, NULL);   // it decodes and queues from here on
+    if (!s_musThread) { music_stop_internal(); return -1; }
+    return 0;
 }
 
-void xb_audio_music_tick(void)
-{
-    XAUDIO2_VOICE_STATE st;
-    if (!s_musicVoice || s_musicCount < 2 || s_musicMode == XB_MUSIC_TRACK) return;
-    s_musicVoice->GetState(&st);
-    if (!st.BuffersQueued) music_next();   // the track ended
-}
+void xb_audio_music_tick(void) {}   // the music's own thread moves on from track to track now
 
 static float volume_from_percent(int percent)
 {
@@ -559,7 +681,9 @@ void xb_audio_set_game_volume(int percent)
 void xb_audio_set_music_volume(int percent)
 {
     s_musicVolume = volume_from_percent(percent);
+    music_lock();
     if (s_musicVoice) s_musicVoice->SetVolume(s_musicVolume);
+    music_unlock();
 }
 
 void xb_audio_set_sfx_volume(int percent) { s_sfxVolume = volume_from_percent(percent); }
@@ -569,11 +693,13 @@ void xb_audio_set_mono(int on)
     XAUDIO2_VOICE_DETAILS d;
     s_mono = on ? 1 : 0;
     apply_output_matrix(s_voice, 2);
+    music_lock();
     if (s_musicVoice)
     {
         s_musicVoice->GetVoiceDetails(&d);
         apply_output_matrix(s_musicVoice, (int)d.InputChannels);
     }
+    music_unlock();
 }
 
 // ---- Interface sounds ----
@@ -590,6 +716,10 @@ static s16 *s_sfx[XB_SFX_COUNT];
 static u32 s_sfxLen[XB_SFX_COUNT];
 static IXAudio2SourceVoice *s_sfxVoice[SFX_VOICES];
 static int s_sfxNext, s_sfxOn = 1, s_sfxStyle, s_sfxLastVoice = -1;
+static char s_sfxFolder[128];   // xb_audio_ui_folder
+static const char *const s_sfxFile[XB_SFX_COUNT] = { "move", "select", "back", "action", "page", "open", "tab", "value_up", "value_down",
+                                                     "fav_on", "fav_off", "launch", "save", "notify", "error", "saver" };
+
 static DWORD s_sfxLastAt;
 
 // Each style's pitch, length and loudness against the glass sounds'.
@@ -622,6 +752,61 @@ static void sfx_tone(float *buf, u32 len, float t0, float ms, float f0, float f1
         buf[start + i] += amp * env * w;
     }
 }
+
+// The user's own sound for `kind` (s_sfxFolder\<name>.wav): mixed down to mono, resampled to
+// SFX_RATE, at most 4 s, as the made-up ones are kept. 0 when there is none.
+static int sfx_load_file(int kind)
+{
+    char path[200];
+    FILE *f;
+    long size;
+    u8 *data;
+    WavInfo wav;
+    u32 frames, outLen, i;
+    s16 *out;
+    _snprintf(path, sizeof(path) - 1, "%s\\%s.wav", s_sfxFolder, s_sfxFile[kind]);
+    path[sizeof(path) - 1] = 0;
+    f = fopen(path, "rb");
+    if (!f) return 0;
+    fseek(f, 0, SEEK_END);
+    size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (size <= 44 || size > 4 * 1024 * 1024) { fclose(f); return 0; }
+    data = (u8 *)malloc((size_t)size);
+    if (!data || fread(data, 1, (size_t)size, f) != (size_t)size) { fclose(f); free(data); return 0; }
+    fclose(f);
+    if (wav_parse(data, (u32)size, &wav) || wav.format != 1 || (wav.bits != 16 && wav.bits != 8) || !wav.channels || !wav.rate)
+    {
+        H64_WARN("[audio] sound %s: not a PCM WAV", path);
+        free(data);
+        return 0;
+    }
+    frames = wav.dataSize / (wav.channels * (wav.bits / 8));
+    outLen = (u32)((double)frames * SFX_RATE / wav.rate);
+    if (outLen > SFX_RATE * 4) outLen = SFX_RATE * 4;
+    out = outLen ? (s16 *)malloc(outLen * sizeof(s16)) : NULL;
+    if (!out) { free(data); return 0; }
+    for (i = 0; i < outLen; i++)
+    {
+        // The nearest source frame (sounds this short need no better), its channels averaged.
+        u32 src = (u32)((double)i * wav.rate / SFX_RATE), c;
+        int sum = 0;
+        if (src >= frames) src = frames - 1;
+        for (c = 0; c < wav.channels; c++)
+        {
+            const u8 *p = data + wav.dataOffset + (src * wav.channels + c) * (wav.bits / 8);
+            sum += wav.bits == 16 ? (int)(s16)(p[0] | (p[1] << 8)) : ((int)p[0] - 128) << 8;   // little-endian (RIFF)
+        }
+        out[i] = (s16)(sum / (int)wav.channels);
+    }
+    free(data);
+    free(s_sfx[kind]);
+    s_sfx[kind] = out;
+    s_sfxLen[kind] = outLen;
+    H64_INFO("[audio] sound %s: %s", s_sfxFile[kind], path);
+    return 1;
+}
+
 
 static void sfx_make(void)
 {
@@ -721,6 +906,7 @@ static void sfx_make(void)
             }
         s_sfxLen[k] = s_sfx[k] ? len : 0;
         free(mix);
+        if (s_sfxFolder[0]) sfx_load_file(k);   // the user's own, when there is one
     }
 }
 
@@ -738,6 +924,23 @@ static void sfx_stop_internal(void)
 }
 
 void xb_audio_ui_enable(int on) { s_sfxOn = on ? 1 : 0; }
+
+void xb_audio_ui_folder(const char *folder)
+{
+    int k;
+    if (!folder) folder = "";
+    if (!strcmp(folder, s_sfxFolder)) return;
+    strncpy(s_sfxFolder, folder, sizeof(s_sfxFolder) - 1);
+    s_sfxFolder[sizeof(s_sfxFolder) - 1] = 0;
+    sfx_stop_internal();   // made again at the next sound, with the folder's files
+    for (k = 0; k < XB_SFX_COUNT; k++)
+    {
+        free(s_sfx[k]);
+        s_sfx[k] = NULL;
+        s_sfxLen[k] = 0;
+    }
+    s_sfxLastVoice = -1;
+}
 
 void xb_audio_ui_style(int style)
 {

@@ -77,6 +77,11 @@ void xb_audio_ui_sound_instead(int kind);
 void xb_audio_ui_enable(int on);
 // Every sound made again in another style (the next sound plays in it).
 void xb_audio_ui_style(int style);
+// A folder of the user's own sounds (Settings > Paths > Interface sounds): a
+// <name>.wav there (move, select, back, action, page, open, tab, value_up,
+// value_down, fav_on, fav_off, launch, save, notify, error, saver; PCM 8 or
+// 16-bit, mono or stereo, any rate) plays in place of the made-up one.
+void xb_audio_ui_folder(const char *folder);
 
 // ---- Volume (Settings > Volumen) ----
 // 0..100, applied at once to whichever voice is live and remembered for the

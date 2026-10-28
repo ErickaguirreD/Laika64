@@ -34,6 +34,24 @@ u64 h64_hts_checksum(const u8 *src, u32 width, u32 height, u32 size, u32 rowByte
 // True when the pack has a texture for `checksum` (index lookup only, no disk access).
 int h64_hts_has(const H64Hts *h, u64 checksum);
 
+// The key of the one colour-indexed texture whose texels have this checksum (the
+// lower 32 bits of a key), whatever its palette; 0 when none or several palettes.
+u64 h64_hts_by_texture(const H64Hts *h, u32 texelChecksum);
+
+// Background loading. h64_hts_request queues `checksum` for the worker threads to
+// read and unpack (nothing if it is queued, loaded or failed already).
+// h64_hts_ready: 2 loaded and taken before, 1 loaded, -1 the record cannot be read,
+// 0 not yet. h64_hts_take: the pixels of a loaded texture (`*out` valid until the
+// next take; one thread only), returning 2 if it was taken before, 1 for its first
+// time - only when firstOk, else 0 as if not loaded -, -1 failed, 0 not loaded.
+void h64_hts_request(H64Hts *h, u64 checksum);
+int h64_hts_ready(H64Hts *h, u64 checksum);
+int h64_hts_take(H64Hts *h, u64 checksum, int firstOk, const u32 **out, u32 *w, u32 *hgt);
+
+// The pixels last taken for the same texels under another palette (not `exclude`), if
+// still loaded: a stand-in while that palette's own texture loads. 1 found, 0 none.
+int h64_hts_take_alike(H64Hts *h, u32 texelChecksum, u64 exclude, const u32 **out, u32 *w, u32 *hgt);
+
 int h64_hts_find(H64Hts *h, u64 checksum, const u32 **out, u32 *w, u32 *hgt);
 
 // A checksum from the pack's index, for a one-off preview image (packs carry

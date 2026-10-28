@@ -14,6 +14,23 @@
 #include "xb_lang.h"
 #include "xb_logo.h"
 #include "xb_ui_atlas.h"
+#include "xb_ui_fonts.h"
+
+// stb_image (public domain / MIT, third_party/stb/): the wallpapers' JPEG, PNG
+// and BMP - D3DX's JPEG reader on the console turned down every photo tried.
+// CPU only, so the wallpapers' reading thread decodes with it too.
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_JPEG
+#define STBI_ONLY_PNG
+#define STBI_ONLY_BMP
+#define STBI_NO_STDIO
+#define STBI_NO_SIMD
+#define STBI_NO_LINEAR
+#define STBI_NO_HDR
+#define STBI_MAX_DIMENSIONS 8192
+#pragma warning(push, 1)
+#include "../../third_party/stb/stb_image.h"
+#pragma warning(pop)
 
 // ---- Device resources ----
 // One vertex: position (pixels, turned into clip space here), colour, t and p.
@@ -62,6 +79,15 @@ static const char s_uiPs[] =
 
 static IDirect3DDevice9 *s_dev;
 static IDirect3DTexture9 *s_atlas;
+// The font drawn (Settings > Interface > Font): 0 Inter (xb_ui_atlas.h), else
+// s_extraAtlas[n - 1] (xb_ui_fonts.h) - its glyphs, metrics, logo and texture.
+static int s_fontSet, s_fontWant;
+static const UiAtlasGlyph (*s_glyphTab)[UI_ATLAS_COUNT] = s_atlasGlyph;
+static const UiAtlasFont *s_fontTab = s_atlasFont;
+static const UiAtlasRect *s_logoTab = s_atlasLogo;
+static const unsigned char *s_rle = s_atlasRle;
+static unsigned s_rleSize = sizeof(s_atlasRle);
+static int s_atlasH = UI_ATLAS_H;
 static IDirect3DVertexShader9 *s_vs;
 static IDirect3DPixelShader9 *s_ps;
 static IDirect3DVertexDeclaration9 *s_decl;
@@ -93,15 +119,15 @@ static LPD3DXBUFFER compile(const char *src, const char *profile)
 static int make_atlas(IDirect3DDevice9 *dev)
 {
     D3DLOCKED_RECT lr;
-    const unsigned char *src = s_atlasRle, *end = s_atlasRle + sizeof(s_atlasRle);
+    const unsigned char *src = s_rle, *end = s_rle + s_rleSize;
     int x = 0, y = 0;
     u8 *row;
-    if (FAILED(dev->CreateTexture(UI_ATLAS_W, UI_ATLAS_H, 1, 0, D3DFMT_LIN_L8, D3DPOOL_DEFAULT, &s_atlas, NULL)) || !s_atlas)
+    if (FAILED(dev->CreateTexture(UI_ATLAS_W, s_atlasH, 1, 0, D3DFMT_LIN_L8, D3DPOOL_DEFAULT, &s_atlas, NULL)) || !s_atlas)
         return 0;
     if (FAILED(s_atlas->LockRect(0, &lr, NULL, 0))) return 0;
     row = (u8 *)lr.pBits;
     // Run-length decoding straight into the texture, row by row (the pitch may exceed the width).
-    while (src < end && y < UI_ATLAS_H)
+    while (src < end && y < s_atlasH)
     {
         int c = *src++, n, i;
         if (c < 128)
@@ -110,7 +136,7 @@ static int make_atlas(IDirect3DDevice9 *dev)
             for (i = 0; i < n && src < end; i++)
             {
                 row[x] = *src++;
-                if (++x == UI_ATLAS_W) { x = 0; y++; row = (u8 *)lr.pBits + y * lr.Pitch; if (y == UI_ATLAS_H) break; }
+                if (++x == UI_ATLAS_W) { x = 0; y++; row = (u8 *)lr.pBits + y * lr.Pitch; if (y == s_atlasH) break; }
             }
         }
         else
@@ -120,12 +146,12 @@ static int make_atlas(IDirect3DDevice9 *dev)
             for (i = 0; i < n; i++)
             {
                 row[x] = v;
-                if (++x == UI_ATLAS_W) { x = 0; y++; row = (u8 *)lr.pBits + y * lr.Pitch; if (y == UI_ATLAS_H) break; }
+                if (++x == UI_ATLAS_W) { x = 0; y++; row = (u8 *)lr.pBits + y * lr.Pitch; if (y == s_atlasH) break; }
             }
         }
     }
     s_atlas->UnlockRect(0);
-    return y == UI_ATLAS_H;
+    return y == s_atlasH;
 }
 
 static int init_resources(IDirect3DDevice9 *dev)
@@ -164,6 +190,49 @@ static void flush(void)
     s_quads = 0;
 }
 
+// The font UiSetFont asked for: its tables, and its atlas made in place of the
+// one drawn (a missing texture would be no text at all: Inter's is kept then).
+static void font_apply(IDirect3DDevice9 *dev)
+{
+    const int want = s_fontWant;
+    IDirect3DTexture9 *old = s_atlas;
+    s_fontSet = want;
+    if (want <= 0 || want > UI_EXTRA_FONTS)
+    {
+        s_glyphTab = s_atlasGlyph; s_fontTab = s_atlasFont; s_logoTab = s_atlasLogo;
+        s_rle = s_atlasRle; s_rleSize = sizeof(s_atlasRle); s_atlasH = UI_ATLAS_H;
+    }
+    else
+    {
+        const UiExtraAtlas *e = &s_extraAtlas[want - 1];
+        s_glyphTab = e->glyph; s_fontTab = e->font; s_logoTab = e->logo;
+        s_rle = e->rle; s_rleSize = e->rleSize; s_atlasH = e->height;
+    }
+    s_atlas = NULL;
+    if (old)
+    {
+        dev->SetTexture(0, NULL);
+        dev->SetTexture(1, NULL);
+        dev->BlockUntilIdle();
+        old->Release();
+    }
+    if (!make_atlas(dev))
+    {
+        H64_WARN("[ui] font %d: atlas failed, back to Inter", want);
+        if (s_atlas) { s_atlas->Release(); s_atlas = NULL; }
+        s_fontWant = 0;
+        if (want) font_apply(dev);
+        return;
+    }
+    H64_INFO("[ui] font: %s", UiFontName(want));
+}
+
+void UiSetFont(int index) { s_fontWant = index >= 0 && index <= UI_EXTRA_FONTS ? index : 0; }
+
+int UiFontCount(void) { return UI_EXTRA_FONTS + 1; }
+
+const char *UiFontName(int index) { return index > 0 && index <= UI_EXTRA_FONTS ? s_extraAtlas[index - 1].name : "Inter"; }
+
 void UiBegin(IDirect3DDevice9 *dev)
 {
     D3DVIEWPORT9 vp;
@@ -171,6 +240,7 @@ void UiBegin(IDirect3DDevice9 *dev)
     s_dev = s_ready > 0 ? dev : NULL;
     s_quads = 0;
     if (!s_dev) return;
+    if (s_fontWant != s_fontSet) font_apply(dev);
     UiTime();
     vp.X = 0; vp.Y = 0; vp.Width = UI_WIDTH; vp.Height = UI_HEIGHT; vp.MinZ = 0.0f; vp.MaxZ = 1.0f;
     dev->SetViewport(&vp);
@@ -218,9 +288,14 @@ static void take_ui_screenshot(void)
     s_shotUntil = GetTickCount() + UI_SHOT_MS;
 }
 
+static unsigned s_uiFrames;   // UiEnd calls so far (UiFrameCount)
+
+unsigned UiFrameCount(void) { return s_uiFrames; }
+
 void UiEnd(void)
 {
     if (!s_dev) return;
+    s_uiFrames++;
     if (s_shotMsg[0])
     {
         s32 left = (s32)(s_shotUntil - GetTickCount());
@@ -441,7 +516,7 @@ struct WallPic
     IDirect3DTexture9 *tex;
     float w, h;   // the picture's own size in pixels (the texture may be smaller)
 };
-static char s_wallWant[64], s_wallLoaded[64];
+static char s_wallWant[128], s_wallLoaded[128];   // the wallpapers' folder ("": none)
 static int s_wallSecs = 30, s_wallTrans, s_wallDim = 40, s_wallFit, s_wallShuffle, s_wallScanned;   // s_wallSecs 0: never changes
 static char s_wallPick[128], s_wallPicked[128];   // the picture chosen to show (its name in s_wallFiles), and the one last applied
 static char s_wallFiles[WALL_MAX][128];   // relative to the folder: "pic.jpg", "folder\pic.jpg"
@@ -463,8 +538,11 @@ static void wall_sync_scan(void)
 
 void UiWallpaperRescan(void) { s_wallScanned = 0; }
 
-void UiSetWallpapers(const char *folder, const char *pick, int seconds, int transition, int dim, int fit, int shuffle)
+static int s_wallOn;   // UiSetWallpapers: shown (else the folder is only read, for Settings to choose from)
+
+void UiSetWallpapers(const char *folder, int on, const char *pick, int seconds, int transition, int dim, int fit, int shuffle)
 {
+    s_wallOn = on;
     strncpy(s_wallWant, folder ? folder : "", sizeof(s_wallWant) - 1);
     s_wallWant[sizeof(s_wallWant) - 1] = 0;
     strncpy(s_wallPick, pick ? pick : "", sizeof(s_wallPick) - 1);
@@ -476,10 +554,10 @@ void UiSetWallpapers(const char *folder, const char *pick, int seconds, int tran
     s_wallShuffle = shuffle;
 }
 
-// game:\wallpapers\<file> (file may hold a folder: "folder\pic.jpg").
+// <the wallpapers' folder>\<file> (file may hold a folder: "folder\pic.jpg").
 static void wall_path(const char *file, char *out, int size)
 {
-    _snprintf(out, size - 1, "game:\\wallpapers\\%s", file);
+    _snprintf(out, size - 1, "%s\\%s", s_wallWant, file);
     out[size - 1] = 0;
 }
 
@@ -497,7 +575,7 @@ static void wall_scan_dir(const char *prefix, int subfolders)
     WIN32_FIND_DATAA fd;
     HANDLE h;
     char pattern[200];
-    _snprintf(pattern, sizeof(pattern) - 1, "game:\\wallpapers\\%s*", prefix);
+    _snprintf(pattern, sizeof(pattern) - 1, "%s\\%s*", s_wallWant, prefix);
     pattern[sizeof(pattern) - 1] = 0;
     h = FindFirstFileA(pattern, &fd);
     if (h == INVALID_HANDLE_VALUE) return;
@@ -526,6 +604,7 @@ static void wall_scan(void)
     s_wallCount = 0;
     wall_scan_dir("", 1);   // also while they are off: Settings chooses among them
     qsort(s_wallFiles, s_wallCount, sizeof(s_wallFiles[0]), wall_cmp);
+    H64_INFO("[ui] wallpapers: %d pictures in %s", s_wallCount, s_wallWant);
 }
 
 int UiWallpaperCount(void)
@@ -544,21 +623,103 @@ static void wall_free(WallPic *p)
     memset(p, 0, sizeof(*p));
 }
 
-// One picture: its own size kept for the layouts, the texture no bigger than
-// it takes to cover the screen (a large photo is scaled down, a small picture
-// kept as it is).
-static int wall_load(int idx, WallPic *out)
+// A picture's pixels (RGBA), no bigger than it takes to cover the screen (a
+// large photo scaled down by averaging, a small picture kept as it is), and
+// its own size for the layouts. CPU only: the reading thread runs it.
+struct WallPixels
 {
-    char path[200];
-    unsigned char *enc;
-    long size = 0;
+    unsigned char *rgba;   // malloc'ed
+    int w, h;
+    float ow, oh;
+};
+
+static int wall_pixels(const unsigned char *enc, long size, WallPixels *px)
+{
+    int w = 0, h = 0, n = 0, tw, th, x, y;
+    float s;
+    unsigned char *img, *dst;
+    memset(px, 0, sizeof(*px));
+    if (!enc || size <= 0) return 0;
+    img = stbi_load_from_memory(enc, (int)size, &w, &h, &n, 4);
+    if (!img) return 0;
+    px->ow = (float)w;
+    px->oh = (float)h;
+    s = (float)UI_WIDTH / w;
+    if ((float)UI_HEIGHT / h > s) s = (float)UI_HEIGHT / h;
+    tw = (int)(w * s + 0.999f);
+    th = (int)(h * s + 0.999f);
+    if (tw > 4096) tw = 4096;   // a panorama: squeezed a little more
+    if (th > 4096) th = 4096;
+    if (s >= 1.0f || (tw >= w && th >= h))
+    {
+        // Small enough already.
+        px->rgba = (unsigned char *)malloc((size_t)w * h * 4);
+        if (px->rgba) memcpy(px->rgba, img, (size_t)w * h * 4);
+        px->w = w;
+        px->h = h;
+        stbi_image_free(img);
+        return px->rgba != NULL;
+    }
+    if (tw < 1) tw = 1;
+    if (th < 1) th = 1;
+    dst = (unsigned char *)malloc((size_t)tw * th * 4);
+    if (!dst) { stbi_image_free(img); return 0; }
+    for (y = 0; y < th; y++)
+    {
+        // Each pixel: the average of the source pixels it covers.
+        int sy0 = (int)((long long)y * h / th), sy1 = (int)((long long)(y + 1) * h / th);
+        if (sy1 <= sy0) sy1 = sy0 + 1;
+        for (x = 0; x < tw; x++)
+        {
+            int sx0 = (int)((long long)x * w / tw), sx1 = (int)((long long)(x + 1) * w / tw), sx, sy, c;
+            unsigned sum[4] = { 0, 0, 0, 0 }, cnt;
+            if (sx1 <= sx0) sx1 = sx0 + 1;
+            for (sy = sy0; sy < sy1; sy++)
+            {
+                const unsigned char *p = img + ((size_t)sy * w + sx0) * 4;
+                for (sx = sx0; sx < sx1; sx++, p += 4)
+                {
+                    sum[0] += p[0]; sum[1] += p[1]; sum[2] += p[2]; sum[3] += p[3];
+                }
+            }
+            cnt = (unsigned)((sy1 - sy0) * (sx1 - sx0));
+            for (c = 0; c < 4; c++) dst[((size_t)y * tw + x) * 4 + c] = (unsigned char)(sum[c] / cnt);
+        }
+    }
+    stbi_image_free(img);
+    px->rgba = dst;
+    px->w = tw;
+    px->h = th;
+    return 1;
+}
+
+// A texture from decoded pixels (freed).
+static int wall_from_pixels(WallPixels *px, WallPic *out)
+{
+    IDirect3DTexture9 *tex = px->rgba ? UiImageCreate(s_dev, px->rgba, px->w, px->h) : NULL;
+    free(px->rgba);
+    px->rgba = NULL;
+    if (!tex) return 0;
+    out->tex = tex;
+    out->w = px->ow;
+    out->h = px->oh;
+    return 1;
+}
+
+// One picture from its file's bytes (stb_image, else D3DX, else h64_png). Takes `enc` (freed).
+static int wall_decode(unsigned char *enc, long size, const char *path, WallPic *out)
+{
     D3DXIMAGE_INFO info;
     IDirect3DTexture9 *tex = NULL;
+    WallPixels px;
     memset(out, 0, sizeof(*out));
-    if (idx < 0 || idx >= s_wallCount) return 0;
-    wall_path(s_wallFiles[idx], path, sizeof(path));
-    enc = skin_file_read(path, &size);
     if (!enc) return 0;
+    if (wall_pixels(enc, size, &px) && wall_from_pixels(&px, out))
+    {
+        free(enc);
+        H64_INFO("[ui] wallpaper %s: %dx%d", path, (int)out->w, (int)out->h);
+        return 1;
+    }
     if (SUCCEEDED(D3DXGetImageInfoFromFileInMemory(enc, (UINT)size, &info)) && info.Width && info.Height)
     {
         float s = (float)UI_WIDTH / info.Width;
@@ -592,11 +753,86 @@ static int wall_load(int idx, WallPic *out)
     free(enc);
     if (!tex)
     {
-        H64_WARN("[ui] wallpaper %s: cannot decode", path);
+        H64_WARN("[ui] wallpaper %s: cannot decode (%ld bytes)", path, size);
         return 0;
     }
+    H64_INFO("[ui] wallpaper %s: %dx%d", path, (int)out->w, (int)out->h);
     out->tex = tex;
     return 1;
+}
+
+static int wall_load(int idx, WallPic *out)
+{
+    char path[200];
+    long size = 0;
+    unsigned char *enc;
+    memset(out, 0, sizeof(*out));
+    if (idx < 0 || idx >= s_wallCount) return 0;
+    wall_path(s_wallFiles[idx], path, sizeof(path));
+    enc = skin_file_read(path, &size);   // first: it sets size (argument order is unspecified)
+    return wall_decode(enc, size, path, out);
+}
+
+// ---- The next picture, made ready ahead ----
+// While one picture shows, the next one's file is read on a thread of its own
+// (the USB drive is the slow part), then decoded here a little later, between
+// two frames: when its time comes the transition starts at once, with no
+// pause in the middle of the menus.
+static WallPic s_wallNext;           // made ready (tex NULL: none)
+static int s_wallNextIdx = -1;       // its place in the list
+static volatile LONG s_wallReadState;   // 0 idle, 1 reading, 2 read (s_wallReadPx: decoded, else s_wallReadBuf: its bytes, or neither)
+static int s_wallReadIdx, s_wallGen, s_wallReadGen;   // the generation: the list changed since the read began -> dropped
+static char s_wallReadPath[200];
+static unsigned char *s_wallReadBuf;
+static long s_wallReadSize;
+static WallPixels s_wallReadPx;
+
+static DWORD WINAPI wall_read_thread(LPVOID)
+{
+    long size = 0;
+    unsigned char *buf = skin_file_read(s_wallReadPath, &size);
+    // Decoded here too (the slow part after the reading): the main thread only makes the texture.
+    if (buf && wall_pixels(buf, size, &s_wallReadPx)) { free(buf); buf = NULL; }
+    s_wallReadBuf = buf;
+    s_wallReadSize = size;
+    InterlockedExchange(&s_wallReadState, 2);
+    return 0;
+}
+
+// The pictures ahead dropped (the list or the choice changed): a read under way finishes and is let go.
+static void wall_drop_next(void)
+{
+    wall_free(&s_wallNext);
+    s_wallNextIdx = -1;
+    s_wallGen++;
+}
+
+static void wall_prefetch(int idx)
+{
+    HANDLE th;
+    if (s_wallReadState != 0 || idx < 0 || idx >= s_wallCount) return;
+    wall_path(s_wallFiles[idx], s_wallReadPath, sizeof(s_wallReadPath));
+    s_wallReadIdx = idx;
+    s_wallReadGen = s_wallGen;
+    s_wallReadBuf = NULL;
+    memset(&s_wallReadPx, 0, sizeof(s_wallReadPx));
+    InterlockedExchange(&s_wallReadState, 1);
+    th = CreateThread(NULL, 0, wall_read_thread, NULL, 0, NULL);
+    if (th) CloseHandle(th);
+    else InterlockedExchange(&s_wallReadState, 0);   // no thread: read when the time comes instead
+}
+
+// `pic` (the picture at idx) in, the one shown now out with the transition.
+static void wall_show(WallPic *pic, int idx, float now)
+{
+    wall_free(&s_wallPrev);
+    s_wallPrev = s_wallCur;
+    s_wallCur = *pic;
+    memset(pic, 0, sizeof(*pic));
+    s_wallIdx = idx;
+    s_wallTransAt = s_wallPrev.tex ? now : -100.0f;
+    s_wallTransKind = s_wallTrans < UI_TRANS_RANDOM ? s_wallTrans : (int)(GetTickCount() / 7 % UI_TRANS_RANDOM);
+    s_wallShownAt = now;
 }
 
 // The next picture that loads (one that cannot is skipped), from idx on.
@@ -610,13 +846,8 @@ static void wall_next(int idx, float now)
         if (i == s_wallIdx && s_wallCur.tex && tries) break;   // round to the one shown: keep it
         if (wall_load(i, &pic))
         {
-            wall_free(&s_wallPrev);
-            s_wallPrev = s_wallCur;
-            s_wallCur = pic;
-            s_wallIdx = i;
-            s_wallTransAt = s_wallPrev.tex ? now : -100.0f;
-            s_wallTransKind = s_wallTrans < UI_TRANS_RANDOM ? s_wallTrans : (int)(GetTickCount() / 7 % UI_TRANS_RANDOM);
-            break;
+            wall_show(&pic, i, now);
+            return;
         }
     }
     s_wallShownAt = now;
@@ -657,11 +888,25 @@ static void wall_sync(void)
 {
     float now = UiTime();
     if (!s_dev) return;
-    if (!s_wallWant[0])
+    if (s_wallReadState == 2)
+    {
+        // The next picture is in (decoded on the thread; still a while before it is wanted): its texture now, or let go.
+        unsigned char *buf = s_wallReadBuf;
+        WallPixels px = s_wallReadPx;
+        int idx = s_wallReadIdx, fresh = s_wallReadGen == s_wallGen && s_wallWant[0] && s_wallOn;
+        s_wallReadBuf = NULL;
+        memset(&s_wallReadPx, 0, sizeof(s_wallReadPx));
+        InterlockedExchange(&s_wallReadState, 0);
+        if (!fresh) { free(buf); free(px.rgba); return; }
+        if (px.rgba ? wall_from_pixels(&px, &s_wallNext) : wall_decode(buf, s_wallReadSize, s_wallReadPath, &s_wallNext)) s_wallNextIdx = idx;
+        return;   // one slow thing a frame
+    }
+    if (!s_wallWant[0] || !s_wallOn)
     {
         // Off: no picture held.
         wall_free(&s_wallPrev);
         wall_free(&s_wallCur);
+        wall_drop_next();
         wall_sync_scan();
         return;
     }
@@ -669,6 +914,7 @@ static void wall_sync(void)
     {
         wall_free(&s_wallPrev);
         wall_free(&s_wallCur);
+        wall_drop_next();
         wall_sync_scan();
         s_wallLoadedOnce = 1;
         s_wallIdx = 0;
@@ -684,10 +930,29 @@ static void wall_sync(void)
         // Another picture chosen (Settings > Interface > Wallpapers): it comes in at once, with the transition.
         int i = wall_find(s_wallPick);
         strcpy(s_wallPicked, s_wallPick);
-        if (s_wallCount && i != s_wallIdx) wall_next(i, now);
+        if (s_wallCount && i != s_wallIdx)
+        {
+            if (s_wallNext.tex && s_wallNextIdx == i) wall_show(&s_wallNext, i, now);   // the one made ready
+            else wall_next(i, now);
+        }
+        wall_drop_next();   // what was made ready followed the old order
         return;
     }
-    if (s_wallSecs && s_wallCount > 1 && s_wallCur.tex && now - s_wallShownAt >= s_wallSecs) wall_next(wall_after(), now);
+    if (!s_wallSecs || s_wallCount < 2 || !s_wallCur.tex) return;
+    if (now - s_wallShownAt >= s_wallSecs)
+    {
+        // Its time: the one made ready, else read now.
+        if (s_wallNext.tex)
+        {
+            int i = s_wallNextIdx;
+            s_wallNextIdx = -1;
+            wall_show(&s_wallNext, i, now);
+        }
+        else wall_next(wall_after(), now);
+        return;
+    }
+    // Half a second after the transition, the next one is read in the background.
+    if (!s_wallPrev.tex && !s_wallNext.tex && s_wallReadState == 0 && now - s_wallShownAt > WALL_TRANS_S + 0.5f) wall_prefetch(wall_after());
 }
 
 // Part (u0..u1, v0..v1 of the whole picture, 0..1) of a picture over the box (x, y, w, h).
@@ -702,6 +967,29 @@ void UiImagePart(IDirect3DTexture9 *tex, float x, float y, float w, float h, flo
     s_dev->SetTexture(1, tex);
     p[0] = fw * 0.5f; p[1] = fh * 0.5f; p[2] = 0; p[3] = 1.0f;
     quad(x, y, x + w, y + h, (u0 - 0.5f) * fw, (v0 - 0.5f) * fh, (u1 - 0.5f) * fw, (v1 - 0.5f) * fh, 2.0f, 0.0f, p, color, color);
+    flush();
+    s_dev->SetTexture(1, s_atlas);
+}
+
+// Part (u0..u1, v0..v1) of a picture over any four corners - top left, top
+// right, bottom left, bottom right, xy[8] - (a box's faces seen at an angle).
+// Two triangles: the picture bends a little along their diagonal.
+void UiImageQuad(IDirect3DTexture9 *tex, const float *xy, float u0, float v0, float u1, float v1, D3DCOLOR color)
+{
+    // The shader's box is the unit square around 0 (t = u - 0.5): inside it, solid; its edge soft by ~a pixel.
+    const float p[4] = { 0.5f, 0.5f, 0.0f, 0.004f };
+    UiVtx *v;
+    if (!s_dev || !tex) return;
+    flush();
+    s_dev->SetTexture(1, tex);
+    v = &s_vtx[0];
+    vtx(&v[0], xy[0], xy[1], color, u0 - 0.5f, v0 - 0.5f, 2.0f, 0.0f, p);
+    vtx(&v[1], xy[2], xy[3], color, u1 - 0.5f, v0 - 0.5f, 2.0f, 0.0f, p);
+    vtx(&v[2], xy[4], xy[5], color, u0 - 0.5f, v1 - 0.5f, 2.0f, 0.0f, p);
+    v[3] = v[1];
+    vtx(&v[4], xy[6], xy[7], color, u1 - 0.5f, v1 - 0.5f, 2.0f, 0.0f, p);
+    v[5] = v[2];
+    s_quads = 1;
     flush();
     s_dev->SetTexture(1, s_atlas);
 }
@@ -1001,7 +1289,7 @@ static int utf8_len(const char *s)
 static const UiAtlasGlyph *glyph(int font, u32 c)
 {
     int lo = 95, hi = UI_ATLAS_COUNT - 1;
-    const UiAtlasGlyph *g = s_atlasGlyph[font ? 1 : 0];
+    const UiAtlasGlyph *g = s_glyphTab[font ? 1 : 0];
     if (c >= 32 && c < 127) return &g[c - 32];   // ASCII: the first 95, in order
     while (lo <= hi)
     {
@@ -1113,8 +1401,8 @@ static void draw_glyph(const UiAtlasGlyph *g, float *x, float baseline, float k,
     if (g->w)
     {
         float gx = *x + g->left * k, gy = baseline + g->top * k;
-        quad(gx, gy, gx + g->w * k, gy + g->h * k, (float)g->x / UI_ATLAS_W, (float)g->y / UI_ATLAS_H,
-             (float)(g->x + g->w) / UI_ATLAS_W, (float)(g->y + g->h) / UI_ATLAS_H, 1.0f, 0.0f, p, color, color);
+        quad(gx, gy, gx + g->w * k, gy + g->h * k, (float)g->x / UI_ATLAS_W, (float)g->y / s_atlasH,
+             (float)(g->x + g->w) / UI_ATLAS_W, (float)(g->y + g->h) / s_atlasH, 1.0f, 0.0f, p, color, color);
     }
     *x += g->advance * k;
 }
@@ -1150,7 +1438,7 @@ static void draw_line(int font, float size, float x, float baseline, D3DCOLOR co
 
 static float text_impl(int font, float size, float x, float cy, D3DCOLOR color, const char *text, int align, float range, float bias)
 {
-    float best = 0, lineH = size * 1.35f, baseline = cy + s_atlasFont[font ? 1 : 0].cap * size / UI_ATLAS_BASE * 0.5f;
+    float best = 0, lineH = size * 1.35f, baseline = cy + s_fontTab[font ? 1 : 0].cap * size / UI_ATLAS_BASE * 0.5f;
     for (;;)
     {
         const char *nl = strchr(text, '\n');
@@ -1291,11 +1579,11 @@ float UiLogo(float x, float y, float size)
     p[3] = 1.0f;
     for (i = -1; i < 3; i++)
     {
-        const UiAtlasRect *r = &s_atlasLogo[i < 0 ? 0 : i];
+        const UiAtlasRect *r = &s_logoTab[i < 0 ? 0 : i];
         float dy = 0.0f;
         D3DCOLOR ct, cb;
-        u0 = (float)r->x / UI_ATLAS_W; v0 = (float)r->y / UI_ATLAS_H;
-        u1 = (float)(r->x + r->w) / UI_ATLAS_W; v1 = (float)(r->y + r->h) / UI_ATLAS_H;
+        u0 = (float)r->x / UI_ATLAS_W; v0 = (float)r->y / s_atlasH;
+        u1 = (float)(r->x + r->w) / UI_ATLAS_W; v1 = (float)(r->y + r->h) / s_atlasH;
         if (i < 0)
         {
             // A soft shadow of the body, a little lower.
@@ -1335,6 +1623,16 @@ float UiBrand(float x, float cy, float size)
     if (s_laikaLogo) UiImage(s_laikaLogo, x, cy - lh * 0.5f, lw, lh, 0.0f, D3DCOLOR_ARGB(255, 255, 255, 255));
     else UiText(UI_BOLD, size, x, cy, UI_COL_TEXT, "LAIKA 64", UI_LEFT);
     return lw;
+}
+
+float UiBrandWidth(float size) { return size * 1.9f * UI_LAIKA_LOGO_W / UI_LAIKA_LOGO_H; }
+
+void UiBrandFit(float x, float y, float w, float h)
+{
+    // As big as the box allows at the logo's own proportions, centred, its bottom on the box's.
+    float lh = h, lw = lh * UI_LAIKA_LOGO_W / UI_LAIKA_LOGO_H;
+    if (lw > w) { lw = w; lh = lw * UI_LAIKA_LOGO_H / UI_LAIKA_LOGO_W; }
+    UiBrand(x + (w - lw) * 0.5f, y + h - lh * 0.5f, lh / 1.9f);
 }
 
 // ---- Button prompts ----
@@ -1462,18 +1760,98 @@ void UiSetPerfStyle(int pos, float textSize, D3DCOLOR color, int boxPercent)
     s_perfAlpha = (boxPercent < 0 ? 0 : boxPercent > 100 ? 100 : boxPercent) * 255 / 100;
 }
 
+// A small line drawing for one line of the box (UI_PERF_ICON_*), `s` high, centred on (x + s/2, cy).
+void UiPerfIcon(int kind, float x, float cy, float s, D3DCOLOR col)
+{
+    const float h = s, w = s, t = s / 12.0f + 0.6f, cx = x + w * 0.5f;
+    switch (kind)
+    {
+    case UI_PERF_ICON_FPS:   // a gauge: a ring open at the bottom, a needle
+        UiRoundRing(cx - h * 0.45f, cy - h * 0.45f, h * 0.9f, h * 0.9f, h * 0.45f, t, col);
+        UiRect(cx - h * 0.2f, cy + h * 0.28f, h * 0.4f, h * 0.2f, D3DCOLOR_ARGB(0, 0, 0, 0));
+        UiLine(cx, cy, cx + h * 0.26f, cy - h * 0.2f, t * 1.2f, col);
+        UiCircle(cx, cy, t * 1.2f, col);
+        break;
+    case UI_PERF_ICON_CPU:   // a chip: a square and its pins
+    {
+        int i;
+        UiRoundRing(cx - h * 0.3f, cy - h * 0.3f, h * 0.6f, h * 0.6f, h * 0.08f, t, col);
+        UiRect(cx - h * 0.12f, cy - h * 0.12f, h * 0.24f, h * 0.24f, col);
+        for (i = -1; i <= 1; i++)
+        {
+            float o = i * h * 0.17f;
+            UiRect(cx + o - t * 0.5f, cy - h * 0.45f, t, h * 0.13f, col);
+            UiRect(cx + o - t * 0.5f, cy + h * 0.32f, t, h * 0.13f, col);
+            UiRect(cx - h * 0.45f, cy + o - t * 0.5f, h * 0.13f, t, col);
+            UiRect(cx + h * 0.32f, cy + o - t * 0.5f, h * 0.13f, t, col);
+        }
+        break;
+    }
+    case UI_PERF_ICON_RAM:   // a memory stick: a long board, its chips, its contacts
+    {
+        int i;
+        UiRoundRing(cx - w * 0.5f, cy - h * 0.25f, w, h * 0.42f, h * 0.05f, t, col);
+        for (i = 0; i < 3; i++) UiRect(cx - w * 0.36f + i * w * 0.27f, cy - h * 0.13f, w * 0.18f, h * 0.18f, col);
+        for (i = 0; i < 5; i++) UiRect(cx - w * 0.42f + i * w * 0.2f, cy + h * 0.2f, t, h * 0.12f, col);
+        break;
+    }
+    case UI_PERF_ICON_RES:   // a screen on its stand
+        UiRoundRing(cx - w * 0.48f, cy - h * 0.36f, w * 0.96f, h * 0.6f, h * 0.06f, t, col);
+        UiRect(cx - t * 0.5f, cy + h * 0.24f, t, h * 0.14f, col);
+        UiRect(cx - w * 0.22f, cy + h * 0.38f, w * 0.44f, t, col);
+        break;
+    case UI_PERF_ICON_GPU:   // a graphics card: a board with a fan
+        UiRoundRing(cx - w * 0.5f, cy - h * 0.28f, w, h * 0.5f, h * 0.06f, t, col);
+        UiRoundRing(cx - h * 0.16f, cy - h * 0.19f, h * 0.32f, h * 0.32f, h * 0.16f, t, col);
+        UiCircle(cx, cy - h * 0.03f, t, col);
+        UiRect(cx - w * 0.4f, cy + h * 0.22f, w * 0.5f, h * 0.12f, col);
+        break;
+    default:                 // a thermometer, filled as far as it is warm: green, amber, red
+    {
+        const D3DCOLOR fill = kind == UI_PERF_ICON_TEMP_HOT ? D3DCOLOR_ARGB(255, 255, 80, 70) :
+                              kind == UI_PERF_ICON_TEMP_WARN ? D3DCOLOR_ARGB(255, 255, 185, 60) : D3DCOLOR_ARGB(255, 110, 220, 120);
+        const float level = kind == UI_PERF_ICON_TEMP_HOT ? 0.85f : kind == UI_PERF_ICON_TEMP_WARN ? 0.6f : 0.35f;
+        const float tw = h * 0.22f, top = cy - h * 0.48f, stem = h * 0.62f, bulb = h * 0.2f;
+        UiRoundRing(cx - tw * 0.5f, top, tw, stem + bulb, tw * 0.5f, t, col);
+        UiRoundRing(cx - bulb, cy + h * 0.14f - bulb * 0.2f, bulb * 2, bulb * 2, bulb, t, col);
+        UiCircle(cx, cy + h * 0.14f + bulb * 0.8f, bulb * 0.62f, fill);
+        UiRoundRect(cx - tw * 0.2f, top + stem * (1 - level), tw * 0.4f, stem * level + bulb * 0.4f, tw * 0.2f, fill, fill);
+        break;
+    }
+    }
+}
+
 // The box over the area (ax, ay, aw, ah) - the screen, or a preview of it at
-// `k` of its size: one line as a pill, several as a panel, in its corner.
+// `k` of its size: one line as a pill, several as a panel, in its corner. A
+// line may start with an icon (one byte, UI_PERF_ICON_*), drawn before it.
 static void perf_box(const char *text, float ax, float ay, float aw, float ah, float k)
 {
-    const float size = s_perfSize * k, mx = UI_SAFE_X * k, my = UI_SAFE_Y * k;
-    int lines = 1;
-    const char *p;
-    float w, h, x, y, r;
-    for (p = text; *p; p++) lines += *p == '\n';
-    w = UiTextWidth(UI_BOLD, size, text) + (lines > 1 ? 30 : 26) * k * s_perfSize / 17;
-    h = lines > 1 ? 14 * k + lines * size * 1.35f : size * 1.9f;
-    r = lines > 1 ? 14 * k : h * 0.5f;
+    const float size = s_perfSize * k, mx = UI_SAFE_X * k, my = UI_SAFE_Y * k, lineH = size * 1.35f, iconW = size * 1.35f;
+    const char *lines[16];
+    int icons[16], n = 0, i, anyIcon = 0;
+    char buf[512], *p;
+    float w = 0, h, x, y, r, pad;
+    strncpy(buf, text, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = 0;
+    for (p = buf; *p && n < 16;)
+    {
+        char *e = strchr(p, '\n');
+        icons[n] = (unsigned char)*p >= 1 && (unsigned char)*p < UI_PERF_ICON_COUNT ? (unsigned char)*p++ : 0;
+        anyIcon |= icons[n] != 0;
+        lines[n++] = p;
+        if (!e) break;
+        *e = 0;
+        p = e + 1;
+    }
+    for (i = 0; i < n; i++)
+    {
+        float lw = UiTextWidth(UI_BOLD, size, lines[i]);
+        if (lw > w) w = lw;
+    }
+    pad = (n > 1 ? 15 : 13) * k * s_perfSize / 17;
+    w += 2 * pad + (anyIcon ? iconW : 0);
+    h = n > 1 ? 14 * k + n * lineH : size * 1.9f;
+    r = n > 1 ? 14 * k : h * 0.5f;
     switch (s_perfPos)
     {
     case UI_PERF_TOP_LEFT: case UI_PERF_BOTTOM_LEFT: x = ax + mx; break;
@@ -1487,8 +1865,18 @@ static void perf_box(const char *text, float ax, float ay, float aw, float ah, f
                     (D3DCOLOR_ARGB(255, 16, 17, 23) & 0x00FFFFFF) | ((u32)s_perfAlpha << 24));
         UiRoundRing(x, y, w, h, r, 1.0f, D3DCOLOR_ARGB(26 * s_perfAlpha / 190 > 255 ? 255 : 26 * s_perfAlpha / 190, 255, 255, 255));
     }
-    if (lines > 1) UiTextShadowed(UI_BOLD, size, x + 15 * k * s_perfSize / 17, y + 7 * k + size * 1.35f * 0.5f, s_perfColor, text, UI_LEFT);
-    else UiTextShadowed(UI_BOLD, size, x + w * 0.5f, y + h * 0.5f, s_perfColor, text, UI_CENTER);
+    for (i = 0; i < n; i++)
+    {
+        float cy = n > 1 ? y + 7 * k + lineH * (i + 0.5f) : y + h * 0.5f, tx = x + pad;
+        if (icons[i])
+        {
+            // Discreet: the text's colour, fainter (a temperature's own colour shows in its bulb).
+            UiPerfIcon(icons[i], tx, cy, size * 0.95f, UiAlpha(s_perfColor, 0.7f));
+            tx += iconW;
+        }
+        else if (anyIcon) tx += iconW;
+        UiTextShadowed(UI_BOLD, size, tx, cy, s_perfColor, lines[i], UI_LEFT);
+    }
 }
 
 void UiFpsBadge(const char *text) { perf_box(text, 0, 0, UI_WIDTH, UI_HEIGHT, 1.0f); }

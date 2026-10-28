@@ -2,8 +2,8 @@
 """Harissa64 V2 - writes platform/xbox360/xb_logo.h, the LAIKA 64 logo drawn by
 UiBrand, from a PNG (kept as PNG bytes: xb_ui.cpp decodes it with h64_png_decode).
 
-The PNG is the logo with its transparent margins cropped, 96 pixels high (1.5x
-the size the ROM browser shows it at, so it stays sharp).
+The PNG is the logo with its transparent margins cropped, 192 pixels high (well over
+the largest it is shown at, so it stays sharp).
 
     python platform/xbox360/tools/gen_logo.py logo.png
 """
