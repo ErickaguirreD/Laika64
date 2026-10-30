@@ -207,15 +207,29 @@ def brazil():
     return img
 
 
+def mexico():
+    """Green, white, red; the coat of arms simplified: the eagle as a brown form on its
+    cactus, over a green wreath (it is a few pixels across on the list)."""
+    img = stripes([(0, 104, 71), (255, 255, 255), (206, 17, 38)], True)
+    d = ImageDraw.Draw(img)
+    cx, cy, u = W / 2, H / 2, H / 100.0
+    d.arc([cx - 15 * u, cy - 15 * u, cx + 15 * u, cy + 15 * u], 30, 150, fill=(0, 104, 71), width=int(3 * u))   # the wreath
+    d.ellipse([cx - 9 * u, cy - 11 * u, cx + 9 * u, cy + 9 * u], fill=(121, 79, 36))                           # the eagle
+    d.ellipse([cx - 5 * u, cy - 7 * u, cx + 5 * u, cy + 3 * u], fill=(150, 104, 52))                           # its breast, lighter
+    d.rectangle([cx - 7 * u, cy + 9 * u, cx + 7 * u, cy + 11 * u], fill=(0, 104, 71))                         # the cactus' pad
+    return img
+
+
 def make_all():
     return [
         ("en", english()),
-        ("es", spain()),
+        ("es", mexico()),   # Spanish: Mexico's flag (user choice, 2026-10-28; spain() was before)
         ("de", stripes([(0, 0, 0), (221, 0, 0), (255, 206, 0)], False)),
         ("fr", stripes([(0, 85, 164), (255, 255, 255), (239, 65, 53)], True)),
         ("ar", tunisia()),
         ("pt", brazil()),
         ("ru", stripes([(255, 255, 255), (0, 57, 166), (213, 43, 30)], False)),
+        ("it", stripes([(0, 146, 70), (255, 255, 255), (206, 43, 55)], True)),
     ]
 
 

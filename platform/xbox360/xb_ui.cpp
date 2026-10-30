@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <vector>
 
 #include "../../core/common/h64_log.h"
 #include "../../core/common/h64_png.h"
@@ -13,6 +14,7 @@
 #include "xb_audio.h"
 #include "xb_lang.h"
 #include "xb_logo.h"
+#include "xb_logo_variants.h"
 #include "xb_ui_atlas.h"
 #include "xb_ui_fonts.h"
 
@@ -233,6 +235,27 @@ int UiFontCount(void) { return UI_EXTRA_FONTS + 1; }
 
 const char *UiFontName(int index) { return index > 0 && index <= UI_EXTRA_FONTS ? s_extraAtlas[index - 1].name : "Inter"; }
 
+// Pictures released while the GPU may still read them (a frame drawn with them
+// not done yet): kept until a fence after their last use has passed. Waiting
+// for the GPU at each release (BlockUntilIdle) stalled the browser at every
+// cover it let go - many a page with hundreds of games.
+struct UiDeadTex { IDirect3DTexture9 *tex; DWORD fence; };
+static std::vector<UiDeadTex> s_deadTex;
+
+static void dead_textures_collect(IDirect3DDevice9 *dev, int all)
+{
+    size_t i = 0;
+    while (i < s_deadTex.size())
+        if (all || !dev->IsFencePending(s_deadTex[i].fence))
+        {
+            s_deadTex[i].tex->Release();
+            s_deadTex[i] = s_deadTex.back();
+            s_deadTex.pop_back();
+        }
+        else
+            i++;
+}
+
 void UiBegin(IDirect3DDevice9 *dev)
 {
     D3DVIEWPORT9 vp;
@@ -241,6 +264,7 @@ void UiBegin(IDirect3DDevice9 *dev)
     s_quads = 0;
     if (!s_dev) return;
     if (s_fontWant != s_fontSet) font_apply(dev);
+    if (!s_deadTex.empty()) dead_textures_collect(dev, 0);   // released pictures the GPU is done with
     UiTime();
     vp.X = 0; vp.Y = 0; vp.Width = UI_WIDTH; vp.Height = UI_HEIGHT; vp.MinZ = 0.0f; vp.MaxZ = 1.0f;
     dev->SetViewport(&vp);
@@ -314,8 +338,24 @@ void UiEnd(void)
 }
 
 // ---- Quads ----
+// UiSetScale: what is drawn next is scaled by k around (cx, cy) - the shapes keep
+// their look (their edges are worked out in their own units).
+static float s_scaleX, s_scaleY, s_scaleK = 1.0f;
+
+void UiSetScale(float cx, float cy, float k)
+{
+    s_scaleX = cx;
+    s_scaleY = cy;
+    s_scaleK = k > 0.0f ? k : 1.0f;
+}
+
 static void vtx(UiVtx *v, float x, float y, D3DCOLOR c, float t0, float t1, float t2, float t3, const float *p)
 {
+    if (s_scaleK != 1.0f)
+    {
+        x = s_scaleX + (x - s_scaleX) * s_scaleK;
+        y = s_scaleY + (y - s_scaleY) * s_scaleK;
+    }
     v->x = x * (2.0f / UI_WIDTH) - 1.0f;
     v->y = 1.0f - y * (2.0f / UI_HEIGHT);
     v->color = c;
@@ -485,11 +525,10 @@ void UiLine(float x0, float y0, float x1, float y1, float thick, D3DCOLOR color)
 
 // A strip between x0 and x1 whose top and bottom follow the two given heights
 // at each end (a slanted slice of a wave): top colour ct, bottom cb.
-void UiStrip(float x0, float top0, float bot0, float x1, float top1, float bot1, D3DCOLOR ct, D3DCOLOR cb)
+static void strip_quad(float x0, float top0, float bot0, float x1, float top1, float bot1, D3DCOLOR ct, D3DCOLOR cb)
 {
     static const float p[4] = { 1.0e5f, 1.0e5f, 0.0f, 1.0f };   // a box far bigger than the strip: solid
     UiVtx *v;
-    if (!s_dev) return;
     if (s_quads == UI_MAX_QUADS) flush();
     v = &s_vtx[s_quads * 6];
     vtx(&v[0], x0, top0, ct, 0, 0, 0, 0, p);
@@ -497,6 +536,28 @@ void UiStrip(float x0, float top0, float bot0, float x1, float top1, float bot1,
     vtx(&v[2], x0, bot0, cb, 0, 0, 0, 0, p);
     v[3] = v[1];
     vtx(&v[4], x1, bot1, cb, 0, 0, 0, 0, p);
+    v[5] = v[2];
+    s_quads++;
+}
+
+// A slice of a band (the background effects' ribbons, aurora, silk...): its top
+// and bottom edges soft, as UiLine's are - the shader's box, half as high as the
+// slice, across a quad a pixel taller on each side (drawn solid, the slanted
+// edges stepped: jagged). Three quads with faded colours left dark specks.
+void UiStrip(float x0, float top0, float bot0, float x1, float top1, float bot1, D3DCOLOR ct, D3DCOLOR cb)
+{
+    float hh = ((bot0 - top0) + (bot1 - top1)) * 0.25f, p[4];
+    UiVtx *v;
+    if (!s_dev) return;
+    if (hh < 1.0f) { strip_quad(x0, top0, bot0, x1, top1, bot1, ct, cb); return; }
+    if (s_quads == UI_MAX_QUADS) flush();
+    p[0] = 1.0e5f; p[1] = hh; p[2] = 0.0f; p[3] = 1.0f;   // no side edges; top and bottom at +-hh
+    v = &s_vtx[s_quads * 6];
+    vtx(&v[0], x0, top0 - 1.0f, ct, 0.0f, -(hh + 1.0f), 0.0f, 0.0f, p);
+    vtx(&v[1], x1, top1 - 1.0f, ct, 0.0f, -(hh + 1.0f), 0.0f, 0.0f, p);
+    vtx(&v[2], x0, bot0 + 1.0f, cb, 0.0f, hh + 1.0f, 0.0f, 0.0f, p);
+    v[3] = v[1];
+    vtx(&v[4], x1, bot1 + 1.0f, cb, 0.0f, hh + 1.0f, 0.0f, 0.0f, p);
     v[5] = v[2];
     s_quads++;
 }
@@ -1096,9 +1157,10 @@ static void wall_draw_area(float ax, float ay, float aw, float ah, int fit, floa
 static void backdrop_plain(void)
 {
     shape(0, 0, UI_WIDTH, UI_HEIGHT, 0.0f, 1.0f, 0.0f, UI_COL_BG_TOP, UI_COL_BG_BOTTOM);
-    // Two soft glows: warm at the top right, cool at the bottom left.
-    shape(860, -420, 760, 760, 380, 420, 0.0f, D3DCOLOR_ARGB(46, 234, 76, 58), D3DCOLOR_ARGB(46, 234, 76, 58));
-    shape(-380, 420, 720, 720, 360, 420, 0.0f, D3DCOLOR_ARGB(26, 70, 90, 200), D3DCOLOR_ARGB(26, 70, 90, 200));
+    // Two soft glows in LAIKA 64's own tones: a deep blue at the top right, violet at
+    // the bottom left (Harissa64's red-orange glow is gone).
+    shape(860, -420, 760, 760, 380, 420, 0.0f, D3DCOLOR_ARGB(40, 50, 110, 230), D3DCOLOR_ARGB(40, 50, 110, 230));
+    shape(-380, 420, 720, 720, 360, 420, 0.0f, D3DCOLOR_ARGB(30, 120, 70, 200), D3DCOLOR_ARGB(30, 120, 70, 200));
 }
 
 int UiWallpaperDraw(int kenBurns)
@@ -1139,6 +1201,15 @@ int UiWallpaperThumb(float x, float y, float w, float h, int fit)
 static D3DCOLOR s_panelEdge = UI_COL_LINE;
 static float s_panelEdgeW = 1.0f, s_panelRound = 1.0f;
 static int s_panelAlpha = 179;   // UI_COL_PANEL's own 70%
+static D3DCOLOR s_panelTop = UI_COL_PANEL_TOP, s_panelBottom = UI_COL_PANEL;   // the body (UiSetPanelColor)
+
+void UiSetPanelColor(int r, int g, int b)
+{
+    if (r < 0) { s_panelTop = UI_COL_PANEL_TOP; s_panelBottom = UI_COL_PANEL; return; }
+    // A dark tint of the colour: the text on it stays easy to read.
+    s_panelTop = D3DCOLOR_ARGB(255, r * 34 / 100, g * 34 / 100, b * 34 / 100);
+    s_panelBottom = D3DCOLOR_ARGB(255, r * 22 / 100, g * 22 / 100, b * 22 / 100);
+}
 
 void UiSetPanelStyle(D3DCOLOR edge, float edgeWidth, int bodyPercent, float roundness)
 {
@@ -1150,9 +1221,17 @@ void UiSetPanelStyle(D3DCOLOR edge, float edgeWidth, int bodyPercent, float roun
 
 float UiPanelRadius(float r) { return r * s_panelRound; }
 
+static int (*s_backdropLayer)(void);
+void UiSetBackdropLayer(int (*fn)(void)) { s_backdropLayer = fn; }
+
 void UiBackdrop(void)
 {
     skin_sync();
+    if (s_backdropLayer && s_backdropLayer())
+    {
+        if (s_wallDim) UiRect(0, 0, UI_WIDTH, UI_HEIGHT, D3DCOLOR_ARGB(s_wallDim * 255 / 100, 0, 0, 0));
+        return;
+    }
     if (UiWallpaperDraw(0))
     {
         // Darkened by the chosen amount, so the menus stay easy to read over it.
@@ -1201,16 +1280,44 @@ IDirect3DTexture9 *UiImageCreate(IDirect3DDevice9 *dev, const unsigned char *rgb
     return tex;
 }
 
+IDirect3DTexture9 *UiImageCreateDxt1(IDirect3DDevice9 *dev, const unsigned char *blocks, int w, int h)
+{
+    IDirect3DTexture9 *tex = NULL;
+    D3DLOCKED_RECT lr;
+    int by, rowBytes = (w / 4) * 8;
+    if (!dev || !blocks || w <= 0 || h <= 0 || (w & 3) || (h & 3)) return NULL;
+    if (FAILED(dev->CreateTexture(w, h, 1, 0, D3DFMT_LIN_DXT1, D3DPOOL_DEFAULT, &tex, NULL)) || !tex) return NULL;
+    if (FAILED(tex->LockRect(0, &lr, NULL, 0)))
+    {
+        tex->Release();
+        return NULL;
+    }
+    for (by = 0; by < h / 4; by++)   // a row of blocks per pitch
+        memcpy((unsigned char *)lr.pBits + (size_t)by * lr.Pitch, blocks + (size_t)by * rowBytes, rowBytes);
+    tex->UnlockRect(0);
+    return tex;
+}
+
 void UiImageRelease(IDirect3DDevice9 *dev, IDirect3DTexture9 *tex)
 {
+    UiDeadTex d;
     if (!tex) return;
+    if (!dev) { tex->Release(); return; }
     // The device keeps no reference: never release what the GPU may still read.
-    if (dev)
-    {
-        dev->SetTexture(1, s_atlas ? (IDirect3DBaseTexture9 *)s_atlas : NULL);
-        dev->BlockUntilIdle();
-    }
-    tex->Release();
+    dev->SetTexture(0, NULL);
+    dev->SetTexture(1, s_atlas ? (IDirect3DBaseTexture9 *)s_atlas : NULL);
+    d.tex = tex;
+    d.fence = dev->InsertFence();
+    s_deadTex.push_back(d);
+    if (s_deadTex.size() > 256) { dev->BlockUntilIdle(); dead_textures_collect(dev, 1); }   // a bound on what waits
+    else dead_textures_collect(dev, 0);
+}
+
+void UiImageFlush(IDirect3DDevice9 *dev)
+{
+    if (!dev || s_deadTex.empty()) return;
+    dev->BlockUntilIdle();
+    dead_textures_collect(dev, 1);
 }
 
 void UiImage(IDirect3DTexture9 *tex, float x, float y, float w, float h, float r, D3DCOLOR color)
@@ -1248,7 +1355,7 @@ void UiPanel(float x, float y, float w, float h, float r)
 {
     r *= s_panelRound;
     UiShadow(x, y + 12, w, h, r, 48, D3DCOLOR_ARGB(150 * s_panelAlpha / 179 > 150 ? 150 : 150 * s_panelAlpha / 179, 0, 0, 0));
-    UiRoundRect(x, y, w, h, r, (UI_COL_PANEL_TOP & 0x00FFFFFF) | ((u32)s_panelAlpha << 24), (UI_COL_PANEL & 0x00FFFFFF) | ((u32)s_panelAlpha << 24));
+    UiRoundRect(x, y, w, h, r, (s_panelTop & 0x00FFFFFF) | ((u32)s_panelAlpha << 24), (s_panelBottom & 0x00FFFFFF) | ((u32)s_panelAlpha << 24));
     if (s_panelEdgeW > 0) UiRoundRing(x, y, w, h, r, s_panelEdgeW, s_panelEdge);
 }
 
@@ -1605,14 +1712,47 @@ float UiLogo(float x, float y, float size)
 }
 
 
-// The LAIKA 64 logo picture (xb_logo.h), uploaded the first time it is drawn.
-static IDirect3DTexture9 *s_laikaLogo;
-static int s_laikaLogoTried;
+IDirect3DDevice9 *UiDevice(void) { return s_dev; }
 
-float UiBrand(float x, float cy, float size)
+// The LAIKA 64 logo picture (xb_logo.h), uploaded the first time it is drawn;
+// in the edges' colour when one is chosen (UiSetLogoColor, xb_logo_variants.h).
+static IDirect3DTexture9 *s_laikaLogo, *s_logoVar[UI_LOGO_VAR_COUNT];
+static int s_laikaLogoTried, s_logoVarTried[UI_LOGO_VAR_COUNT];
+static int s_logoVarShown = -1;
+
+void UiSetLogoColor(int rgb)
 {
-    // The LAIKA 64 logo (mark and name in one picture), whatever the skin.
-    float lh = size * 1.9f, lw = lh * UI_LAIKA_LOGO_W / UI_LAIKA_LOGO_H;
+    float r, g, b, mx, mn, h;
+    if (rgb < 0) { s_logoVarShown = -1; return; }
+    r = ((rgb >> 16) & 255) / 255.0f; g = ((rgb >> 8) & 255) / 255.0f; b = (rgb & 255) / 255.0f;
+    mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
+    mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
+    if (mx <= 0.0f || (mx - mn) / mx < 0.3f) { s_logoVarShown = -1; return; }   // white, greys: the original
+    if (mx == r) h = 60.0f * ((g - b) / (mx - mn));
+    else if (mx == g) h = 60.0f * ((b - r) / (mx - mn)) + 120.0f;
+    else h = 60.0f * ((r - g) / (mx - mn)) + 240.0f;
+    if (h < 0) h += 360.0f;
+    s_logoVarShown = h < 18.0f || h >= 340.0f ? UI_LOGO_VAR_RED : h < 70.0f ? UI_LOGO_VAR_GOLD : h < 165.0f ? UI_LOGO_VAR_GREEN :
+                     h < 255.0f ? UI_LOGO_VAR_BLUE : UI_LOGO_VAR_PURPLE;
+}
+
+// The picture shown now (made on first use) and its size; NULL while there is none.
+static IDirect3DTexture9 *brand_tex(float *w, float *h)
+{
+    int v = s_logoVarShown;
+    if (v >= 0 && v < UI_LOGO_VAR_COUNT)
+    {
+        if (!s_logoVarTried[v] && s_dev)
+        {
+            int pw = 0, ph = 0;
+            unsigned char *rgba = h64_png_decode(s_logoVarPng[v], s_logoVarSize[v], &pw, &ph, 1024 * 1024);
+            s_logoVarTried[v] = 1;
+            if (rgba) { s_logoVar[v] = UiImageCreate(s_dev, rgba, pw, ph); free(rgba); }
+        }
+        *w = (float)s_logoVarW[v];
+        *h = 192.0f;
+        if (s_logoVar[v]) return s_logoVar[v];
+    }
     if (!s_laikaLogoTried && s_dev)
     {
         int pw = 0, ph = 0;
@@ -1620,18 +1760,33 @@ float UiBrand(float x, float cy, float size)
         s_laikaLogoTried = 1;
         if (rgba) { s_laikaLogo = UiImageCreate(s_dev, rgba, pw, ph); free(rgba); }
     }
-    if (s_laikaLogo) UiImage(s_laikaLogo, x, cy - lh * 0.5f, lw, lh, 0.0f, D3DCOLOR_ARGB(255, 255, 255, 255));
+    *w = (float)UI_LAIKA_LOGO_W;
+    *h = (float)UI_LAIKA_LOGO_H;
+    return s_laikaLogo;
+}
+
+float UiBrand(float x, float cy, float size)
+{
+    // The LAIKA 64 logo (mark and name in one picture), whatever the skin.
+    float pw, ph, lh = size * 1.9f, lw;
+    IDirect3DTexture9 *tex = brand_tex(&pw, &ph);
+    lw = lh * pw / ph;
+    if (tex) UiImage(tex, x, cy - lh * 0.5f, lw, lh, 0.0f, D3DCOLOR_ARGB(255, 255, 255, 255));
     else UiText(UI_BOLD, size, x, cy, UI_COL_TEXT, "LAIKA 64", UI_LEFT);
     return lw;
 }
 
-float UiBrandWidth(float size) { return size * 1.9f * UI_LAIKA_LOGO_W / UI_LAIKA_LOGO_H; }
+float UiBrandWidth(float size)
+{
+    int v = s_logoVarShown;
+    return size * 1.9f * (v >= 0 && v < UI_LOGO_VAR_COUNT ? s_logoVarW[v] / 192.0f : (float)UI_LAIKA_LOGO_W / UI_LAIKA_LOGO_H);
+}
 
 void UiBrandFit(float x, float y, float w, float h)
 {
     // As big as the box allows at the logo's own proportions, centred, its bottom on the box's.
-    float lh = h, lw = lh * UI_LAIKA_LOGO_W / UI_LAIKA_LOGO_H;
-    if (lw > w) { lw = w; lh = lw * UI_LAIKA_LOGO_H / UI_LAIKA_LOGO_W; }
+    float lh = h, lw = UiBrandWidth(h / 1.9f);
+    if (lw > w) { lh = h * w / lw; lw = w; }
     UiBrand(x + (w - lw) * 0.5f, y + h - lh * 0.5f, lh / 1.9f);
 }
 
@@ -1904,8 +2059,14 @@ int UiTemperatures(int allowed, float *cpu, float *gpu, float *mem)
         memset(out, 0, sizeof(out));
         in[0] = 0x07;
         HalSendSMCMessage(in, out);
-        for (i = 0; i < 3; i++) t[i] = (out[1 + i * 2] | (out[2 + i * 2] << 8)) / 256.0f;
-        ok = t[0] > 1.0f && t[0] < 150.0f;   // nothing sensible came back: none
+        // Each reading that makes sense replaces the last one; one that does not keeps
+        // it (and the lines shown): a bad reading used to drop the temperatures for a
+        // second, the box shrinking and growing again - it flickered.
+        for (i = 0; i < 3; i++)
+        {
+            float v = (out[1 + i * 2] | (out[2 + i * 2] << 8)) / 256.0f;
+            if (v > 1.0f && v < 150.0f) { t[i] = v; if (!i) ok = 1; }
+        }
         at = now;
     }
     if (cpu) *cpu = t[0];

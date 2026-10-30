@@ -10,6 +10,10 @@
 #include "../../core/pif/h64_input_script.h"
 #include "../../core/pif/h64_padmap.h"
 
+// The in-game shortcuts (Config::hotkey): each a combination of up to 3 buttons.
+enum { HK_SAVE = 0, HK_LOAD, HK_SLOT_PREV, HK_SLOT_NEXT, HK_SHOT, HK_COUNT };
+#define HK_LT (1u << 16)   // a trigger past half way
+#define HK_RT (1u << 17)
 struct Config
 {
     char mode[32];      // mode=play|jittest
@@ -35,7 +39,10 @@ struct Config
     int superblocks;    // superblocks=0: blocks end at every branch (A/B check)
     int fastFpu;        // fastfpu=0: exact COP1 (FCR31 cause/flag bits kept); 1 by default
     int smooth;         // smooth=0: no edge smoothing when frames are shown
-    int resScale;       // resolution=1|2|3: internal resolution, native 320x240 x1, x2, x3 (default)
+    // res43=N, res169=N, reswide=0|1: the internal resolution, one of each list
+    // (ConfigResSize; 16:9 1366x768 by default) and which list is on. Older files'
+    // resolution=1..4 (320x240, 640x480, 960x720, 1280x720 16:9) are read into them.
+    int res43, res169, resWide;
     int hiTex;          // hirestex=0|1: use a hi-res texture pack (.hts) of the game when there is one (default 1)
     char hiTexFile[64]; // hirestexfile=NAME: which .hts under game:\hires_texture\<rom>\ (empty: the first one found)
     int texFilter;      // texfilter=0|1|2: N64 3-point, bilinear (default), nearest
@@ -43,11 +50,16 @@ struct Config
     int blur;           // blur=0|1|2: blur (off, soft, strong)
     int screen;         // screen=0..4: none, scanlines, CRT, curved CRT, LCD grid (crt=1: curved CRT)
     int brightness;     // brightness=0|1|2: as the console, lighter, much lighter
-    int vsync;          // vsync=1|0: frames wait for the TV's refresh (default 1)
+    int vsync;          // vsync=0|1|2: off (default), frames on time wait for the TV's refresh, all of them wait (aggressive)
     int deflicker;      // deflicker=0|1: each picture shown mixed with the previous one (default 0)
     int zoom;           // zoom=N: picture size in percent (default 100)
     int offsetX, offsetY;   // posx=, posy=: picture position in output pixels (default 0)
-    int stretch;        // stretch=0|1: the picture stretched to 16:9 (any resolution; HD then stretches instead of widening)
+    int devMode;        // devmode=1: the developer options show (Settings > System > Developer mode)
+    int gfxLog;         // gfxlog=1: with devmode, the renderer logs what it draws with and what it cannot match (graphics errors)
+    int texR3;          // texr3=1 (default): a double click of the right stick (R3) turns the HD textures on or off in game
+    u32 hotkey[HK_COUNT];   // hk_save= hk_load= hk_slotprev= hk_slotnext= hk_shot= (hex): the in-game shortcuts (HK_*), XInput button
+                        // bits plus HK_LT/HK_RT; 0: none. Settings > Controls > Button shortcuts
+    int stretch;        // stretch=0|1: the 4:3 picture stretched to 16:9 by software, with either resolution list (no wider 3D)
     int showFps;        // showfps=1: frames shown per second in a corner; 2: also CPU and RAM; 3: and the resolution; 4: and the GPU (graphics worker) load
                         // (read from older files into perfItems; written as 1 when anything is shown)
     int perfItems;      // perfitems=BITS: what the performance box shows (CONFIG_PERF_*; 0: no box)
@@ -61,12 +73,13 @@ struct Config
     // sounddir= (the user's own interface sounds), walldir=, savedir= (saves and save states), shotdir=,
     // texdir= (the hi-res texture packs: <texdir>\<ROM's internal name>\*.hts).
     char path[7][128];
-    int uiFont;         // uifont=0..5: the menus' letters - Inter (0), or xb_ui_fonts.h's (Roboto, Montserrat, ...)
+    int uiFont;         // uifont=0..5: the menus' letters - Inter (0), or xb_ui_fonts.h's (Roboto, the default; Montserrat, ...)
     int artKind;        // artkind=0..4: the games' picture in the ROM list - the box, the box in 3D, a picture from the game,
                         // the title screen, the logo (CONFIG_ART_*)
     int logCpu;         // logcpu=N: hardware thread of the log writer (5)
     int gameFlags;      // gameflags=HEX: the game's profile flags instead of the table's (checks; -1: the table)
     int updateCheck;    // updatecheck=0: do not ask GitHub for a newer release (xb_update.cpp); 2: as if running 0.0.0 (testing)
+    int artExtras;      // artextras=1 (default): with artdownload, the pictures from the game, title screens and logos are downloaded too (0: the box art only)
     int artDownload;    // artdownload=0: the ROM browser uses only the box art and game information already in
                         // <drive>:\art\games\ (xb_art.cpp); 1 (default): it downloads what is missing; 2: also in Xenia
     int browserDemo;    // browserdemo=N: the ROM browser moves its selection down every N ms (captures in Xenia)
@@ -85,11 +98,20 @@ struct Config
     int wallDim;        // walldim=0..80: how much the wallpaper is darkened, in % (default 40)
     int wallFit;        // wallfit=0..4: fill, fit, stretch, centre, tile (xb_ui.h UI_FIT_*)
     int wallShuffle;    // wallshuffle=1: the wallpapers at random, not in name order
+    int descTranslate;  // desctr=0|1: the games' descriptions in the menus' language when there is one (default 1)
+    int wallRecommend;  // wallrec=1: the background shows one of your games at a time, its big cover and what it is about
     int borderColor;    // bordercolor=0..13: the menus' edges - the selection's colour (0), or xb_menu.cpp's swatches
     int borderOpacity;  // borderopacity=0..100: how strong the edges are, in % (default 100)
     int borderWidth;    // borderwidth=0..4: the panels' own edge in pixels (0: none; default 1)
     int borderGlow;     // borderglow=0|1|2: the glow around the menus - pulsing, steady, none
-    int panelOpacity;   // panelopacity=20..100: how solid the panels are, in % (default 70)
+    int panelOpacity;   // panelopacity=0..100: how solid the panels are, in % (default 30)
+    int panelColor;     // panelcolor=0..13: the panels' body - the interface's own (0), or a tint of xb_menu.cpp's swatches
+    int settingsView;   // setview=0|1: the settings as the side list (0), or big icons with an explanation of each row (1)
+    int intro;          // intro=0|1: the LAIKA 64 logo when the emulator starts (Interface > Welcome intro; default 1)
+    int sharpLevel;     // sharplevel=0..100: sharpening as a bar (0 off); from sharpen= (1: 50, 2: 100) when a file has none
+    int blurLevel;      // blurlevel=0..100: blur as a bar (0 off); from blur= likewise. Only one of the two is above 0
+    int brightLevel;    // brightlevel=0..100: the picture's brightness as a bar (50 as the console; under it darker, over it
+                        // lighter); from brightness= when a file has no brightlevel
     int panelRound;     // panelround=0..3: the panels' corners - square, soft, round (default), rounder
     int uiSoundStyle;   // uisoundstyle=0..3: the interface sounds' style - glass, soft, retro, digital (xb_audio.h XB_SFX_STYLE_*)
     int saverMode;      // savermode=0..4: the screen saver - none, the background effect, the wallpapers, the logo, a clock
@@ -127,7 +149,7 @@ struct Config
     char uiLang[8];     // uilang=CODE (harissa64v2.ini, checks): this language whatever settings.ini says, no language list
     int langPick;       // langpick=1: the language list at start even when a language is set (checks); 2..8: on LANG_* N-2
     int langAuto;       // langauto=MS: the language list confirms its selection by itself after MS ms (checks)
-    int rumble;         // rumble=0|1: a Rumble Pak in each controller of the games that support it (default 1)
+    int rumble;         // rumble=0..100: the Rumble Pak's strength in % (0: off; default 100; an older file's 1 is 100)
     int padLoss;        // padloss=0|1|2: a controller unplugged during a game saves a state (autosaveslot) and
                         // pauses (1), or only pauses (2); 0: nothing (default)
     int autoSaveSlot;   // autosaveslot=1..9: that save's slot (9 by default), kept for it while padloss=1
@@ -141,7 +163,16 @@ struct Config
     int shotBtn1, shotBtn2; // shotbtn1=, shotbtn2=: H64_SRC_* source held together to take a screenshot (-1: not set)
 };
 
+// The shortcuts as they come: BACK + RB saves, BACK + LB loads, BACK + left/right change the slot, no screenshot.
+void ConfigHotkeyDefaults(Config *c);
+
 enum { PADLOSS_OFF = 0, PADLOSS_SAVE, PADLOSS_PAUSE, PADLOSS_COUNT };   // Config::padLoss: save and pause, pause
+
+// The internal resolutions: how many in the 4:3 (wide 0) or 16:9 (wide 1) list,
+// the size of one, and the one the settings choose (*wide: which list).
+int ConfigResCount(int wide);
+void ConfigResSize(int wide, int index, u32 *w, u32 *h);
+void ConfigResCurrent(const Config *c, u32 *w, u32 *h, int *wide);
 
 void ConfigDefaults(Config *c);
 // Applies the key=value lines of a file over *c. Returns 0 when the file is missing.

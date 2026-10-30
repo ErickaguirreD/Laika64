@@ -58,5 +58,8 @@ void h64_apply_game_profile(H64System *sys);
 // Sets sys->options from H64_GP_* flags (ini gameflags= for checks; the boot
 // flag H64_GP_IPL3_BOOT is read from the table at boot only).
 void h64_apply_profile_flags(H64System *sys, u32 flags);
+// The CPU cycles per instruction a game runs best at when the setting is left
+// at its default (`cpi`): its own value, or `cpi` itself.
+u32 h64_game_cpi(const char *gameCode, u32 cpi);
 
 #endif

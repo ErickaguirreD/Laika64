@@ -52,6 +52,7 @@ struct H64JitStats
     u64 linksMade, tlbUnlinks;      // exits linked; TLB-mapped blocks whose links were put back (remapped)
     u64 tlbStale;                   // TLB-mapped blocks whose entry check failed
     u64 codeBytes, hotBytes;        // generated code: all of it, and the part before the cold slow paths
+    u64 evictions, evictedBlocks;   // parts of the code memory made free again (ring mode), and the blocks they held
 };
 
 // A patched block exit: a direct branch into another block's body.
@@ -86,7 +87,20 @@ struct H64Jit
     u8 *mem;                        // executable code memory (from the platform)
     u32 memSize, memUsed;           // hot code grows from the start...
     u32 coldBase, coldUsed;         // ...and the slow paths from coldBase (half of the memory)
+    // After the code memory filled once: blocks end where a branch of their own
+    // page lands, so code entered in the middle is not compiled again from there
+    // (GoldenEye: each instruction in 3-4 blocks, 28 MB in a 32 MB memory, the
+    // ring evicting and compiling all the time - the stutters).
+    int splitTargets;
     u32 hotPermille;                // the hot code's share of the memory (0: 5/12), from the last fill (h64_jit_reset)
+    // Ring mode (after the first fill, once hotPermille is known): each part is
+    // used round and round; the oldest blocks ahead of the next block are dropped
+    // a 64th of the part at a time instead of the whole cache (Smash Remix
+    // runs more code than fits: a full flush every ~50 s, ~20000 blocks again).
+    u32 rtEnd;                      // end of the shared runtime: where the hot part starts
+    u32 hotClear, coldClear;        // free space ends here, ahead of memUsed / coldUsed
+    u32 evictGen;                   // counts evictions: a block exit remembered before one may be gone
+    u32 *freeSlots, freeSlotCount;  // block records given back by evictions
     void (*flushIcache)(void *addr, u32 len);
 
     H64JitBlock *blocks;            // block pool

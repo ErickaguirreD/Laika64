@@ -91,7 +91,7 @@ void h64_xenos_set_smooth(H64Renderer *r, int on);
 // Graphics settings (the menu's Graphics page).
 struct H64XenosOptions
 {
-    int scale;       // internal resolution: 1 native (320x240), 2 (640x480), 3 (960x720, default), 4 (1280x720, for 16:9)
+    unsigned resW, resH;   // internal resolution (a 320x240 image drawn at that size), at most RT_MAX_W x RT_MAX_H and the EDRAM's room (h64_xenos.cpp)
     int texFilter;   // 0 the N64's 3-point filter, 1 bilinear (default), 2 nearest
     int smooth;      // edge smoothing (FXAA) at display
     int sharpen;     // contrast-adaptive sharpening at display: 0 off, 1 low, 2 high
@@ -99,12 +99,15 @@ struct H64XenosOptions
     int screen;      // screen effect: 0 none, 1 scanlines, 2 CRT, 3 curved CRT, 4 LCD grid, 5 light scanlines
     int aspect;      // 0 4:3, 1 16:9 widescreen (3D drawn wider, no distortion), 2 16:9 stretched
     int brightness;  // 0 as the console, 1 lighter, 2 much lighter (dark tones lifted, white kept), 3 darker, 4 much darker
+    float sharpAmount, blurAmount;   // 0..1: how strong the sharpening / blur (on when `sharpen` / `blur` is)
+    float brightPower;   // the brightness as a power on the picture (under 1 lighter, over 1 darker); 0: `brightness`'s step
     int colorStyle;  // the picture's colours: 0 as they are, 1 saturated, 2 vivid, 3 black and white, 4 sepia, 5 warm, 6 cool, 7 green (an old handheld)
-    int vsync;       // 1: frames on time wait for the TV's refresh, a late one goes at once; 2: late ones wait too (but near the top)
+    int vsync;       // 1: frames on time wait for the TV's refresh, a late one goes at once; 2 (aggressive): every frame waits (no tearing)
     int deflicker;   // 1: each picture shown is mixed half and half with the previous one
     int hiTex;       // 1: replace textures from the loaded .hts pack (h64_xenos_load_hts)
     int zoom;        // picture size in percent (100: as the aspect gives; more crops the border)
     int offsetX, offsetY;   // picture position on the 1280x720 output, in pixels
+    int gfxLog;      // 1: log each new drawing mode, and many more pack misses and replacement details (developer mode)
 };
 void h64_xenos_set_options(H64Renderer *r, const H64XenosOptions *o);
 void h64_xenos_stats(H64Renderer *r, H64XenosStats *out, int reset);

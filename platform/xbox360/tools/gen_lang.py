@@ -28,7 +28,7 @@ LANG_DIR = os.path.join(ROOT, "platform", "xbox360", "lang")
 ATLAS = os.path.join(ROOT, "platform", "xbox360", "xb_ui_atlas.h")
 OUT = os.path.join(ROOT, "platform", "xbox360", "xb_lang_table.h")
 # The order of the language list (and of LANG_* in xb_lang.h).
-LANGS = ["en", "es", "de", "fr", "ar", "pt", "ru"]
+LANGS = ["en", "es", "de", "fr", "ar", "pt", "ru", "it"]
 
 # ---- Arabic shaping ----
 # Letter -> (isolated, final, initial, medial) presentation forms; None where
@@ -358,6 +358,13 @@ def main():
                             ("RESET_DEFAULT", []), ("AUTO_CONFIG", [])):
             check(code, "controls row %s with its widest value" % key,
                   width(t[key], 20, True) + max([value_width(v) for v in values] + [0]), col)
+        # The box art question from Screenshots and logos (confirm_draw with a title: 22 px, the screen less its margins).
+        check(code, "ART_ASK_EXTRAS", width(t["ART_ASK_EXTRAS"], 22, False), 1280 - 88 - 80)
+        # Credits page (AboutDraw): the role beside the profile picture, the two
+        # columns of what is new (a bullet, then 18 px text, 410 wide).
+        check(code, "CR_LAIKA", width(t["CR_LAIKA"], 19, False), 980 - 104 - 136)
+        for i in range(1, 11):
+            check(code, "CR_NEW_%d" % i, width(t["CR_NEW_%d" % i], 18, False), 410)
         for key in ("HEAD_BUTTONS", "HEAD_DPAD", "HEAD_CBUTTONS", "HEAD_STICK"):
             check(code, key, width(t[key], 15, True), 330)
         longest_n64 = max([t[k] for k in dirs] + ["START"], key=lambda s: width(s, 20, True))

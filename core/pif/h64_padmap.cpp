@@ -31,8 +31,8 @@ void h64_padmap_default(H64PadMap *m)
 {
     memset(m, 0, sizeof(*m));
     m->src[H64_N64_A] = BIT(H64_SRC_A);
-    m->src[H64_N64_B] = BIT(H64_SRC_B);
-    m->src[H64_N64_Z] = BIT(H64_SRC_X) | BIT(H64_SRC_Y) | BIT(H64_SRC_LT) | BIT(H64_SRC_RT);
+    m->src[H64_N64_B] = BIT(H64_SRC_X);    // where B sits on the N64 pad, left of A (user choice, 2026-10-28)
+    m->src[H64_N64_Z] = BIT(H64_SRC_LT);   // the trigger under the left hand
     m->src[H64_N64_START] = BIT(H64_SRC_START);
     m->src[H64_N64_DUP] = BIT(H64_SRC_DUP);
     m->src[H64_N64_DDOWN] = BIT(H64_SRC_DDOWN);

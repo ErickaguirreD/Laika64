@@ -5,7 +5,7 @@
 .DESCRIPTION
     1. Rebuilds the Release | Xbox 360 configuration with Visual Studio 2010
        and the Xbox 360 SDK (skip with -NoBuild).
-    2. Checks the output (a fresh harissa64v2.xex with the title data).
+    2. Checks the output (a fresh LAIKA64.xex with the title data).
     3. Assembles release\LAIKA 64\ and zips it to
        release\LAIKA 64-<version>.zip, where <version> comes from VERSION.
 
@@ -38,10 +38,11 @@ param(
 $ErrorActionPreference = 'Stop'
 $repo = $PSScriptRoot
 $version = (Get-Content (Join-Path $repo 'VERSION') -TotalCount 1).Trim()
-if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "VERSION must look like 1.2.3 (got '$version')." }
+if ($version -notmatch '^\d+\.\d+(\.\d+)?$') { throw "VERSION must look like 1.2 or 1.2.3 (got '$version')." }
 
 $build = Join-Path $repo 'platform\xbox360\Release'
-$xex = Join-Path $build 'harissa64v2.xex'
+$built = Join-Path $build 'harissa64v2.xex'   # what the XDK's packaging step names it
+$xex = Join-Path $build 'LAIKA64.xex'        # the executable's name, copied from it
 $art = Join-Path $repo 'platform\xbox360\title\art'
 $releaseDir = Join-Path $repo 'release'
 $stage = Join-Path $releaseDir 'LAIKA 64'
@@ -64,12 +65,13 @@ if (-not $NoBuild) {
     $log = Join-Path $env:TEMP 'harissa64_release_build.log'
     $started = Get-Date
     # The XEX packaging step does not always run again on its own: start from no xex.
-    if (Test-Path $xex) { Remove-Item -LiteralPath $xex -Force }
+    if (Test-Path $built) { Remove-Item -LiteralPath $built -Force }
     cmd /c "`"$vcvars`" x86 >nul && `"$msbuild`" `"$sln`" /t:Rebuild /p:Configuration=Release /p:Platform=`"Xbox 360`" /m /nologo /v:minimal /fl /flp:logfile=`"$log`";verbosity=normal"
     if ($LASTEXITCODE -ne 0) { throw "Build failed (see $log)." }
-    if (-not (Test-Path $xex) -or (Get-Item $xex).LastWriteTime -lt $started) {
-        throw "Build finished but $xex was not regenerated (see $log)."
+    if (-not (Test-Path $built) -or (Get-Item $built).LastWriteTime -lt $started) {
+        throw "Build finished but $built was not regenerated (see $log)."
     }
+    Copy-Item $built $xex -Force
 }
 
 # ---------------------------------------------------------------- checks --
@@ -86,6 +88,12 @@ New-Item -ItemType Directory -Force $stage | Out-Null
 Copy-Item $xex (Join-Path $stage 'default.xex')
 Copy-Item (Join-Path $repo 'README.md'), (Join-Path $repo 'LICENSE'), (Join-Path $repo 'THIRD_PARTY.md') $stage
 New-Item -ItemType Directory -Force (Join-Path $stage 'roms') | Out-Null
+# The setup assistant's music (tools/gen_wizard_music.py).
+New-Item -ItemType Directory -Force (Join-Path $stage 'assistant') | Out-Null
+Copy-Item (Join-Path $repo 'assets\assistant\laika_orbit.mp3') (Join-Path $stage 'assistant')
+# ... and the menus' default music (Config::musicTrack).
+New-Item -ItemType Directory -Force (Join-Path $stage 'music') | Out-Null
+Copy-Item (Join-Path $repo 'assets\assistant\laika_orbit.mp3') (Join-Path $stage 'music')
 New-Item -ItemType Directory -Force (Join-Path $stage 'art') | Out-Null
 foreach ($f in 'cover.png', 'background.png', 'icon.png') { Copy-Item (Join-Path $art $f) (Join-Path $stage 'art') }
 # The PC script that fills art\games\ (box art, game information) for consoles without internet.

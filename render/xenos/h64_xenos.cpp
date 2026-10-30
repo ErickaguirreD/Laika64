@@ -28,17 +28,21 @@
 // buffer uses tiles 0..719, the 960x720 N64 colour target 720..1259 and its
 // depth 1260..1799 (2048 in all). 960x720 is the 4:3 picture of the 720p
 // output, so frames are shown 1:1.
-// The N64 target is 1280x720 at most (resolution 4, 16:9); the lower
-// resolutions use its top-left part (rtW x rtH). EDRAM holds 2048 tiles of
-// 5120 bytes: the back buffer (720), the N64 colour target (720) and its depth
-// (720) do not all fit, so the N64 colour target shares the back buffer's
-// tiles: each present resolves it into its frame texture first, and the next
-// draw restores it from there (select_framebuffer).
-#define RT_WIDTH 1280
-#define RT_HEIGHT 720
+// The N64 target is made at the internal resolution (rtW x rtH, create_targets).
+// EDRAM holds 2048 tiles of 5120 bytes: the back buffer (720), the N64 colour
+// target and its depth do not all fit, so the N64 colour target shares the
+// back buffer's tiles: each present resolves it into its frame texture first,
+// and the next draw restores it from there (select_framebuffer). Its depth
+// follows both, then the copy-back target (240): a target of up to 904 tiles
+// fits (1120x840, 1366x768). Frame textures are RT_WIDTH x RT_HEIGHT, the
+// largest target; a smaller one uses their top-left part.
+#define RT_WIDTH 1376
+#define RT_HEIGHT 848
+#define EDRAM_TILES 2048
 #define EDRAM_N64_COLOR 0
-#define EDRAM_N64_DEPTH 720
-#define EDRAM_READBACK 1440   // 640x480 colour (240 tiles): frames shrunk to the N64 size for copy-backs
+#define EDRAM_BACK_TILES 720   // the 1280x720 back buffer
+#define EDRAM_RB_TILES 240     // 640x480 colour: frames shrunk to the N64 size for copy-backs
+static u32 edram_tiles(u32 w, u32 h) { return ((w + 79) / 80) * ((h + 15) / 16); }
 #define RB_WIDTH 640
 #define RB_HEIGHT 480
 #define FB_SLOTS 8
@@ -127,12 +131,14 @@ struct Xenos
     IDirect3DPixelShader9 *psSmooth;   // edge smoothing at display (FXAA)
     int smooth;
     // Graphics settings (h64_xenos_set_options).
-    int scale;          // internal resolution: 1 (320x240 for a 320-wide image), 2, 3 (960x720)
-    u32 rtW, rtH;       // the part of the N64 target drawn at that scale (viewport)
+    u32 rtW, rtH;       // internal resolution: the N64 target's size (320x240 draws a 320-wide image 1:1)
+    int targetsStale;   // the N64 target and depth are to be made again at rtW x rtH (bind_n64_target)
     float uMax, vMax;   // rtW / RT_WIDTH, rtH / RT_HEIGHT: that part in a frame texture
     int texFilter;      // 0 the N64's 3-point filter, 1 bilinear, 2 nearest
     int sharpen, blur, screen;  // display: sharpening 0-2, blur 0-2, screen effect (H64XenosOptions)
     int brightness;             // display: 0-4 (H64XenosOptions)
+    float brightPower;          // display: the brightness bar's power (0: the step's)
+    float sharpAmount, blurAmount;   // display: the bars' strength, 0..1 (prm3.z, prm3.w)
     int colorStyle;             // display: 0-7 (H64XenosOptions)
     int vsync, vsyncSet;        // display: V-Sync wanted (H64XenosOptions), and what the device has (-1: unknown)
     int viGamma;                // the VI's gamma bit at this present (VI_CONTROL bit 3)
@@ -219,6 +225,7 @@ struct Xenos
     IDirect3DTexture9 *shotTex;    // screenshots: the shown frame resolved into CPU-cached memory (made on first use)
     int deflicker;                 // option: pictures mixed with the previous one (deflicker_pass)
     int zoom, offsetX, offsetY;    // option: picture size (percent) and position (output pixels)
+    int gfxLog;                    // option: the graphics log of the developer mode (H64XenosOptions)
     IDirect3DTexture9 *dfTex[2];   // the last two pictures shown, before the mix (made on first use)
     int dfCur, dfValid;
     IDirect3DPixelShader9 *psMix;
@@ -895,7 +902,7 @@ static const u32 *hts_replacement(Xenos *x, const H64RdpTile *t, const TexBindin
         x->htsMisses++;
         // Each checksum once, for the first 300: the first 40 lines alone were
         // gone before the game reached the textures that matter (OoT's sky).
-        if (x->htsMissLog.size() < 300 && x->htsMissLog.insert(std::make_pair(crc, 1)).second)
+        if (x->htsMissLog.size() < (x->gfxLog ? 3000u : 300u) && x->htsMissLog.insert(std::make_pair(crc, 1)).second)
         {
             H64_INFO("[hts] miss %016llX: %ux%u (tile %ux%u) fmt %u size %u rowBytes %u src %06X %s%s; load %ux%u size %u img %u, tmem %X", (unsigned long long)crc,
                      cw, chh, tw, th, t->fmt, t->size, rowBytes, ls->addr, ls->block ? "block" : "tile", pal ? " (palette)" : "",
@@ -1139,7 +1146,7 @@ static IDirect3DTexture9 *lookup_texture(Xenos *x, u32 tileIndex, TexBinding *b)
             if (b->wrapS || b->mirrorS) uw = hts_pow2(uw);
             if (b->wrapT || b->mirrorT) uh = hts_pow2(uh);
             if (uw > 4096 || uh > 4096) { hires = NULL; uw = b->w; uh = b->h; }
-            else if (x->htsDetail < 60 && (hrW >= 200 || hrH >= 200 || b->w != hrRealW || b->h != hrRealH))
+            else if (x->htsDetail < (x->gfxLog ? 1000u : 60u) && (hrW >= 200 || hrH >= 200 || b->w != hrRealW || b->h != hrRealH))
             {
                 // What a replacement does to a texture whose shape is not the plain case (stretching, backgrounds).
                 x->htsDetail++;
@@ -1351,9 +1358,42 @@ static u32 fb_height(const Xenos *x, u32 width)
     return width <= 320 ? 240 : width * 3 / 4;
 }
 
+// The N64 colour target, its depth and the copy-back target in EDRAM at the
+// internal resolution (EDRAM layout above). What EDRAM held is gone: the
+// image is restored from its frame texture (select_framebuffer; one frame at
+// the previous size). 0 when they do not fit or could not be made.
+static int create_targets(Xenos *x)
+{
+    D3DSURFACE_PARAMETERS sp;
+    u32 t = edram_tiles(x->rtW, x->rtH), depthBase = t > EDRAM_BACK_TILES ? t : EDRAM_BACK_TILES;
+    if (depthBase + t + EDRAM_RB_TILES > EDRAM_TILES) return 0;
+    x->dev->SetRenderTarget(0, x->backBuffer);
+    x->dev->SetDepthStencilSurface(NULL);
+    if (x->n64Color) { x->n64Color->Release(); x->n64Color = NULL; }
+    if (x->n64Depth) { x->n64Depth->Release(); x->n64Depth = NULL; }
+    if (x->rbSurf) { x->rbSurf->Release(); x->rbSurf = NULL; }
+    memset(&sp, 0, sizeof(sp));
+    sp.Base = EDRAM_N64_COLOR;
+    sp.HierarchicalZBase = 0xFFFFFFFF;
+    x->dev->CreateRenderTarget(x->rtW, x->rtH, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &x->n64Color, &sp);
+    sp.Base = depthBase;
+    sp.HierarchicalZBase = 0;
+    x->dev->CreateDepthStencilSurface(x->rtW, x->rtH, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, FALSE, &x->n64Depth, &sp);
+    sp.Base = depthBase + t;
+    sp.HierarchicalZBase = 0xFFFFFFFF;
+    if (FAILED(x->dev->CreateRenderTarget(RB_WIDTH, RB_HEIGHT, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &x->rbSurf, &sp))) x->rbSurf = NULL;
+    x->edramOwner = -1;
+    x->edramDepthAddr = 0xFFFFFFFF;
+    x->targetBound = 0;
+    x->targetsStale = 0;
+    H64_INFO("[xenos] N64 target %ux%u (%u EDRAM tiles, depth at %u, copy-back at %u)", x->rtW, x->rtH, t, depthBase, depthBase + t);
+    return x->n64Color && x->n64Depth;
+}
+
 static void bind_n64_target(Xenos *x)
 {
     D3DVIEWPORT9 vp;
+    if (x->targetsStale) create_targets(x);
     if (x->targetBound) return;
     x->dev->SetRenderTarget(0, x->n64Color);
     x->dev->SetDepthStencilSurface(x->n64Depth);
@@ -1565,7 +1605,7 @@ static IDirect3DPixelShader9 *display_shader(Xenos *x)
         "float3 picture(float2 uv) {\n"
         "  float3 c = base(uv);\n"
         "#if BLUR\n"
-        "  float2 d = (prm.xy - prm3.xy) / prm.zw * (BLUR == 1 ? 0.75 : 1.5);\n"
+        "  float2 d = (prm.xy - prm3.xy) / prm.zw * lerp(0.35, 1.8, prm3.w);\n"
         "  c = (4.0 * c + 2.0 * (tap(uv + float2(d.x, 0.0)) + tap(uv - float2(d.x, 0.0)) + tap(uv + float2(0.0, d.y)) + tap(uv - float2(0.0, d.y)))\n"
         "       + tap(uv + d) + tap(uv - d) + tap(uv + float2(d.x, -d.y)) + tap(uv + float2(-d.x, d.y))) / 16.0;\n"
         "#elif SHARPEN\n"
@@ -1573,7 +1613,7 @@ static IDirect3DPixelShader9 *display_shader(Xenos *x)
         "  float3 w = tap(uv - float2(rcp.x, 0.0)), e = tap(uv + float2(rcp.x, 0.0));\n"
         "  float3 mn = min(c, min(min(n, so), min(w, e))), mx = max(c, max(max(n, so), max(w, e)));\n"
         "  float3 amp = sqrt(saturate(min(mn, 1.0 - mx) / max(mx, 0.0001)));\n"
-        "  float3 wt = amp * (SHARPEN == 1 ? -0.125 : -0.2);\n"
+        "  float3 wt = amp * -lerp(0.04, 0.24, prm3.z);\n"
         "  c = saturate((c + wt * (n + so + w + e)) / (1.0 + 4.0 * wt));\n"
         "#endif\n"
         "  return c;\n"
@@ -1618,6 +1658,22 @@ static IDirect3DPixelShader9 *display_shader(Xenos *x)
         "  float2 g = frac(n * prm.zw);\n"
         "  float2 gap = smoothstep(0.0, 0.18, g) * smoothstep(1.0, 0.82, g);\n"
         "  c *= lerp(0.55, 1.08, gap.x * gap.y);\n"
+        // 6 vignette: the corners darkened, the middle as it is.
+        "#elif SCREEN == 6\n"
+        "  float3 c = picture(uv);\n"
+        "  float2 v = n * (1.0 - n);\n"
+        "  c *= pow(saturate(v.x * v.y * 16.0), 0.35) * 1.05;\n"
+        // 7 aperture grille: a Trinitron's thin red, green and blue columns, 3 per output pixel trio.
+        "#elif SCREEN == 7\n"
+        "  float3 c = picture(uv);\n"
+        "  float k = frac(vpos.x / 3.0) * 3.0;\n"
+        "  float3 mask = k < 1.0 ? float3(1.0, 0.7, 0.7) : k < 2.0 ? float3(0.7, 1.0, 0.7) : float3(0.7, 0.7, 1.0);\n"
+        "  c *= mask * 1.25;\n"
+        // 8 dot matrix: each N64 pixel a round dot with a dark gap round it.
+        "#elif SCREEN == 8\n"
+        "  float3 c = picture(uv);\n"
+        "  float2 g = frac(n * prm.zw) - 0.5;\n"
+        "  c *= lerp(0.35, 1.12, smoothstep(0.5, 0.32, length(g)));\n"
         "#else\n"
         "  float3 c = picture(uv);\n"
         "#endif\n"
@@ -1731,7 +1787,7 @@ static void draw_display(Xenos *x, IDirect3DTexture9 *tex, const ViGeom *g, floa
     {
         // A power on the picture: under 1 lifts the dark tones, over 1 deepens them (white stays white).
         static const float bright[5] = { 1.0f, 0.8f, 0.65f, 1.25f, 1.55f };
-        c[1] = (x->viGamma ? 0.5f : 1.0f) * bright[x->brightness];
+        c[1] = (x->viGamma ? 0.5f : 1.0f) * (x->brightPower > 0.0f ? x->brightPower : bright[x->brightness]);
     }
     c[2] = c[3] = 0;
     x->dev->SetPixelShaderConstantF(2, c, 1);
@@ -1761,7 +1817,7 @@ static void draw_display(Xenos *x, IDirect3DTexture9 *tex, const ViGeom *g, floa
         }
         x->dev->SetPixelShaderConstantF(4, m, 3);
     }
-    c[0] = u0; c[1] = v0; c[2] = c[3] = 0;
+    c[0] = u0; c[1] = v0; c[2] = x->sharpAmount; c[3] = x->blurAmount;
     x->dev->SetPixelShaderConstantF(3, c, 1);
     draw_textured_uv(x, ps, tex, u0, v0, u1, v1, px0, py0, pw, ph, bw, bh);
 }
@@ -1782,6 +1838,7 @@ static float ws_x(const Xenos *x, float px, float fbw)
 
 // Wide enough to stay full width in 16:9 widescreen.
 static int ws_wide(float w, float fbw) { return w >= fbw * 0.9f; }
+
 
 static int vi_geometry(const u32 *v, ViGeom *g);
 
@@ -2492,7 +2549,7 @@ static void log_mode(Xenos *x, int hasDepth, u32 tile)
     const H64RdpTile *a = &st->tiles[tile & 7], *b = &st->tiles[(tile + 1) & 7];
     u64 key = 0xCBF29CE484222325ull;
     u32 v[8];
-    if (x->modeLog.size() >= 300) return;
+    if (x->modeLog.size() >= (x->gfxLog ? 3000u : 300u)) return;
     v[0] = (u32)x->combineRaw; v[1] = (u32)(x->combineRaw >> 32); v[2] = st->rasterFlags; v[3] = st->depthBlendFlags;
     v[4] = st->zMode | (hasDepth << 4) | (tile << 8); v[5] = st->blend[0][0] | st->blend[0][1] << 4 | st->blend[0][2] << 8 | st->blend[0][3] << 12 |
                                        st->blend[1][0] << 16 | st->blend[1][1] << 20 | st->blend[1][2] << 24 | st->blend[1][3] << 28;
@@ -2507,7 +2564,7 @@ static void log_mode(Xenos *x, int hasDepth, u32 tile)
 
 static void setup_combined(Xenos *x, int hasDepth, TexBinding *tb0, TexBinding *tb1, u32 tile, int zOut)
 {
-    if (x->debug == 4) log_mode(x, hasDepth, tile);
+    if (x->debug == 4 || x->gfxLog) log_mode(x, hasDepth, tile);
     const H64RdpState *st = x->st;
     int two = (st->rasterFlags & RS_MULTI_CYCLE) != 0;
     u32 flags = two ? KEY_TWO_CYCLE : 0;
@@ -3589,12 +3646,12 @@ void h64_xenos_present_vi(H64Renderer *r, const u32 *vi)
     if (x->vsyncSet != x->vsync)
     {
         // V-Sync: a frame on time waits for the TV's refresh (no tearing); a
-        // late one goes at once (adaptive: a tear on that frame only). With
-        // late frames held to the next refresh (vsync=2: only within the top
-        // 10 % of the scan), a game a little under 60 dropped to 30: Mario
-        // Tennis's busy moments 27-43 VI/s, 52-60 in 2.0.1 (no V-Sync).
+        // late one goes at once (adaptive: a tear on that frame only - games
+        // that are often late still tore). Aggressive (vsync=2): every frame
+        // waits for the refresh, never a tear, but a game a little under 60
+        // can drop to 30 (Mario Tennis's busy moments 27-43 VI/s).
         x->dev->SetRenderState(D3DRS_PRESENTINTERVAL, x->vsync ? D3DPRESENT_INTERVAL_ONE : D3DPRESENT_INTERVAL_IMMEDIATE);
-        x->dev->SetRenderState(D3DRS_PRESENTIMMEDIATETHRESHOLD, x->vsync == 2 ? 10 : 100);
+        x->dev->SetRenderState(D3DRS_PRESENTIMMEDIATETHRESHOLD, x->vsync == 2 ? 0 : 100);
         x->vsyncSet = x->vsync;
     }
     x->dev->Present(NULL, NULL, NULL, NULL);
@@ -3634,7 +3691,6 @@ H64Renderer *h64_xenos_create(H64System *sys, IDirect3DDevice9 *dev)
         { 0, 32, D3DDECLTYPE_FLOAT4, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_TEXCOORD, 0 },
         D3DDECL_END()
     };
-    D3DSURFACE_PARAMETERS sp;
     Xenos *x = new Xenos;
     int i;
     x->api.user = x;
@@ -3691,19 +3747,14 @@ H64Renderer *h64_xenos_create(H64System *sys, IDirect3DDevice9 *dev)
     memset(x->fb, 0, sizeof(x->fb));
 
     dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &x->backBuffer);
-    memset(&sp, 0, sizeof(sp));
-    sp.Base = EDRAM_N64_COLOR;
-    sp.HierarchicalZBase = 0xFFFFFFFF;
-    dev->CreateRenderTarget(RT_WIDTH, RT_HEIGHT, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &x->n64Color, &sp);
-    sp.Base = EDRAM_N64_DEPTH;
-    sp.HierarchicalZBase = 0;
-    dev->CreateDepthStencilSurface(RT_WIDTH, RT_HEIGHT, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, FALSE, &x->n64Depth, &sp);
-    sp.Base = EDRAM_READBACK;
-    sp.HierarchicalZBase = 0xFFFFFFFF;
+    x->n64Color = NULL;
+    x->n64Depth = NULL;
     x->rbSurf = NULL;
     x->rbTex = NULL;
     x->shotTex = NULL;
-    if (FAILED(dev->CreateRenderTarget(RB_WIDTH, RB_HEIGHT, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &x->rbSurf, &sp))) x->rbSurf = NULL;
+    x->rtW = 960;
+    x->rtH = 720;
+    create_targets(x);
     if (FAILED(dev->CreateTexture(RB_WIDTH, RB_HEIGHT, 1, D3DUSAGE_CPU_CACHED_MEMORY, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &x->rbTex, NULL)))
         x->rbTex = NULL;
     dev->CreateVertexDeclaration(decl, &x->decl);
@@ -3714,15 +3765,15 @@ H64Renderer *h64_xenos_create(H64System *sys, IDirect3DDevice9 *dev)
     x->dfTex[0] = x->dfTex[1] = NULL;
     x->psSmooth = compile_ps(dev, s_psSmoothSource);
     x->smooth = 1;
-    x->scale = 3;
-    x->rtW = 960;
-    x->rtH = 720;
     x->uMax = (float)x->rtW / RT_WIDTH;
     x->vMax = (float)x->rtH / RT_HEIGHT;
     x->texFilter = 1;
     x->sharpen = x->blur = x->screen = x->aspect = x->wsMain = 0;
     x->brightness = x->viGamma = 0;
+    x->brightPower = 0.0f;
+    x->sharpAmount = x->blurAmount = 0.5f;
     x->colorStyle = 0;
+    x->gfxLog = 0;
     x->vsync = 0;
     x->vsyncSet = -1;
     x->deferNotify = 0;
@@ -4018,6 +4069,10 @@ int h64_xenos_load_hts(H64Renderer *r, const char *path)
     if (!path || !path[0]) return 0;
     x->hts = h64_hts_open(path);
     if (!x->hts) return 0;
+    // The cache holds the textures decoded without a pack (it was off): they are
+    // decoded again, now with it. Only the memos were dropped before, so turning
+    // the packs back on in game (the menu, R3) left the N64 textures showing.
+    retire_all_textures(x);
     x->tmemGen++;   // memos may hold textures decoded without the pack
     return (int)h64_hts_count(x->hts);
 }
@@ -4030,7 +4085,14 @@ void h64_xenos_set_smooth(H64Renderer *r, int on)
 void h64_xenos_set_options(H64Renderer *r, const H64XenosOptions *o)
 {
     Xenos *x = X(r);
-    int scale = o->scale < 1 ? 1 : o->scale > 4 ? 4 : o->scale;
+    u32 rw = o->resW, rh = o->resH;
+    // Within the frame textures and the EDRAM's room (create_targets); else 960x720.
+    if (rw < 320 || rh < 240 || rw > RT_WIDTH || rh > RT_HEIGHT ||
+        (edram_tiles(rw, rh) > EDRAM_BACK_TILES ? edram_tiles(rw, rh) : EDRAM_BACK_TILES) + edram_tiles(rw, rh) + EDRAM_RB_TILES > EDRAM_TILES)
+    {
+        rw = 960;
+        rh = 720;
+    }
     if ((o->hiTex != 0) != x->hiTex)
     {
         // Textures are cached by their TMEM contents: replaced and original ones share keys, so start over.
@@ -4040,13 +4102,18 @@ void h64_xenos_set_options(H64Renderer *r, const H64XenosOptions *o)
     x->smooth = o->smooth;
     x->sharpen = o->sharpen < 0 || o->sharpen > 2 ? 0 : o->sharpen;
     x->blur = o->blur < 0 || o->blur > 2 ? 0 : o->blur;
-    x->screen = o->screen < 0 || o->screen > 5 ? 0 : o->screen;
+    x->screen = o->screen < 0 || o->screen > 8 ? 0 : o->screen;
     x->brightness = o->brightness < 0 || o->brightness > 4 ? 0 : o->brightness;
+    x->brightPower = o->brightPower > 0.2f && o->brightPower < 3.0f ? o->brightPower : 0.0f;
+    x->sharpAmount = o->sharpAmount < 0.0f ? 0.0f : o->sharpAmount > 1.0f ? 1.0f : o->sharpAmount;
+    x->blurAmount = o->blurAmount < 0.0f ? 0.0f : o->blurAmount > 1.0f ? 1.0f : o->blurAmount;
     x->colorStyle = o->colorStyle < 0 || o->colorStyle > 7 ? 0 : o->colorStyle;
     x->vsync = o->vsync;
     if (!o->deflicker) x->dfValid = 0;
     x->deflicker = o->deflicker != 0;
     x->zoom = o->zoom < 50 || o->zoom > 200 ? 100 : o->zoom;
+    if (o->gfxLog && !x->gfxLog) H64_INFO("[gfx] graphics error log on (developer mode): drawing modes, pack misses and replacements");
+    x->gfxLog = o->gfxLog != 0;
     x->offsetX = o->offsetX;
     x->offsetY = o->offsetY;
     if (o->aspect != x->aspect) x->stateDirty = 1;   // the scissor moves in widescreen
@@ -4056,15 +4123,16 @@ void h64_xenos_set_options(H64Renderer *r, const H64XenosOptions *o)
         x->texFilter = o->texFilter < 0 || o->texFilter > 2 ? 1 : o->texFilter;
         x->stateDirty = 1;
     }
-    if (scale != x->scale)
+    if (rw != x->rtW || rh != x->rtH)
     {
-        x->scale = scale;
-        // 1-3: 320x240 times scale; 4: 1280x720, square pixels in 16:9 widescreen.
-        x->rtW = scale == 4 ? 1280 : 320 * (u32)scale;
-        x->rtH = scale == 4 ? 720 : 240 * (u32)scale;
+        // The target is made again at the new size when it is next bound,
+        // on the thread that draws (bind_n64_target).
+        x->rtW = rw;
+        x->rtH = rh;
         x->uMax = (float)x->rtW / RT_WIDTH;
         x->vMax = (float)x->rtH / RT_HEIGHT;
-        x->targetBound = 0;   // the viewport is set when the N64 target is bound again
+        x->targetsStale = 1;
+        x->targetBound = 0;
         x->stateDirty = 1;
     }
 }

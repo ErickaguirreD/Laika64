@@ -22,8 +22,11 @@
 #include "../../render/xenos/h64_hts.h"
 #include "xb_art.h"
 #include "xb_audio.h"
-#include "xb_flags.h"
 #include "xb_lang.h"
+#include "xb_flags.h"
+#include "xb_pad.h"
+#include "xb_profile.h"
+#include "xb_wizref.h"
 #include "xb_ui.h"
 #include "xb_update.h"
 
@@ -124,24 +127,67 @@ static void selection_bar_side(float x, float y, float w, float h, int right)
 
 // The menus' edges (Settings > Interface > Borders and panels): their colour
 // (the selection's unless one is chosen), strength and glow (ui_from_config).
-static int s_edgeRgb[3] = { 120, 205, 255 }, s_edgeOp = 100, s_edgeGlow;   // s_edgeGlow: 0 pulsing, 1 steady, 2 none
+static int s_edgeRgb[3] = { 120, 205, 255 }, s_edgeOp = 100, s_edgeGlow;   // s_edgeGlow: Config::borderGlow (see s_glowLabels)
+#define GLOW_COUNT 6   // Config::borderGlow's values (s_glowLabels)
 #define EDGE_COL(a) D3DCOLOR_ARGB((int)(a), s_edgeRgb[0], s_edgeRgb[1], s_edgeRgb[2])
 
 // The glow around a panel's edge (menus, dialogs): soft rings outside it,
 // fading outwards, and a fine ring on the edge - nothing inside, so the
 // panel's own colour stays as it is. Pulsing, steady or none, as chosen.
+// A point at distance s along a w x h rectangle's edge (clockwise from the top left).
+static void edge_point(float x, float y, float w, float h, float s, float *px, float *py)
+{
+    float L = 2 * (w + h);
+    s = fmodf(s, L);
+    if (s < 0) s += L;
+    if (s < w) { *px = x + s; *py = y; }
+    else if (s < w + h) { *px = x + w; *py = y + s - w; }
+    else if (s < 2 * w + h) { *px = x + w - (s - w - h); *py = y + h; }
+    else { *px = x; *py = y + h - (s - 2 * w - h); }
+}
+
 static void edge_glow(float x, float y, float w, float h, float r)
 {
-    float a = (s_edgeGlow == 0 ? 0.35f + 0.65f * selection_pulse() : 0.75f) * s_edgeOp / 100.0f;
-    int i;
-    if (s_edgeGlow == 2 || a <= 0.0f) return;
+    float now = UiTime(), a;
+    int i, rgb[3] = { s_edgeRgb[0], s_edgeRgb[1], s_edgeRgb[2] };
+    if (s_edgeGlow == 2 || s_edgeOp <= 0) return;
+    switch (s_edgeGlow)
+    {
+    case 0: a = 0.35f + 0.65f * selection_pulse(); break;              // pulsing
+    case 4: a = 0.5f - 0.5f * cosf(now * 6.2832f / 3.2f); break;       // fade: all the way out and back, slowly
+    case 3: a = 0.30f; break;                                          // snake: a faint edge, the snake below
+    default: a = 0.75f; break;                                         // steady, rainbow
+    }
+    if (s_edgeGlow == 5)
+    {
+        // Rainbow: the hue goes round every 6 s.
+        float hh = fmodf(now / 6.0f, 1.0f) * 6.0f, f = hh - floorf(hh);
+        int k = (int)hh, q = (int)(255 * (1 - f)), t = (int)(255 * f);
+        int tab[6][3] = { { 255, t, 0 }, { q, 255, 0 }, { 0, 255, t }, { 0, q, 255 }, { t, 0, 255 }, { 255, 0, q } };
+        rgb[0] = tab[k % 6][0]; rgb[1] = tab[k % 6][1]; rgb[2] = tab[k % 6][2];
+    }
+    a *= s_edgeOp / 100.0f;
+#define GLOW_COL(al) D3DCOLOR_ARGB((int)(al), rgb[0], rgb[1], rgb[2])
     r = UiPanelRadius(r);
     for (i = 1; i <= 12; i++)
     {
         float f = 1.0f - i / 13.0f;
-        UiRoundRing(x - i, y - i, w + i * 2, h + i * 2, r + i, 1.5f, EDGE_COL(70 * a * f * f));
+        UiRoundRing(x - i, y - i, w + i * 2, h + i * 2, r + i, 1.5f, GLOW_COL(70 * a * f * f));
     }
-    UiRoundRing(x, y, w, h, r, 1.5f, EDGE_COL(160 * a));
+    UiRoundRing(x, y, w, h, r, 1.5f, GLOW_COL(160 * a));
+    if (s_edgeGlow == 3)
+    {
+        // Snake: a bright head running round the edge every 3.5 s, its tail fading behind it.
+        const int n = 28;
+        float L = 2 * (w + h), head = fmodf(now / 3.5f, 1.0f) * L, px, py;
+        for (i = n - 1; i >= 0; i--)
+        {
+            float k = 1.0f - (float)i / n;
+            edge_point(x, y, w, h, head - i * 9.0f, &px, &py);
+            UiCircle(px, py, 2.0f + 5.0f * k, GLOW_COL(40 + 200 * k * k * s_edgeOp / 100.0f));
+        }
+    }
+#undef GLOW_COL
 }
 
 static void selection_bar(float x, float y, float w, float h) { selection_bar_side(x, y, w, h, 0); }
@@ -187,10 +233,61 @@ static void icon_tri(float cx, float cy, float s, int dir, D3DCOLOR c);   // the
 #define VALUE_ARROW 9.0f    // an arrow's width
 #define VALUE_GAP 12.0f     // between an arrow and the text
 static float press_amount(void);
+#define SWITCH_W 46.0f
+#define SWITCH_H 24.0f
+// An on/off row's value (toggle()): "\x01" on, "\x02" off, maybe inside "< >".
+static int switch_value(const char *value)
+{
+    if (!strcmp(value, "\x01") || !strcmp(value, "< \x01 >")) return 1;
+    if (!strcmp(value, "\x02") || !strcmp(value, "< \x02 >")) return 0;
+    return -1;
+}
+
+// A switch: a rounded track with a round knob, on the right and in the selection's
+// colour when on, on the left and white only when off; on a press (the selected
+// row) the knob slides over from the other side.
+static void draw_switch(float right, float cy, int on, int selected)
+{
+    const float x = right - SWITCH_W, y = cy - SWITCH_H * 0.5f, r = SWITCH_H * 0.5f;
+    float t = 1.0f, kx;
+    if (selected && s_pressAt >= 0)
+    {
+        t = (UiTime() - s_pressAt) / 0.18f;
+        if (t > 1.0f) t = 1.0f;
+        t = t * t * (3.0f - 2.0f * t);
+    }
+    kx = on ? x + r + (SWITCH_W - 2 * r) * t : x + SWITCH_W - r - (SWITCH_W - 2 * r) * t;
+    if (on) UiRoundRect(x, y, SWITCH_W, SWITCH_H, r, SEL_HI(255), SEL_LO(255));
+    else UiRoundRect(x, y, SWITCH_W, SWITCH_H, r, D3DCOLOR_ARGB(40, 255, 255, 255), D3DCOLOR_ARGB(25, 255, 255, 255));
+    UiRoundRing(x, y, SWITCH_W, SWITCH_H, r, 1.5f, on ? SEL_HI(255) : D3DCOLOR_ARGB(selected ? 230 : 150, 255, 255, 255));
+    UiCircle(kx, cy, r - 4, D3DCOLOR_ARGB(255, 255, 255, 255));
+}
+
+// A bar row's value (bar_value): "\x03" and a level 0..100 - a short bar and the number.
+#define VALUE_BAR_W 150.0f
 static float draw_value(float right, float cy, const char *value, int selected)
 {
     size_t n = strlen(value);
     D3DCOLOR text = selected ? UI_COL_TEXT : UI_COL_TEXT2;
+    int sw = switch_value(value);
+    if (sw >= 0)
+    {
+        draw_switch(right, cy, sw, selected);
+        return right - SWITCH_W;
+    }
+    if (value[0] == '\x03')
+    {
+        int lv = atoi(value + 1);
+        char num[16];
+        float bx, tw;
+        sprintf(num, "%d%%", lv);
+        tw = UiText(selected ? UI_BOLD : UI_REGULAR, 21, right, cy, text, num, UI_RIGHT);
+        bx = right - tw - 14 - VALUE_BAR_W;
+        UiRoundRect(bx, cy - 4, VALUE_BAR_W, 8, 4, D3DCOLOR_ARGB(50, 255, 255, 255), D3DCOLOR_ARGB(35, 255, 255, 255));
+        UiRoundRect(bx, cy - 4, VALUE_BAR_W * lv / 100.0f, 8, 4, SEL_HI(255), SEL_LO(255));
+        UiCircle(bx + VALUE_BAR_W * lv / 100.0f, cy, selected ? 8.0f : 6.0f, D3DCOLOR_ARGB(255, 255, 255, 255));
+        return bx;
+    }
     if (n >= 4 && value[0] == '<' && value[1] == ' ' && value[n - 1] == '>' && value[n - 2] == ' ')
     {
         char inner[64];
@@ -213,6 +310,8 @@ static float draw_value(float right, float cy, const char *value, int selected)
 static float value_width(const char *value, int selected)
 {
     size_t n = strlen(value);
+    if (switch_value(value) >= 0) return SWITCH_W;
+    if (value[0] == '\x03') return VALUE_BAR_W + 14 + UiTextWidth(UI_BOLD, 21, "100%");
     if (n >= 4 && value[0] == '<' && value[1] == ' ' && value[n - 1] == '>' && value[n - 2] == ' ')
     {
         char inner[64];
@@ -231,7 +330,17 @@ static void fxpage_draw(const UiMenu *m);
 static void wallpage_draw(const UiMenu *m);
 static void borderpage_draw(const UiMenu *m);
 static void perfpage_draw(const UiMenu *m);
+static void hkpage_draw(const UiMenu *m);
 
+static int s_kodi;      // Interface > Settings style: big icons (kodi_draw)
+static int s_kodiSim;   // a dropdown's dry run is going on: handlers leave out their side effects (kodi_dd_open)
+static int s_ddApply;   // a value picked in a list is being applied (right pressed for real, dd_input)
+#define KODI_COLS 4
+// The settings' main page shown as tiles (big icons style).
+static int kodi_grid(const UiMenu *m)
+{
+    return s_kodi && m->page == UI_PAGE_LIST && !strcmp(m->title, Tr(T_SETTINGS)) && !strcmp(m->footer, Tr(T_FOOT_SELECT));
+}
 static int s_browser;   // opened from the ROM list: the box art rows are shown (also: UiMenuDraw skips the dim behind it in-game, over the frozen frame)
 
 // A small solid triangle pointing `dir` (0 up, 1 right, 2 down, 3 left), `s`
@@ -428,6 +537,11 @@ static void menu_icon(int icon, float cx, float cy, D3DCOLOR c)
         UiRoundRect(cx - 6, cy - 1.2f, 12, 2.4f, 1, c, c);
         UiRoundRect(cx - 1.2f, cy - 6, 2.4f, 12, 1, c, c);
         break;
+    case UI_ICON_INFO:        // about: an "i" in a ring
+        UiRoundRing(cx - 10, cy - 10, 20, 20, 10, 2.0f, c);
+        UiCircle(cx, cy - 5, 1.6f, c);
+        UiRoundRect(cx - 1.25f, cy - 2, 2.5f, 9, 1, c, c);
+        break;
     case UI_ICON_TRASH:       // delete: a bin and its lid
         UiRoundRect(cx - 9, cy - 9, 18, 2.5f, 1, c, c);
         UiRect(cx - 3, cy - 11, 6, 2, c);
@@ -494,6 +608,435 @@ static float s_menuSlide;
 
 static float ease_out(float t) { if (t <= 0) return 0; if (t >= 1) return 1; t = 1 - t; return 1 - t * t * t; }
 
+// ---- Settings, big icons style (Interface > Settings style; inspired by Kodi) ----
+// The main page as tiles with big icons; each other list page as a side bar (the
+// logo, the page's name, the main page's sections with the one open lit) and its
+// rows on the right, the time above them and, under them, what the selected row
+// does. The panels, edges and selection take Interface > Borders and panels as
+// everything else does.
+static const struct { int label, desc; } s_rowDesc[] = {
+    { T_ANTIFLICKER, T_D_ANTIFLICKER },
+    { T_ART_DOWNLOADS, T_D_ART_DOWNLOADS },
+    { T_ART_EXTRAS, T_D_ART_EXTRAS },
+    { T_ABOUT, T_D_ABOUT },
+    { T_AUDIO_MARGIN, T_D_AUDIO_MARGIN },
+    { T_AUDIO_OUTPUT, T_D_AUDIO_OUTPUT },
+    { T_AUTOSAVE_SLOT, T_D_AUTOSAVE_SLOT },
+    { T_BATTERY_WARN, T_D_BATTERY_WARN },
+    { T_BG_EFFECT, T_D_BG_EFFECT },
+    { T_BLUR, T_D_BLUR },
+    { T_BORDERS, T_D_BORDERS },
+    { T_BRIGHTNESS, T_D_BRIGHTNESS },
+    { T_CATEGORIES, T_D_CATEGORIES },
+    { T_CAT_DELETE, T_D_CAT_DELETE },
+    { T_CAT_FIELD, T_D_CAT_FIELD },
+    { T_CAT_NEW, T_D_CAT_NEW },
+    { T_CAT_SAVE, T_D_CAT_SAVE },
+    { T_CAT_VALUE, T_D_CAT_VALUE },
+    { T_COLOR_STYLE, T_D_COLOR_STYLE },
+    { T_CONTROLS, T_D_CONTROLS },
+    { T_CPU_NEXT, T_D_CPU_NEXT },
+    { T_DESIGN, T_D_DESIGN },
+    { T_DEV_MODE, T_D_DEV_MODE },
+    { T_EXPLORER, T_D_EXPLORER },
+    { T_FONT, T_D_FONT },
+    { T_FXAA, T_D_FXAA },
+    { T_FX_RESET, T_D_FX_RESET },
+    { T_GAME_IMAGES, T_D_GAME_IMAGES },
+    { T_GFX_LOG, T_D_GFX_LOG },
+    { T_GRAPHICS, T_D_GRAPHICS },
+    { T_HIRESTEX, T_D_HIRESTEX },
+    { T_IMG_KIND, T_D_IMG_KIND },
+    { T_INTERFACE, T_D_INTERFACE },
+    { T_INTRO_WELCOME, T_D_INTRO_WELCOME },
+    { T_LANGUAGE, T_D_LANGUAGE },
+    { T_MUSIC, T_D_MUSIC },
+    { T_PAD_LOSS, T_D_PAD_LOSS },
+    { T_PATHS, T_D_PATHS },
+    { T_PERF_OVERLAY, T_D_PERF_OVERLAY },
+    { T_PIC_CAL, T_D_PIC_CAL },
+    { T_PIC_LR, T_D_PIC_LR },
+    { T_PIC_SIZE, T_D_PIC_SIZE },
+    { T_PIC_UD, T_D_PIC_UD },
+    { T_PRESET, T_D_PRESET },
+    { T_RESOLUTION, T_D_RESOLUTION },
+    { T_RES_169, T_D_RES_169 },
+    { T_RSP_NEXT, T_D_RSP_NEXT },
+    { T_SAVER, T_D_SAVER },
+    { T_SAVER_MODE, T_D_SAVER_MODE },
+    { T_SAVER_PREVIEW, T_D_SAVER_PREVIEW },
+    { T_SAVER_TIME, T_D_SAVER_TIME },
+    { T_SAVE_ALL, T_D_SAVE_ALL },
+    { T_SAVE_GAME, T_D_SAVE_GAME },
+    { T_SCREEN, T_D_SCREEN },
+    { T_SCREEN_EFFECT, T_D_SCREEN_EFFECT },
+    { T_SEL_COLOR, T_D_SEL_COLOR },
+    { T_SETVIEW, T_D_SETVIEW },
+    { T_SFX_STYLE, T_D_SFX_STYLE },
+    { T_SHARPEN, T_D_SHARPEN },
+    { T_SOUND, T_D_SOUND },
+    { T_START_ROM, T_D_START_ROM },
+    { T_STRETCH, T_D_STRETCH },
+    { T_SYSTEM, T_D_SYSTEM },
+    { T_TEXFILTER, T_D_TEXFILTER },
+    { T_TRANSLATE_DESC, T_D_TRANSLATE_DESC },
+    { T_CAL_EDGES, T_D_CAL_EDGES },
+    { T_TEX_R3, T_D_TEX_R3 },
+    { T_UI_SOUNDS, T_D_UI_SOUNDS },
+    { T_VOLUME, T_D_VOLUME },
+    { T_VSYNC, T_D_VSYNC },
+    { T_WALLPAPERS, T_D_WALLPAPERS },
+    { T_WIZARD, T_D_WIZARD }
+};
+
+// What a row does (by its label as shown), NULL when there is no text for it.
+static const char *row_desc(const char *label)
+{
+    size_t i;
+    for (i = 0; i < sizeof(s_rowDesc) / sizeof(s_rowDesc[0]); i++)
+        if (!strcmp(label, Tr(s_rowDesc[i].label))) return Tr(s_rowDesc[i].desc);
+    return NULL;
+}
+
+// The parts of each page (the side bar): by the page's title, each part its rows'
+// labels. A row in none goes with the first part; a part with no row shown (rows
+// of the ROM list only, in game) is left out. A page not here has no parts.
+struct KodiPart { int name; int rows[5]; };
+struct KodiPage { int title; KodiPart parts[4]; };
+static const KodiPage s_kodiPages[] = {
+    { T_SYSTEM, { { T_KC_PAD_SAVE, { T_PAD_LOSS, T_AUTOSAVE_SLOT, T_BATTERY_WARN } },
+                  { T_KC_PERF, { T_PERF_OVERLAY, T_CPU_NEXT, T_RSP_NEXT } },
+                  { T_KC_TOOLS, { T_DEV_MODE, T_WIZARD, T_EXPLORER } } } },
+    // The picture's filters and effects all here (the preset sets them together);
+    // the Screen page keeps the output: size, colour, sync.
+    { T_GRAPHICS, { { T_KC_QUALITY, { T_PRESET, T_TEXFILTER, T_HIRESTEX } },
+                    { T_KC_FILTERS, { T_FXAA, T_SHARPEN, T_BLUR, T_ANTIFLICKER } },
+                    { T_KC_EFFECTS, { T_SCREEN_EFFECT } } } },
+    { T_SCREEN, { { T_KC_IMAGE, { T_RESOLUTION, T_RES_169, T_STRETCH, T_PIC_CAL } },
+                  { T_KC_COLOR, { T_BRIGHTNESS, T_COLOR_STYLE } },
+                  { T_KC_DISPLAY, { T_VSYNC } } } },
+    { T_SOUND, { { T_VOLUME, { T_VOLUME } },
+                 { T_KC_OUTPUT, { T_AUDIO_MARGIN, T_AUDIO_OUTPUT } },
+                 { T_KC_MENUS, { T_UI_SOUNDS, T_SFX_STYLE, T_MUSIC } } } },
+    { T_INTERFACE, { { T_KC_LOOK, { T_LANGUAGE, T_SETVIEW, T_FONT, T_INTRO_WELCOME } },
+                     { T_KC_COLORS, { T_SEL_COLOR, T_BORDERS } },
+                     { T_KC_BACKGROUNDS, { T_WALLPAPERS, T_BG_EFFECT, T_SAVER } },
+                     { T_KC_GAMELIST, { T_DESIGN, T_GAME_IMAGES, T_TRANSLATE_DESC, T_CATEGORIES, T_START_ROM } } } },
+};
+
+// The page's parts as shown: names (T_*), and each row's part (index into names); 0 parts: none.
+struct KodiParts { int count, name[4], rowPart[UI_MENU_MAX]; };
+static void kodi_parts(const UiMenu *m, KodiParts *kp)
+{
+    const KodiPage *pg = NULL;
+    int used[4] = { 0, 0, 0, 0 }, map[4], i, k, r;
+    size_t p;
+    kp->count = 0;
+    for (p = 0; p < sizeof(s_kodiPages) / sizeof(s_kodiPages[0]); p++)
+        if (!strcmp(m->title, Tr(s_kodiPages[p].title))) pg = &s_kodiPages[p];
+    if (!pg) return;
+    for (i = 0; i < m->count; i++)
+    {
+        int part = 0;
+        for (k = 0; k < 4 && pg->parts[k].name; k++)
+            for (r = 0; r < 5 && pg->parts[k].rows[r]; r++)
+                if (!strcmp(m->label[i], Tr(pg->parts[k].rows[r]))) part = k;
+        kp->rowPart[i] = part;
+        used[part] = 1;
+    }
+    for (k = 0; k < 4; k++)
+    {
+        map[k] = -1;
+        if (pg->parts[k].name && used[k]) { map[k] = kp->count; kp->name[kp->count++] = pg->parts[k].name; }
+    }
+    for (i = 0; i < m->count; i++) kp->rowPart[i] = map[kp->rowPart[i]];
+}
+
+static int s_kodiSide;   // the side bar has the selection (its part s_kodiPart), not the rows
+static int s_kodiPart;
+static int s_kodiTile;   // the main page's tile last selected (back up from its save rows)
+
+// Tiles a row: all of them up to 5, else two rows (the first the longer).
+static int kodi_cols(int nt) { return nt <= 5 ? nt : (nt + 1) / 2; }
+
+// The rows of the main page that are tiles: up to the first save row (those go in a list under the tiles).
+static int kodi_tiles(const UiMenu *m)
+{
+    int i;
+    for (i = 0; i < m->count; i++)
+        if (!strcmp(m->label[i], Tr(T_SAVE_GAME)) || !strcmp(m->label[i], Tr(T_SAVE_ALL))) return i;
+    return m->count;
+}
+
+// A settings page (not the main one) in the big icons style.
+static int kodi_sub(const UiMenu *m)
+{
+    return s_kodi && m->page == UI_PAGE_LIST && !strcmp(m->footer, Tr(T_FOOT_SELECT)) && !kodi_grid(m) && strcmp(m->title, Tr(T_STATES));
+}
+
+// The rows in the order the page shows them: part after part (each part's rows in
+// their own order); without parts, as they are.
+static int kodi_order(const UiMenu *m, const KodiParts *kp, int *order)
+{
+    int n = 0, p, i;
+    if (kp->count < 2)
+    {
+        for (i = 0; i < m->count; i++) order[n++] = i;
+        return n;
+    }
+    for (p = 0; p < kp->count; p++)
+        for (i = 0; i < m->count; i++)
+            if (kp->rowPart[i] == p) order[n++] = i;
+    return n;
+}
+
+// ---- Dropdowns: a row with "< >" values opens the list of its values under it ----
+// The values are found by a dry run on copies of the menu and the settings (right
+// pressed again and again until the first value comes back; s_kodiSim keeps the
+// handlers' side effects out). Picking one presses right that many times for real.
+#define KODI_DD_MAX 40
+static int s_kodiDd = -1;           // the row whose list is open (-1: none)
+static int s_kodiDdN, s_kodiDdSel, s_kodiDdTop;
+static int s_kodiDdRot;              // the list as shown starts this many values after the row's own (right presses)
+static char s_kodiDdItem[KODI_DD_MAX][64];
+
+static int kodi_arrows(const char *v)
+{
+    size_t n = strlen(v);
+    return n >= 4 && v[0] == '<' && v[1] == ' ' && v[n - 1] == '>' && v[n - 2] == ' ' && switch_value(v) < 0;
+}
+
+// The open list of values (both settings styles): under its row (yBelow), its right edge at
+// `right`; above the row when there is no room under it.
+static void dd_draw(float right, float yBelow, float rowH)
+{
+    const float ih = 36, w = 340, x = right - w;
+    int vis = s_kodiDdN < 7 ? s_kodiDdN : 7, k;
+    float h = vis * ih + 16, yy = yBelow + 2;
+    if (s_kodiDdSel < s_kodiDdTop) s_kodiDdTop = s_kodiDdSel;
+    if (s_kodiDdSel >= s_kodiDdTop + vis) s_kodiDdTop = s_kodiDdSel - vis + 1;
+    if (yy + h > UI_HEIGHT - 20) yy = yBelow - rowH - h - 2;
+    UiShadow(x, yy + 8, w, h, 12, 30, D3DCOLOR_ARGB(150, 0, 0, 0));
+    UiRoundRect(x, yy, w, h, 12, D3DCOLOR_ARGB(245, 33, 35, 46), D3DCOLOR_ARGB(245, 27, 29, 38));
+    UiRoundRing(x, yy, w, h, 12, 1.5f, SEL_HI(200));
+    for (k = 0; k < vis; k++)
+    {
+        int it = s_kodiDdTop + k;
+        char txt[64], fit[64];
+        size_t tn = strlen(s_kodiDdItem[it]), cut = tn >= 4 ? tn - 4 : tn;
+        float iy = yy + 8 + k * ih;
+        memcpy(txt, s_kodiDdItem[it] + (tn >= 4 ? 2 : 0), cut);
+        txt[cut] = 0;
+        UiTextFit(UI_REGULAR, 20, w - 40, txt, fit, sizeof(fit));
+        if (it == s_kodiDdSel) selection_bar(x + 6, iy, w - 12, ih);
+        UiText(it == s_kodiDdSel ? UI_BOLD : UI_REGULAR, 20, x + 22, iy + ih * 0.5f, it == s_kodiDdSel ? UI_COL_TEXT : UI_COL_TEXT2, fit, UI_LEFT);
+    }
+    if (s_kodiDdTop > 0) icon_tri(x + w * 0.5f, yy - 2, 8, 0, UI_COL_TEXT3);
+    if (s_kodiDdTop + vis < s_kodiDdN) icon_tri(x + w * 0.5f, yy + h + 4, 8, 2, UI_COL_TEXT3);
+}
+
+static void kodi_clock(void)
+{
+    SYSTEMTIME t;
+    char buf[16];
+    GetLocalTime(&t);
+    sprintf(buf, "%d:%02d", t.wHour, t.wMinute);
+    UiText(UI_REGULAR, 34, UI_WIDTH - 34, 38, UiAlpha(UI_COL_TEXT, 0.85f), buf, UI_RIGHT);
+}
+
+// The main page's opening (Settings from the ROM list, Y): the logo comes down,
+// then the sections rise and grow in one after another. 0..1 for tile `i`
+// (-1: the logo), from when the page started being drawn.
+static float s_gridOpenAt = -10.0f, s_gridLastDraw = -10.0f;
+static float kodi_open_ease(int i)
+{
+    float t = (UiTime() - s_gridOpenAt - (i < 0 ? 0.0f : 0.08f + 0.055f * i)) / 0.38f;
+    if (t <= 0.0f) return 0.0f;
+    if (t >= 1.0f) return 1.0f;
+    return 1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t);   // eases out
+}
+
+static void kodi_draw(const UiMenu *m)
+{
+    int i;
+    if (kodi_grid(m))
+    {
+        if (UiTime() - s_gridLastDraw > 0.25f) s_gridOpenAt = UiTime();   // shown again after a while: it opens
+        s_gridLastDraw = UiTime();
+    }
+    if (kodi_grid(m))
+    {
+        // The sections as one row of tiles, centred; the save rows as a list under them.
+        const int nt = kodi_tiles(m), cols = kodi_cols(nt), rows = nt > cols ? 2 : 1;
+        const float gap = 20, th = rows > 1 ? 150 : 170, y0 = rows > 1 ? 130 : 170;
+        float tw = cols ? (UI_WIDTH - 120 - gap * (cols - 1)) / cols : 228, ly;
+        const char *d;
+        if (tw > 228) tw = 228;
+        {
+            const float e = kodi_open_ease(-1);
+            UiBrandFit((UI_WIDTH - 320) * 0.5f, 30 - (1.0f - e) * 24, 320, 80);
+            UiText(UI_BOLD, 16, UI_WIDTH * 0.5f, 118, UiAlpha(UI_COL_TEXT3, e), "LAIKA 64 V" H64_VERSION_STRING, UI_CENTER);
+        }
+        kodi_clock();
+        {
+            // The selection: slides from tile to tile and breathes, as the lists' bar
+            // does (it jumped before), drawn under the tiles' symbols and names.
+            static UiAnim ax, ay;
+            static int wasTile;
+            int isTile = m->sel >= 0 && m->sel < nt;
+            if (isTile)
+            {
+                int row = m->sel / cols, inRow = row ? nt - cols : (nt < cols ? nt : cols);
+                float tx = (UI_WIDTH - (inRow * tw + (inRow - 1) * gap)) * 0.5f + (m->sel % cols) * (tw + gap) - 6, ty = y0 + row * (th + gap) - 6;
+                anim_step(&ax, tx, !wasTile);   // ax.value, ay.value: where it is now
+                anim_step(&ay, ty, !wasTile);
+            }
+            wasTile = isTile;
+            for (i = 0; i < nt; i++)
+            {
+                // Each row centred on its own (the second may hold fewer).
+                int row = i / cols, inRow = row ? nt - cols : (nt < cols ? nt : cols);
+                float x = (UI_WIDTH - (inRow * tw + (inRow - 1) * gap)) * 0.5f + (i % cols) * (tw + gap), y = y0 + row * (th + gap);
+                const float e = kodi_open_ease(i);
+                if (e <= 0.0f) continue;
+                y += (1.0f - e) * 40;   // rising and growing into place
+                UiSetScale(x + tw * 0.5f, y + th * 0.5f, 0.82f + 0.18f * e);
+                UiPanel(x, y, tw, th, 12);
+                UiSetScale(0, 0, 1.0f);
+            }
+            if (isTile && kodi_open_ease(m->sel) > 0.0f)
+            {
+                const float e = kodi_open_ease(m->sel);
+                float x = ax.value, y = ay.value + (1.0f - e) * 40, w = tw + 12, h = th + 12, p = selection_pulse();
+                UiSetScale(x + w * 0.5f, y + h * 0.5f, 0.82f + 0.18f * e);
+                selection_glow(x - 4, y - 4, w + 8, h + 8, 16, p * e);
+                edge_glow(x, y, w, h, 12);
+                UiRoundRect(x, y, w, h, UiPanelRadius(12), SEL_HI((200 + 40 * p) * e), SEL_LO((200 + 40 * p) * e));
+                UiSetScale(0, 0, 1.0f);
+            }
+        }
+        for (i = 0; i < nt; i++)
+        {
+            // Each row centred on its own (the second may hold fewer).
+            int row = i / cols, inRow = row ? nt - cols : (nt < cols ? nt : cols);
+            float x = (UI_WIDTH - (inRow * tw + (inRow - 1) * gap)) * 0.5f + (i % cols) * (tw + gap), y = y0 + row * (th + gap), w = tw, h = th, cx;
+            int sel = i == m->sel;
+            const float e = kodi_open_ease(i);
+            D3DCOLOR col = UiAlpha(sel ? UI_COL_TEXT : UiAlpha(UI_COL_TEXT, 0.8f), e);
+            if (e <= 0.0f) continue;
+            if (sel) { x -= 6; y -= 6; w += 12; h += 12; }   // the selected tile a little bigger (its colour is the sliding selection's)
+            y += (1.0f - e) * 40;
+            cx = x + w * 0.5f;
+            UiSetScale(cx, y + h * 0.42f, 2.6f * (0.82f + 0.18f * e));
+            menu_icon(m->icon[i] ? m->icon[i] : UI_ICON_GEAR, cx, y + h * 0.42f, col);
+            UiSetScale(0, 0, 1.0f);
+            UiText(sel ? UI_BOLD : UI_REGULAR, 20, cx, y + h - 28, col, m->label[i], UI_CENTER);
+        }
+        ly = y0 + rows * th + (rows - 1) * gap + 40;
+        for (i = nt; i < m->count; i++)
+        {
+            const float lw = 520, lx = (UI_WIDTH - lw) * 0.5f, cy = ly + 24;
+            int sel = i == m->sel;
+            if (sel) selection_bar(lx, ly, lw, 48);
+            else UiPanel(lx, ly, lw, 48, 12);
+            menu_icon(m->icon[i] ? m->icon[i] : UI_ICON_SAVE, lx + 40, cy, sel ? UI_COL_TEXT : UI_COL_TEXT2);
+            UiText(sel ? UI_BOLD : UI_REGULAR, 21, lx + 72, cy, sel ? UI_COL_TEXT : UI_COL_TEXT2, m->label[i], UI_LEFT);
+            ly += 58;
+        }
+        d = m->sel >= 0 && m->sel < m->count ? row_desc(m->label[m->sel]) : NULL;
+        if (d) paragraph(UI_REGULAR, 19, 160, ly + 8, UI_WIDTH - 320, 2, SEL_HI(255), d);
+        UiScreenFooter(m->footer);
+        return;
+    }
+    {
+        // A page: the side bar with its parts on the left, the rows of the part shown on the right.
+        const float sw = 320, rx = sw + 20, rw = UI_WIDTH - rx - 20, ry0 = 76, rowH = 44, descY = 560;
+        const int visible = 10;
+        KodiParts kp;
+        int part, shown = 0, before = 0, top;
+        const char *d;
+        kodi_parts(m, &kp);
+        if (kp.count < 2) s_kodiSide = 0;
+        part = kp.count >= 2 ? (s_kodiSide ? s_kodiPart : kp.rowPart[m->sel >= 0 && m->sel < m->count ? m->sel : 0]) : -1;
+        UiPanel(-30, -30, sw + 30, UI_HEIGHT + 60, 0);
+        UiBrandFit(30, 18, sw - 60, 64);
+        UiText(UI_REGULAR, 26, sw * 0.5f + 10, 106, UI_COL_TEXT, m->title, UI_CENTER);
+        for (i = 0; i < kp.count; i++)
+        {
+            float y = 146 + i * 52, cy = y + 23;
+            int here = i == part;
+            if (here && s_kodiSide) selection_bar(14, y, sw - 28, 46);
+            else if (here) UiRoundRect(14, y, sw - 28, 46, 12, SEL_LO(170), SEL_LO(120));
+            UiText(here ? UI_BOLD : UI_REGULAR, 22, 54, cy, here ? UI_COL_TEXT : UI_COL_TEXT2, Tr(kp.name[i]), UI_LEFT);
+        }
+        kodi_clock();
+        UiPanel(rx, ry0 - 16, rw, descY - ry0 + 104, 16);
+        // Every part under its header (the menu never looks empty), scrolled to the selection.
+        {
+            int order[UI_MENU_MAX], n = kodi_order(m, &kp, order), line[UI_MENU_MAX * 2], lines = 0, selLine = 0, first, k, ddRow = -1;
+            float y, ddY = 0, avail = descY - ry0 - 6;
+            for (i = 0; i < n; i++)
+            {
+                if (kp.count >= 2 && (i == 0 || kp.rowPart[order[i]] != kp.rowPart[order[i - 1]])) line[lines++] = -1 - kp.rowPart[order[i]];   // a header
+                if (order[i] == m->sel) selLine = lines;
+                line[lines++] = order[i];
+            }
+            // From the first line that keeps the selection (and its header) in view.
+            first = 0;
+            {
+                float h = 0;
+                for (k = selLine; k >= 0; k--)
+                {
+                    h += line[k] < 0 ? 34.0f : rowH;
+                    if (h > avail) { first = k + 1; break; }
+                }
+                if (first > 0 && first <= selLine && line[first - 1] < 0 && first - 1 >= 0) first--;
+            }
+            y = ry0;
+            for (k = first; k < lines && y < ry0 + avail; k++)
+            {
+                if (line[k] < 0)
+                {
+                    UiText(UI_BOLD, 16, rx + rw * 0.5f, y + 18, UI_COL_TEXT3, Tr(kp.name[-1 - line[k]]), UI_CENTER);
+                    UiRect(rx + 20, y + 33, rw - 40, 1, UiAlpha(UI_COL_LINE, 0.8f));
+                    y += 34;
+                    continue;
+                }
+                {
+                    int r = line[k], sel = r == m->sel && !s_kodiSide;
+                    float cy = y + rowH * 0.5f;
+                    const char *v = m->value[r];
+                    if (sel) selection_bar(rx + 12, y + 2, rw - 24, rowH - 4);
+                    if (m->icon[r]) menu_icon(m->icon[r], rx + 42, cy, sel ? UI_COL_TEXT : UI_COL_TEXT2);
+                    UiText(sel ? UI_BOLD : UI_REGULAR, 21, rx + (m->icon[r] ? 70 : 30), cy, sel ? UI_COL_TEXT : UI_COL_TEXT2, m->label[r], UI_LEFT);
+                    if (kodi_arrows(v))
+                    {
+                        // The value without arrows; a small mark for its list.
+                        char inner[64];
+                        size_t vn = strlen(v), cut = vn - 4 < sizeof(inner) - 1 ? vn - 4 : sizeof(inner) - 1;
+                        memcpy(inner, v + 2, cut);
+                        inner[cut] = 0;
+                        icon_tri(rx + rw - 38, cy, 9, 2, sel ? SEL_HI(255) : UI_COL_TEXT3);
+                        UiText(sel ? UI_BOLD : UI_REGULAR, 21, rx + rw - 56, cy, sel ? UI_COL_TEXT : UI_COL_TEXT2, inner, UI_RIGHT);
+                    }
+                    else if (v[0]) draw_value(rx + rw - 30, cy, v, sel);
+                    if (r == s_kodiDd) { ddRow = r; ddY = y + rowH; }
+                    y += rowH;
+                }
+            }
+            top = first;
+            shown = lines;
+            if (ddRow >= 0) dd_draw(rx + rw - 24, ddY, rowH);
+        }
+        UiRect(rx + 20, descY, rw - 40, 1, UI_COL_LINE);
+        d = s_kodiSide ? NULL : m->sel >= 0 && m->sel < m->count ? row_desc(m->label[m->sel]) : NULL;
+        if (d) paragraph(UI_REGULAR, 19, rx + 30, descY + 12, rw - 60, 3, SEL_HI(255), d);
+        UiFooter(rx + 30, UI_HEIGHT - 40, m->footer);
+    }
+}
+
+static void edges_draw(const UiMenu *m);   // Image calibration > Calibrate the edges (below)
+
 void UiMenuDraw(const UiMenu *m)
 {
     static UiAnim sel;
@@ -505,6 +1048,7 @@ void UiMenuDraw(const UiMenu *m)
     const float room = h - head - 18 - foot;
     float rowH = m->count > 0 && room / m->count < 48 ? room / m->count : 48, sy, lx, ix, x, now = UiTime(), shift;
     int i, restart = strcmp(lastTitle, m->title) != 0 || lastCount != m->count, rtl = LangRtl(), icons = 0;
+    float ddY = 0;   // under the row whose list of values is open
     char title[160];
     if (m->page == UI_PAGE_CONTROLS) { controls_draw(m); lastTitle[0] = 0; return; }
     if (m->page == UI_PAGE_CALIB) { calib_draw(m); lastTitle[0] = 0; return; }
@@ -513,6 +1057,14 @@ void UiMenuDraw(const UiMenu *m)
     if (m->page == UI_PAGE_WALL) { wallpage_draw(m); lastTitle[0] = 0; return; }
     if (m->page == UI_PAGE_BORDER) { borderpage_draw(m); lastTitle[0] = 0; return; }
     if (m->page == UI_PAGE_PERF) { perfpage_draw(m); lastTitle[0] = 0; return; }
+    if (m->page == UI_PAGE_HOTKEYS) { hkpage_draw(m); lastTitle[0] = 0; return; }
+    if (m->page == UI_PAGE_EDGES) { edges_draw(m); lastTitle[0] = 0; return; }
+    if (s_kodi && m->page == UI_PAGE_LIST && !strcmp(m->footer, Tr(T_FOOT_SELECT)) && strcmp(m->title, Tr(T_STATES)))   // big icons style (the States page: a list)
+    {
+        kodi_draw(m);
+        lastTitle[0] = 0;
+        return;
+    }
     // A short entrance: the bar slides in from the left as the menu opens (it
     // was not drawn a moment ago: the pause menu, Settings from the ROM list),
     // and its rows slide in when the page changes.
@@ -544,6 +1096,8 @@ void UiMenuDraw(const UiMenu *m)
     // The page's name under the logo, centred, in capitals.
     UiUpper(UI_BOLD, m->title, title, sizeof(title));
     UiText(UI_BOLD, 30, x + w * 0.5f, y + 130, UI_COL_TEXT, title, UI_CENTER);
+    if (!strcmp(m->title, Tr(T_SETTINGS)))
+        UiText(UI_REGULAR, 16, x + w * 0.5f, y + 160, UI_COL_TEXT3, "LAIKA 64 V" H64_VERSION_STRING, UI_CENTER);   // the version, on the main page
     sy = anim_step(&sel, y + head + m->sel * rowH, restart);
     if (m->count) selection_bar_side(x + 42, sy + 3, w - 66, rowH - 6, rtl);
     // With symbols, they take the label's place and the label moves over.
@@ -559,7 +1113,9 @@ void UiMenuDraw(const UiMenu *m)
         if (!m->value[i][0]) continue;
         if (rtl) draw_value(x + 62 + value_width(m->value[i], s), cy, m->value[i], s);
         else draw_value(x + w - 40, cy, m->value[i], s);
+        if (i == s_kodiDd) ddY = cy + rowH * 0.5f;
     }
+    if (s_kodiDd >= 0 && ddY > 0) dd_draw(x + w - 30, ddY, rowH);   // a value's open list
     UiRect(x + 46, y + h - foot, w - 70, 1, UI_COL_LINE);
     UiFooter(rtl ? x + w - 66 - UiFooterWidth(m->footer) : x + 66, y + h - foot * 0.5f, m->footer);
 }
@@ -587,6 +1143,27 @@ void UiMenuThumb(const UiMenu *m, IDirect3DTexture9 *tex, const char *emptyText)
 void UiMenuNavigate(UiMenu *m, WORD down)
 {
     if (!m->count) return;
+    if (kodi_grid(m))
+    {
+        // Big icons: the tiles in one row (left/right), the save rows under them (up/down).
+        int nt = kodi_tiles(m), cols = kodi_cols(nt);
+        if (m->sel < nt)
+        {
+            int row = cols ? m->sel / cols : 0;
+            if (down & XINPUT_GAMEPAD_DPAD_LEFT) m->sel = (m->sel + nt - 1) % nt;
+            if (down & XINPUT_GAMEPAD_DPAD_RIGHT) m->sel = (m->sel + 1) % nt;
+            if ((down & XINPUT_GAMEPAD_DPAD_UP) && row > 0) m->sel -= cols;
+            if ((down & XINPUT_GAMEPAD_DPAD_DOWN) && nt > cols && row == 0) m->sel = m->sel + cols < nt ? m->sel + cols : nt - 1;
+            else if ((down & XINPUT_GAMEPAD_DPAD_DOWN) && nt < m->count) m->sel = nt;
+            if (m->sel < nt) s_kodiTile = m->sel;
+        }
+        else
+        {
+            if (down & XINPUT_GAMEPAD_DPAD_UP) m->sel = m->sel == nt ? (s_kodiTile < nt ? s_kodiTile : 0) : m->sel - 1;
+            if ((down & XINPUT_GAMEPAD_DPAD_DOWN) && m->sel + 1 < m->count) m->sel++;
+        }
+        return;
+    }
     if (down & XINPUT_GAMEPAD_DPAD_UP) m->sel = (m->sel + m->count - 1) % m->count;
     if (down & XINPUT_GAMEPAD_DPAD_DOWN) m->sel = (m->sel + 1) % m->count;
 }
@@ -597,7 +1174,9 @@ void UiMenuNavigate(UiMenu *m, WORD down)
 // sharpening, blur, FPS) and Screen (resolution, stretch, image calibration,
 // brightness, VSync, antiflicker, screen effect) are shown in the same
 // UiMenu as the main page; their Back returns to it.
-enum { S_SYSTEM = 0, S_GRAPHICS, S_SCREEN, S_SOUND, S_CONTROLS, S_INTERFACE, S_PATHS };   // S_INTERFACE, S_PATHS: ROM list only
+// The most used first: the picture and the controls, then the rest.
+enum { S_GRAPHICS = 0, S_SCREEN, S_CONTROLS, S_SOUND, S_SYSTEM, S_INTERFACE, S_PATHS };   // S_INTERFACE, S_PATHS: ROM list only
+static int s_rowAbout = -1;   // Settings' About row (the last)
 static int s_pathsPage;   // Settings > Paths
 static void settings_paths(UiMenu *m, const Config *c);
 // The Volumen page: three bars (game, button sounds, menu music - the last from the ROM list only:
@@ -605,24 +1184,32 @@ static void settings_paths(UiMenu *m, const Config *c);
 enum { V_GAME = 0, V_SFX, V_MUSIC, V_COUNT };
 // The Interface page (ROM list only); B goes back, no row for it. Borders and
 // panels, Wallpapers, Background effect and Screen saver open their own pages with A.
-enum { I_DESIGN = 0, I_SKINS, I_FONT, I_SELCOLOR, I_BORDERS, I_WALLPAPERS, I_EFFECT, I_SAVER, I_LANGUAGE };
+// In the parts' order: look (language first), colours, backgrounds, the game list.
+enum { I_LANGUAGE = 0, I_SETVIEW, I_FONT, I_INTRO, I_SELCOLOR, I_BORDERS, I_WALLPAPERS, I_EFFECT, I_SAVER, I_DESIGN };
 static int s_saverPage;   // Interface > Screen saver
 enum { SAVER_OFF = 0, SAVER_EFFECT, SAVER_WALL, SAVER_LOGO, SAVER_CLOCK, SAVER_COUNT };   // Config::saverMode
-#define I_IMAGES (I_LANGUAGE + 1)    // "Game images": the pictures shown and their downloads, on their own page (ROM list only)
+#define I_IMAGES (I_DESIGN + 1)    // "Game images": the pictures shown and their downloads, on their own page (ROM list only)
 static int s_imagesPage;             // Interface > Game images
 static void settings_images(UiMenu *m, const Config *c);
 static void images_values(UiMenu *m, const Config *c);
 static void paths_values(UiMenu *m, const Config *c);
 static int paths_input(UiMenu *m, Config *c, WORD down);
-#define I_CATS (I_LANGUAGE + 2)      // "Categories": the ROM list's tabs, made and changed on their own pages (ROM list only)
+#define I_CATS (I_DESIGN + 3)      // "Categories": the ROM list's tabs, made and changed on their own pages (ROM list only)
+#define I_TRANSDESC (I_DESIGN + 2)
+#define I_STARTROM (I_DESIGN + 4)   // "Game at start" (ROM list only; was in System) // "Translate descriptions" (ROM list only)
+// The language the games' descriptions are asked in (Interface > Translate descriptions).
+static const char *art_lang(const Config *c) { return c->descTranslate ? LangCode(LangGet()) : "en"; }
 static int s_catsPage, s_catEditPage;   // Interface > Categories, and one category being made or changed
 static void settings_cats(UiMenu *m, const Config *c, int selCat);   // below, with the game library
 static int cats_input(UiMenu *m, Config *c, WORD down);
 static int catedit_input(UiMenu *m, Config *c, WORD down);
 // The ROM browser's layouts (Config::browserDesign; Interface > Design, X in the browser):
 // the list and its card, the covers grid, the big covers grid, the carousel.
-enum { BD_LIST = 0, BD_COVERS, BD_BIG, BD_CAROUSEL, BD_COUNT };
-static const int s_designLabels[BD_COUNT] = { T_DESIGN_DETAILED, T_DESIGN_COVERS, T_DESIGN_BIG, T_DESIGN_CAROUSEL };
+// Mosaic: a dense grid (7 x 4). Spotlight: the selection big with its information, the others in a row under it.
+enum { BD_LIST = 0, BD_COVERS, BD_BIG, BD_CAROUSEL, BD_MOSAIC, BD_SPOTLIGHT, BD_COUNT };
+static const int s_designLabels[BD_COUNT] = { T_DESIGN_DETAILED, T_DESIGN_COVERS, T_DESIGN_BIG, T_DESIGN_CAROUSEL, T_DESIGN_MOSAIC, T_DESIGN_SPOTLIGHT };
+// The views that move one game at a time, left and right (the others are grids, or the list).
+static int design_row(int d) { return d == BD_CAROUSEL || d == BD_SPOTLIGHT; }
 // The ROM list's animated background (Config::bgEffect; drawn by browser_effect).
 enum { BGFX_OFF = 0, BGFX_WAVES, BGFX_PULSE, BGFX_RAIN, BGFX_VORTEX, BGFX_RIPPLES, BGFX_SILK, BGFX_EMBERS, BGFX_GRID,
        BGFX_UNDERWATER, BGFX_ENERGY, BGFX_AURORA, BGFX_LIQUID, BGFX_PARTICLES, BGFX_SMOKE, BGFX_XMB, BGFX_PS4_FLOW,
@@ -764,6 +1351,88 @@ static void paths_apply(const Config *c)
 
 // The menus' look from *c (kept in range): the background effect, its
 // colours, opacity and speed, the selection's colour, the wallpapers.
+// ---- Wallpapers: game recommendations ----
+// One of your games at a time behind the menus: its cover blurred over the whole
+// screen, the cover itself big on the right, its name, year, genre and a few
+// lines about it on the left. Another every wallpaper interval (30 s when it
+// never changes), crossfading. Only games with a cover; read on this thread
+// (the packed cover: one read).
+struct RecShow { IDirect3DTexture9 *tex; int w, h; H64GameInfo info; float at; };
+static std::vector<std::string> s_recPaths;   // the ROM list's games (RomBrowser)
+static RecShow s_rec[2];                      // shown now, and the one fading out
+static int s_recInterval = 30;
+static float s_recNextAt;
+
+static void rec_free(RecShow *r)
+{
+    if (r->tex) UiImageRelease(UiDevice(), r->tex);
+    memset(r, 0, sizeof(*r));
+}
+
+static void rec_pick(void)
+{
+    int tries;
+    for (tries = 0; tries < 12 && !s_recPaths.empty(); tries++)
+    {
+        const char *path = s_recPaths[(size_t)(rand() % (int)s_recPaths.size())].c_str();
+        RecShow r;
+        u8 *rgba = NULL;
+        int kind;
+        memset(&r, 0, sizeof(r));
+        if (!ArtReadInfo(path, &r.info) || !ArtReadCover(path, ART_KIND_BOX, &rgba, &r.w, &r.h, &kind) || !rgba) { free(rgba); continue; }
+        r.tex = UiImageCreate(UiDevice(), rgba, r.w, r.h);
+        free(rgba);
+        if (!r.tex) continue;
+        rec_free(&s_rec[1]);
+        s_rec[1] = s_rec[0];
+        s_rec[0] = r;
+        s_rec[0].at = UiTime();
+        return;
+    }
+}
+
+static void rec_draw_one(const RecShow *r, float a)
+{
+    const float cw = 520, ch = cw * r->h / (r->w ? r->w : 1), cx = UI_WIDTH - 90 - cw, cy = (UI_HEIGHT - ch) * 0.5f, tx = 90, tw = cx - 60 - tx;
+    char line[160];
+    float ty;
+    if (a <= 0.01f || !r->tex) return;
+    // The cover over the whole screen, enlarged and faint, then darkened towards the text.
+    UiImage(r->tex, -80, -80, UI_WIDTH + 160, UI_HEIGHT + 160, 0.0f, D3DCOLOR_ARGB((int)(90 * a), 255, 255, 255));
+    UiRect(0, 0, UI_WIDTH, UI_HEIGHT, D3DCOLOR_ARGB((int)(150 * a), 8, 9, 14));
+    UiShadow(cx, cy + 14, cw, ch, 22, 40, UiAlpha(UI_COL_SHADOW, a));
+    UiImage(r->tex, cx, cy, cw, ch, 18.0f, D3DCOLOR_ARGB((int)(255 * a), 255, 255, 255));
+    UiRoundRing(cx, cy, cw, ch, 18, 1.0f, D3DCOLOR_ARGB((int)(40 * a), 255, 255, 255));
+    ty = 200;
+    UiText(UI_BOLD, 18, tx, ty, UiAlpha(SEL_HI(255), a), Tr(T_REC_TITLE), UI_LEFT);
+    ty += 52;
+    ty += paragraph(UI_BOLD, 40, tx, ty - 22, tw, 2, UiAlpha(UI_COL_TEXT, a), r->info.title[0] ? r->info.title : r->info.name) + 6;
+    _snprintf(line, sizeof(line) - 1, "%s%s%s", r->info.year, r->info.year[0] && r->info.genre[0] ? "  -  " : "", r->info.genre);
+    line[sizeof(line) - 1] = 0;
+    UiText(UI_REGULAR, 20, tx, ty + 6, UiAlpha(UI_COL_TEXT2, a), line, UI_LEFT);
+    ty += 40;
+    if (r->info.description[0]) paragraph(UI_REGULAR, 20, tx, ty, tw, 7, UiAlpha(UI_COL_TEXT2, a), r->info.description);
+}
+
+static int rec_layer(void)
+{
+    float now = UiTime(), f;
+    if (s_recPaths.empty() || !UiDevice()) return 0;
+    if (!s_rec[0].tex || now >= s_recNextAt)
+    {
+        rec_pick();
+        s_recNextAt = now + (s_recInterval > 0 ? s_recInterval : 30);
+    }
+    if (!s_rec[0].tex) return 0;
+    UiRect(0, 0, UI_WIDTH, UI_HEIGHT, UI_COL_BG_BOTTOM);
+    f = (now - s_rec[0].at) / 1.0f;   // a second's crossfade
+    if (f > 1.0f) f = 1.0f;
+    if (f < 1.0f) rec_draw_one(&s_rec[1], 1.0f - f);
+    else if (s_rec[1].tex) rec_free(&s_rec[1]);
+    rec_draw_one(&s_rec[0], f);
+    return 1;
+}
+
 static void ui_from_config(const Config *c)
 {
     int i;
@@ -773,6 +1442,13 @@ static void ui_from_config(const Config *c)
     paths_apply(c);
     UiSetWallpapers(ConfigPath(c, CONFIG_PATH_WALLS, "game"), c->wallCustom, c->wallFile, c->wallInterval, c->wallTransition >= 0 && c->wallTransition < UI_TRANS_COUNT ? c->wallTransition : 0,
                     c->wallDim, c->wallFit, c->wallShuffle);
+    s_recInterval = c->wallInterval;
+    // The logo in the edges' own colour when one is chosen (Borders and panels > Border colour).
+    if (c->borderColor > 0 && c->borderColor <= FX_PALETTE_COUNT)
+        UiSetLogoColor(s_fxPalette[c->borderColor][0] << 16 | s_fxPalette[c->borderColor][1] << 8 | s_fxPalette[c->borderColor][2]);
+    else
+        UiSetLogoColor(-1);
+    UiSetBackdropLayer(c->wallRecommend ? rec_layer : NULL);
     {
         // The edges: the selection's colour, or one of the swatches; the panels' body and corners.
         static const float rounds[4] = { 0.2f, 0.55f, 1.0f, 1.6f };
@@ -780,12 +1456,16 @@ static void ui_from_config(const Config *c)
         for (i = 0; i < 3; i++)
             s_edgeRgb[i] = c->borderColor > 0 && c->borderColor <= FX_PALETTE_COUNT ? s_fxPalette[c->borderColor][i] : s_selColors[s_sel][0][i];
         s_edgeOp = c->borderOpacity < 0 ? 0 : c->borderOpacity > 100 ? 100 : c->borderOpacity;
-        s_edgeGlow = c->borderGlow >= 0 && c->borderGlow < 3 ? c->borderGlow : 0;
+        s_edgeGlow = c->borderGlow >= 0 && c->borderGlow < GLOW_COUNT ? c->borderGlow : 0;
+        if (c->panelColor > 0 && c->panelColor <= FX_PALETTE_COUNT)
+            UiSetPanelColor(s_fxPalette[c->panelColor][0], s_fxPalette[c->panelColor][1], s_fxPalette[c->panelColor][2]);
+        else UiSetPanelColor(-1, 0, 0);
         // The panel's own fine edge: as faint as before at 1 px, stronger when wider.
         UiSetPanelStyle(EDGE_COL(s_edgeOp * (width > 1 ? 1.4f : 0.4f)), (float)width, c->panelOpacity,
                         rounds[c->panelRound >= 0 && c->panelRound < 4 ? c->panelRound : 2]);
     }
     s_bgEffect = c->bgEffect >= 0 && c->bgEffect < BGFX_COUNT ? c->bgEffect : BGFX_OFF;
+    s_kodi = c->settingsView == 1;
     for (i = 0; i < 3; i++) s_fxColor[i] = c->fxColor[i] >= 0 && c->fxColor[i] <= FX_PALETTE_COUNT ? c->fxColor[i] : 0;
     s_fxOpacity = c->fxOpacity < 10 ? 10 : c->fxOpacity > 200 ? 200 : c->fxOpacity;
     s_fxSpeed = c->fxSpeed < 25 ? 25 : c->fxSpeed > 300 ? 300 : c->fxSpeed;
@@ -793,7 +1473,12 @@ static void ui_from_config(const Config *c)
 // The System page: what a controller unplugged in game does, the slot it saves to, the low battery
 // warning, then CPU and RSP (both apply at the next game start, so the ROM list only shows them -
 // last, so the rows before keep their place in game). B goes back, no row for it.
-enum { SYS_PADLOSS = 0, SYS_AUTOSLOT, SYS_BATTERY, SYS_PERF, SYS_CPU, SYS_RSP, SYS_STARTROM, SYS_WIZARD };   // SYS_CPU..SYS_WIZARD: ROM list only
+enum { SYS_PADLOSS = 0, SYS_AUTOSLOT, SYS_BATTERY, SYS_PERF, SYS_DEV, SYS_CPU, SYS_RSP, SYS_WIZARD, SYS_EXPLORER };   // SYS_CPU..SYS_WIZARD: ROM list only
+// The Developer mode page (System > Developer mode, A): the mode on or off, and with it on the
+// graphics error log (main.cpp ApplyGraphics: the renderer's gfxLog). B goes back, no row for it.
+enum { DEV_GFXLOG = 0 };   // the System page's row turns the mode on and off
+static int s_devPage;
+static void settings_dev(UiMenu *m, const Config *c);
 static void settings_perf(UiMenu *m, const Config *c);   // System > On-screen performance (below, with the other graphical pages)
 static std::string s_browserSel;   // the ROM selected in the list when Settings opened (Game at start: that game)
 static std::string clean_name(const char *name, size_t len);   // the list's name of a file (below)
@@ -822,12 +1507,12 @@ static void start_rom_text(const Config *c, char *out, size_t size)
 enum { SND_VOLUME = 0, SND_AUDIO, SND_MONO, SND_UISOUNDS, SND_SFXSTYLE, SND_MUSIC };
 static const int s_sfxStyleLabels[XB_SFX_STYLE_COUNT] = { T_STYLE_GLASS, T_STYLE_SOFT, T_STYLE_RETRO, T_STYLE_DIGITAL };
 #define MUSIC_DIR s_musicDir   // the menus' music: every .mp3/.wav in it (Settings > Paths)
-enum { G_PRESET = 0, G_FILTER, G_HIRES, G_SMOOTH, G_SHARPEN, G_BLUR };   // the Graphics page; B goes back, no row for it
-enum { SCR_RES = 0, SCR_STRETCH, SCR_CAL, SCR_BRIGHT, SCR_VSYNC, SCR_DEFLICKER, SCR_SCREEN, SCR_COLOR };
+enum { G_PRESET = 0, G_FILTER, G_HIRES, G_SMOOTH, G_SHARPEN, G_BLUR, G_DEFLICKER, G_SCREEN };   // the Graphics page; B goes back, no row for it
+enum { SCR_RES = 0, SCR_RES169, SCR_STRETCH, SCR_CAL, SCR_BRIGHT, SCR_COLOR, SCR_VSYNC };   // anti-flicker and the screen effect: Graphics
 // Brightness in the order the row steps through it (Config::brightness: 0 normal, 1-2 lighter, 3-4 darker).
 static const int s_brightOrder[5] = { 4, 3, 0, 1, 2 };
 static const int s_colorStyleLabels[8] = { T_NORMAL, T_CS_SATURATED, T_CS_VIVID, T_CS_BW, T_CS_SEPIA, T_CS_WARM, T_CS_COOL, T_CS_GREEN };   // the Screen page (SCR_CAL opens the calibration page below); B goes back, no row for it
-enum { CAL_SIZE = 0, CAL_LR, CAL_UD };   // the Image calibration page, opened from Screen > SCR_CAL; B goes back, no row for it
+enum { CAL_SIZE = 0, CAL_EDGES };   // the Image calibration page, opened from Screen > SCR_CAL; B goes back, no row for it
 
 
 // Graphics presets (the user's table): texture filter, smoothing, sharpening,
@@ -835,10 +1520,27 @@ enum { CAL_SIZE = 0, CAL_LR, CAL_UD };   // the Image calibration page, opened f
 struct GfxPreset { int name; int texFilter, smooth, sharpen, blur, screen; };
 static const GfxPreset s_presets[4] = {
     { T_PRESET_ORIGINAL, 2, 0, 0, 0, 0 },   // nearest, nothing added
-    { T_PRESET_ENHANCED, 0, 1, 1, 0, 0 },   // 3-point, light sharpening
-    { T_PRESET_SMOOTH, 0, 1, 1, 0, 5 },     // 3-point, light sharpening, light scanlines
-    { T_PRESET_CRT, 0, 0, 0, 0, 2 },        // 3-point, CRT: scanlines and glow
+    { T_PRESET_ENHANCED, 1, 1, 1, 0, 0 },   // bilinear (the default filter), light sharpening
+    { T_PRESET_SMOOTH, 1, 1, 1, 0, 5 },     // bilinear, light sharpening, light scanlines
+    { T_PRESET_CRT, 1, 0, 0, 0, 2 },        // bilinear, CRT: scanlines and glow
 };
+
+static int s_gfxPick = -1;   // Graphics > Preset picked (0 Recommended, 1.. s_presets), -1: as the settings say
+
+// Recommended (the assistant's Picture page's): 1366x768 16:9, bilinear, brightness 50 %, colours as they are, no stretch.
+static int gfx_recommended(const Config *c)
+{
+    return c->resWide && c->res169 == 4 && c->texFilter == 1 && c->brightLevel == 50 && c->colorStyle == 0 && !c->stretch;
+}
+
+static void gfx_apply_recommended(Config *c)
+{
+    c->resWide = 1; c->res169 = 4;
+    c->texFilter = 1;
+    c->brightLevel = 50;
+    c->colorStyle = 0;
+    c->stretch = 0;
+}
 
 // The preset the settings match (-1: custom).
 static int current_preset(const Config *c)
@@ -856,6 +1558,8 @@ static int current_preset(const Config *c)
 static int s_graphicsPage;
 static int s_screenPage;
 static int s_calPage;
+static void settings_edges(UiMenu *m, const Config *c);
+static void edges_draw(const UiMenu *m);
 static int s_interfacePage;
 static int s_soundPage;
 static int s_systemPage;
@@ -868,6 +1572,39 @@ static char s_langPath[160];   // where a language change is kept (SettingsSetLa
 static int s_rowSaveGame = -1, s_rowSaveAll = -1;
 
 static const char *onoff(int v) { return Tr(v ? T_ON : T_OFF); }
+// The value of an on/off row in a list: drawn as a switch (draw_value).
+static const char *toggle(int v) { return v ? "\x01" : "\x02"; }
+
+// The resolution rows, one per list (4:3, 16:9): its value, or "Off" while the
+// other list's is used. Stepping goes through "Off" too: picking a size in one
+// list turns the other off, "Off" in one turns the other on.
+static void res_value(char *out, const Config *c, int wide)
+{
+    u32 w, h;
+    if ((c->resWide != 0) != wide) { sprintf(out, "< %s >", Tr(T_RES_OFF)); return; }
+    ConfigResSize(wide, wide ? c->res169 : c->res43, &w, &h);
+    sprintf(out, "< %ux%u >", w, h);
+}
+
+static void res_step(Config *c, int wide, int dir)
+{
+    int n = ConfigResCount(wide), *idx = wide ? &c->res169 : &c->res43;
+    int pos = (c->resWide != 0) == wide ? (*idx < 0 || *idx >= n ? 0 : *idx) : n;   // n: Off, at the end of the list
+    pos = (pos + dir + n + 1) % (n + 1);
+    if (pos == n) c->resWide = !wide;
+    else { c->resWide = wide; *idx = pos; }
+}
+
+// V-Sync: off, on (a late frame goes at once), aggressive (every frame waits).
+static const char *vsync_name(int v) { return Tr(v == 2 ? T_VSYNC_AGGR : v ? T_ON : T_OFF); }
+// The value of a 0..100 row drawn as a bar (draw_value), into `out`.
+// The sharpening and blur steps (presets compare them) from the bars.
+static void levels_to_steps(Config *c)
+{
+    c->sharpen = c->sharpLevel <= 0 ? 0 : c->sharpLevel <= 50 ? 1 : 2;
+    c->blur = c->blurLevel <= 0 ? 0 : c->blurLevel <= 50 ? 1 : 2;
+}
+static void bar_value(char *out, int level) { sprintf(out, "\x03%d", level < 0 ? 0 : level > 100 ? 100 : level); }
 
 void SettingsSetLangFile(const char *path)
 {
@@ -898,34 +1635,34 @@ static void settings_values(UiMenu *m, const Config *c)
     }
     if (s_interfacePage)
     {
-        int sn = SkinCount(), si = 0, k;
         sprintf(m->value[I_DESIGN], "< %s >", Tr(s_designLabels[c->browserDesign >= 0 && c->browserDesign < BD_COUNT ? c->browserDesign : 0]));
-        if (!c->skinName[0] || !sn) sprintf(m->value[I_SKINS], "< %s >", Tr(T_SKIN_NONE));
-        else
-        {
-            for (k = 0; k < sn; k++)
-                if (!strcmp(SkinName(k), c->skinName)) { si = k; break; }
-            if (sn > 1) sprintf(m->value[I_SKINS], "< %s (%d/%d) >", SkinName(si), si + 1, sn);
-            else sprintf(m->value[I_SKINS], "< %s >", SkinName(si));
-        }
+        sprintf(m->value[I_INTRO], "%s", toggle(c->intro));
+        sprintf(m->value[I_SETVIEW], "< %s >", Tr(c->settingsView ? T_VIEW_TILES : T_VIEW_LIST));
         // Background effect and Wallpapers show nothing here: both are chosen on their own pages (A), where the
         // choice shows. Other rows that open a page show their value plainly, without the "< >" of one changed in place.
         sprintf(m->value[I_FONT], "< %s >", UiFontName(c->uiFont));
         sprintf(m->value[I_SELCOLOR], "< %s >", Tr(s_selLabels[c->selColor >= 0 && c->selColor < SEL_COLORS ? c->selColor : 0]));
         sprintf(m->value[I_SAVER], "%s", Tr(c->saverMode == SAVER_EFFECT ? T_BG_EFFECT : c->saverMode == SAVER_WALL ? T_WALLPAPERS :
                                                 c->saverMode == SAVER_LOGO ? T_SAVER_LOGO : c->saverMode == SAVER_CLOCK ? T_SAVER_CLOCK : T_OFF));
-        sprintf(m->value[I_LANGUAGE], "%s", Tr(T_LANG_NAME));   // A: the list with the flags
+        sprintf(m->value[I_LANGUAGE], "%s", Tr(T_LANG_NAME));   // A: the list of languages
+        if (s_browser) sprintf(m->value[I_TRANSDESC], "%s", toggle(c->descTranslate));
+        if (s_browser) start_rom_text(c, m->value[I_STARTROM], sizeof(m->value[I_STARTROM]));
+        return;
+    }
+    if (s_devPage)
+    {
+        sprintf(m->value[DEV_GFXLOG], "%s", toggle(c->gfxLog));
         return;
     }
     if (s_systemPage)
     {
+        sprintf(m->value[SYS_DEV], "%s", toggle(c->devMode));   // opens its page: its switch shows the mode
         sprintf(m->value[SYS_CPU], "< %s >", strcmp(c->cpu, "interp") ? Tr(T_RECOMPILER) : Tr(T_INTERPRETER));
         sprintf(m->value[SYS_RSP], "< %s >", c->hle ? "HLE" : "LLE");
         sprintf(m->value[SYS_PADLOSS], "< %s >", Tr(c->padLoss == PADLOSS_SAVE ? T_PAD_LOSS_SAVE : c->padLoss == PADLOSS_PAUSE ? T_PAD_LOSS_PAUSE : T_OFF));
         sprintf(m->value[SYS_AUTOSLOT], "< %d >", c->autoSaveSlot);
         if (c->batteryWarn) sprintf(m->value[SYS_BATTERY], "< %d%% >", c->batteryWarn);
         else sprintf(m->value[SYS_BATTERY], "< %s >", Tr(T_OFF));
-        start_rom_text(c, m->value[SYS_STARTROM], sizeof(m->value[SYS_STARTROM]));
         return;
     }
     if (s_soundPage)
@@ -933,7 +1670,7 @@ static void settings_values(UiMenu *m, const Config *c)
         sprintf(m->value[SND_AUDIO], "< %d ms >", c->audioMs);
         sprintf(m->value[SND_MONO], "< %s >", Tr(c->audioMono ? T_AUDIO_MONO : T_AUDIO_STEREO));
         if (!s_browser) return;   // the menus' sounds and music: ROM list only
-        sprintf(m->value[SND_UISOUNDS], "< %s >", onoff(c->uiSounds));
+        sprintf(m->value[SND_UISOUNDS], "%s", toggle(c->uiSounds));
         sprintf(m->value[SND_SFXSTYLE], "< %s >", Tr(s_sfxStyleLabels[c->uiSoundStyle >= 0 && c->uiSoundStyle < XB_SFX_STYLE_COUNT ? c->uiSoundStyle : 0]));
         if (c->musicMode == XB_MUSIC_OFF) sprintf(m->value[SND_MUSIC], "< %s >", Tr(T_OFF));
         else if (!xb_audio_music_scan(MUSIC_DIR)) sprintf(m->value[SND_MUSIC], "< %s >", Tr(T_MUSIC_NONE));
@@ -953,22 +1690,21 @@ static void settings_values(UiMenu *m, const Config *c)
     if (s_calPage)
     {
         sprintf(m->value[CAL_SIZE], "< %d%% >", c->zoom);
-        sprintf(m->value[CAL_LR], "< %+d >", c->offsetX);
-        sprintf(m->value[CAL_UD], "< %+d >", c->offsetY);
+        m->value[CAL_EDGES][0] = 0;   // opens its screen
         return;
     }
     if (s_screenPage)
     {
-        const char *res[4] = { Tr(T_RES_NATIVE), "x2 640x480", "x3 960x720", "HD 1280x720 (16:9)" };
-        const char *scr[6] = { Tr(T_SCREEN_NONE), Tr(T_SCANLINES), Tr(T_CRT), Tr(T_CRT_CURVED), Tr(T_LCD_GRID), Tr(T_LIGHT_SCANLINES) };
+        const char *scr[9] = { Tr(T_SCREEN_NONE), Tr(T_SCANLINES), Tr(T_CRT), Tr(T_CRT_CURVED), Tr(T_LCD_GRID), Tr(T_LIGHT_SCANLINES), Tr(T_SCR_VIGNETTE), Tr(T_SCR_APERTURE), Tr(T_SCR_DOTS) };
         const char *br[5] = { Tr(T_NORMAL), Tr(T_LIGHTER), Tr(T_MUCH_LIGHTER), Tr(T_DARKER), Tr(T_MUCH_DARKER) };
-        sprintf(m->value[SCR_RES], "< %s >", res[(c->resScale < 1 ? 1 : c->resScale > 4 ? 4 : c->resScale) - 1]);
-        sprintf(m->value[SCR_STRETCH], "< %s >", onoff(c->stretch));
-        sprintf(m->value[SCR_BRIGHT], "< %s >", br[c->brightness < 0 || c->brightness > 4 ? 0 : c->brightness]);
+        res_value(m->value[SCR_RES], c, 0);
+        res_value(m->value[SCR_RES169], c, 1);
+        sprintf(m->value[SCR_STRETCH], "%s", toggle(c->stretch));
+        bar_value(m->value[SCR_BRIGHT], c->brightLevel);
+        (void)br;
         sprintf(m->value[SCR_COLOR], "< %s >", Tr(s_colorStyleLabels[c->colorStyle < 0 || c->colorStyle > 7 ? 0 : c->colorStyle]));
-        sprintf(m->value[SCR_VSYNC], "< %s >", onoff(c->vsync));
-        sprintf(m->value[SCR_DEFLICKER], "< %s >", onoff(c->deflicker));
-        sprintf(m->value[SCR_SCREEN], "< %s >", scr[c->screen < 0 || c->screen > 5 ? 0 : c->screen]);
+        sprintf(m->value[SCR_VSYNC], "< %s >", vsync_name(c->vsync));
+        (void)scr;
         return;
     }
     if (s_graphicsPage)
@@ -976,8 +1712,8 @@ static void settings_values(UiMenu *m, const Config *c)
         const char *filt[3] = { Tr(T_FILTER_3POINT), Tr(T_FILTER_BILINEAR), Tr(T_FILTER_NEAREST) };
         const char *lvl[3] = { Tr(T_OFF), Tr(T_LOW), Tr(T_HIGH) };
         const char *blr[3] = { Tr(T_OFF), Tr(T_SOFT), Tr(T_STRONG) };
-        int pr = current_preset(c);
-        sprintf(m->value[G_PRESET], "< %s >", pr < 0 ? Tr(T_CUSTOM) : Tr(s_presets[pr].name));
+        int pr = s_gfxPick >= 0 ? s_gfxPick : current_preset(c) >= 0 ? current_preset(c) + 1 : gfx_recommended(c) ? 0 : -1;
+        sprintf(m->value[G_PRESET], "< %s >", pr < 0 ? Tr(T_CUSTOM) : pr == 0 ? Tr(T_PRESET_RECOMMENDED) : Tr(s_presets[pr - 1].name));
         sprintf(m->value[G_FILTER], "< %s >", filt[c->texFilter < 0 || c->texFilter > 2 ? 1 : c->texFilter]);
         {
             // Off, or the chosen (or first) pack's file name without ".hts", with a
@@ -985,7 +1721,8 @@ static void settings_values(UiMenu *m, const Config *c)
             // (see HiresScanPacks/HiresOpen); the list itself always matches whatever
             // ROM is selected in the browser or running in game.
             int hn = HiresPackCount(), hi = 0, k;
-            if (!c->hiTex || !hn) sprintf(m->value[G_HIRES], "< %s >", Tr(T_OFF));
+            if (hn <= 1) sprintf(m->value[G_HIRES], "%s", toggle(c->hiTex && hn));   // on or off: a switch
+            else if (!c->hiTex) sprintf(m->value[G_HIRES], "< %s >", Tr(T_OFF));
             else
             {
                 // The name cut with an ellipsis to what fits the row beside its label
@@ -1008,9 +1745,15 @@ static void settings_values(UiMenu *m, const Config *c)
                 sprintf(m->value[G_HIRES], "< %s%s >", fit, count);
             }
         }
-        sprintf(m->value[G_SMOOTH], "< %s >", onoff(c->smooth));
-        sprintf(m->value[G_SHARPEN], "< %s >", lvl[c->sharpen < 0 || c->sharpen > 2 ? 0 : c->sharpen]);
-        sprintf(m->value[G_BLUR], "< %s >", blr[c->blur < 0 || c->blur > 2 ? 0 : c->blur]);
+        sprintf(m->value[G_SMOOTH], "%s", toggle(c->smooth));
+        bar_value(m->value[G_SHARPEN], c->sharpLevel);
+        bar_value(m->value[G_BLUR], c->blurLevel);
+        sprintf(m->value[G_DEFLICKER], "%s", toggle(c->deflicker));
+        {
+            static const int scrLabels[9] = { T_SCREEN_NONE, T_SCANLINES, T_CRT, T_CRT_CURVED, T_LCD_GRID, T_LIGHT_SCANLINES, T_SCR_VIGNETTE, T_SCR_APERTURE, T_SCR_DOTS };
+            sprintf(m->value[G_SCREEN], "< %s >", Tr(scrLabels[c->screen < 0 || c->screen > 8 ? 0 : c->screen]));
+        }
+        (void)lvl; (void)blr;
         return;
     }
     {
@@ -1025,25 +1768,27 @@ static void settings_main(UiMenu *m, const Config *c)
     s_graphicsPage = 0;
     s_screenPage = 0;
     s_calPage = 0;
+    s_devPage = 0;
     s_interfacePage = 0;
     s_catsPage = s_catEditPage = 0;
     s_saverPage = s_imagesPage = s_pathsPage = 0;
     s_soundPage = 0;
     s_systemPage = 0;
-    static const unsigned char icons[] = { UI_ICON_SYSTEM, UI_ICON_GRAPHICS, UI_ICON_SCREEN, UI_ICON_SOUND, UI_ICON_CONTROLS };
+    static const unsigned char icons[] = { UI_ICON_GRAPHICS, UI_ICON_SCREEN, UI_ICON_CONTROLS, UI_ICON_SOUND, UI_ICON_SYSTEM };
     UiMenuClear(m, Tr(T_SETTINGS), Tr(T_FOOT_SELECT));   // just "Settings", from the ROM list too
-    UiMenuAdd(m, Tr(T_SYSTEM), "");
     UiMenuAdd(m, Tr(T_GRAPHICS), "");
     UiMenuAdd(m, Tr(T_SCREEN), "");
-    UiMenuAdd(m, Tr(T_SOUND), "");
     UiMenuAdd(m, Tr(T_CONTROLS), "");
+    UiMenuAdd(m, Tr(T_SOUND), "");
+    UiMenuAdd(m, Tr(T_SYSTEM), "");
     UiMenuIcons(m, icons, sizeof(icons));
-    s_rowSaveGame = s_rowSaveAll = -1;
+    s_rowSaveGame = s_rowSaveAll = s_rowAbout = -1;
     if (s_browser)
     {
         // Not in game: the menus' look cannot be seen there, and the folders are the ROM list's.
         m->icon[UiMenuAdd(m, Tr(T_INTERFACE), "")] = UI_ICON_INTERFACE;
         m->icon[UiMenuAdd(m, Tr(T_PATHS), "")] = UI_ICON_LOAD;
+        m->icon[s_rowAbout = UiMenuAdd(m, Tr(T_ABOUT), "")] = UI_ICON_INFO;
     }
     else
     {
@@ -1064,23 +1809,27 @@ static void settings_interface(UiMenu *m, const Config *c)
     // field here) runs only after, so nothing can observe *m mid-rebuild
     // while this thread is possibly waiting on the filesystem.
     UiMenuClear(m, Tr(T_INTERFACE), Tr(T_FOOT_SELECT));
-    UiMenuAdd(m, Tr(T_DESIGN), "");
-    UiMenuAdd(m, Tr(T_SKINS), "");
+    UiMenuAdd(m, Tr(T_LANGUAGE), "");
+    UiMenuAdd(m, Tr(T_SETVIEW), "");
     UiMenuAdd(m, Tr(T_FONT), "");
+    UiMenuAdd(m, Tr(T_INTRO_WELCOME), "");
     UiMenuAdd(m, Tr(T_SEL_COLOR), "");
     UiMenuAdd(m, Tr(T_BORDERS), "");
     UiMenuAdd(m, Tr(T_WALLPAPERS), "");
     UiMenuAdd(m, Tr(T_BG_EFFECT), "");
     UiMenuAdd(m, Tr(T_SAVER), "");
-    UiMenuAdd(m, Tr(T_LANGUAGE), "");
+    UiMenuAdd(m, Tr(T_DESIGN), "");
     if (s_browser)
     {
         UiMenuAdd(m, Tr(T_GAME_IMAGES), "");   // opens its page: no value shown
+        UiMenuAdd(m, Tr(T_TRANSLATE_DESC), "");
         UiMenuAdd(m, Tr(T_CATEGORIES), "");
+        UiMenuAdd(m, Tr(T_START_ROM), "");
     }
     {
-        static const unsigned char icons[] = { UI_ICON_LAYOUT, UI_ICON_PALETTE, UI_ICON_SLIDERS, UI_ICON_EYE, UI_ICON_INTERFACE, UI_ICON_FRAME,
-                                               UI_ICON_SUN, UI_ICON_CLOCK, UI_ICON_GLOBE, UI_ICON_LOAD, UI_ICON_LIST };
+        static const unsigned char icons[] = { UI_ICON_GLOBE, UI_ICON_LIST, UI_ICON_SLIDERS, UI_ICON_PALETTE, UI_ICON_EYE, UI_ICON_INTERFACE,
+                                               UI_ICON_FRAME, UI_ICON_SUN, UI_ICON_CLOCK, UI_ICON_LAYOUT, UI_ICON_LOAD, UI_ICON_GLOBE, UI_ICON_LIST,
+                                               UI_ICON_PLAY };
         UiMenuIcons(m, icons, sizeof(icons));
     }
     SkinScan();   // keeps the inline Skins picker below matching the game:\skins folder
@@ -1106,21 +1855,16 @@ static int interface_input(UiMenu *m, Config *c, WORD down)
         settings_values(m, c);
         return SET_CHANGED;
     }
-    if (m->sel == I_SKINS && (dir || (down & XINPUT_GAMEPAD_A)))
+    if (m->sel == I_INTRO && (dir || (down & XINPUT_GAMEPAD_A)))
     {
-        int sn = SkinCount(), states = sn + 1, cur = 0, k;
-        if (!dir) dir = 1;
-        if (c->skinName[0] && sn)
-            for (k = 0; k < sn; k++)
-                if (!strcmp(SkinName(k), c->skinName)) { cur = k + 1; break; }
-        cur = (cur + dir + states) % states;
-        if (cur == 0) c->skinName[0] = 0;
-        else
-        {
-            strncpy(c->skinName, SkinName(cur - 1), sizeof(c->skinName) - 1);
-            c->skinName[sizeof(c->skinName) - 1] = 0;
-        }
-        UiSetSkinWant(c->skinName);   // the picture only: the music is game:\music\ (Settings > Sound > Music)
+        c->intro = !c->intro;
+        settings_values(m, c);
+        return SET_CHANGED;
+    }
+    if (m->sel == I_SETVIEW && (dir || (down & XINPUT_GAMEPAD_A)))
+    {
+        c->settingsView = !c->settingsView;
+        ui_from_config(c);   // the page itself shows the new style at once
         settings_values(m, c);
         return SET_CHANGED;
     }
@@ -1182,6 +1926,29 @@ static int interface_input(UiMenu *m, Config *c, WORD down)
         settings_cats(m, c, -1);
         return SET_NONE;
     }
+    if (s_browser && m->sel == I_STARTROM && s_interfacePage && (dir || (down & XINPUT_GAMEPAD_A)))
+    {
+        // No, the last game played, or the game selected in the list (when there is one).
+        int states = s_browserSel.empty() ? 2 : 3, cur = c->startRomMode;
+        if (!dir) dir = 1;
+        if (cur == 2 && states == 2) cur = 0;
+        cur = (cur + dir + states) % states;
+        c->startRomMode = cur;
+        if (cur == 2)
+        {
+            strncpy(c->startRom, s_browserSel.c_str(), sizeof(c->startRom) - 1);
+            c->startRom[sizeof(c->startRom) - 1] = 0;
+        }
+        settings_values(m, c);
+        return SET_CHANGED;
+    }
+    if (s_browser && m->sel == I_TRANSDESC && (dir || (down & XINPUT_GAMEPAD_A)))
+    {
+        c->descTranslate = !c->descTranslate;
+        if (!s_kodiSim) ArtSetLang(art_lang(c));   // the descriptions shown again in it
+        settings_values(m, c);
+        return SET_CHANGED;
+    }
     if (s_browser && m->sel == I_IMAGES && (down & XINPUT_GAMEPAD_A))
     {
         settings_images(m, c);
@@ -1195,7 +1962,7 @@ static int interface_input(UiMenu *m, Config *c, WORD down)
 // here from the flat one), a picture from the game, its title screen, its
 // logo (libretro-thumbnails; the box shows until that one is downloaded, or
 // when there is none) - and whether missing pictures are downloaded.
-enum { IM_KIND = 0, IM_DOWNLOAD };
+enum { IM_KIND = 0, IM_DOWNLOAD, IM_EXTRAS };
 static const int s_artKindLabels[CONFIG_ART_COUNT] = { T_KIND_BOX2D, T_KIND_BOX3D, T_KIND_SNAP, T_KIND_TITLE, T_KIND_LOGO };
 
 // The worker's kind of picture for Config::artKind (the 3D box is the box, drawn otherwise).
@@ -1208,17 +1975,19 @@ static int art_kind_of(const Config *c)
 static void images_values(UiMenu *m, const Config *c)
 {
     sprintf(m->value[IM_KIND], "< %s >", Tr(s_artKindLabels[c->artKind >= 0 && c->artKind < CONFIG_ART_COUNT ? c->artKind : 0]));
-    sprintf(m->value[IM_DOWNLOAD], "< %s >", onoff(c->artDownload));
+    sprintf(m->value[IM_DOWNLOAD], "%s", toggle(c->artDownload));
+    sprintf(m->value[IM_EXTRAS], "%s", toggle(c->artDownload && c->artExtras));
 }
 
 static void settings_images(UiMenu *m, const Config *c)
 {
-    static const unsigned char icons[] = { UI_ICON_FRAME, UI_ICON_LOAD };
+    static const unsigned char icons[] = { UI_ICON_FRAME, UI_ICON_LOAD, UI_ICON_LOAD };
     s_interfacePage = 0;
     s_imagesPage = 1;
     UiMenuClear(m, Tr(T_GAME_IMAGES), Tr(T_FOOT_SELECT));
     UiMenuAdd(m, Tr(T_IMG_KIND), "");
     UiMenuAdd(m, Tr(T_ART_DOWNLOADS), "");
+    UiMenuAdd(m, Tr(T_ART_EXTRAS), "");
     UiMenuIcons(m, icons, sizeof(icons));
     images_values(m, c);
 }
@@ -1238,6 +2007,14 @@ static int images_input(UiMenu *m, Config *c, WORD down)
     {
         c->artKind = ((c->artKind >= 0 && c->artKind < CONFIG_ART_COUNT ? c->artKind : 0) + (dir ? dir : 1) + CONFIG_ART_COUNT) % CONFIG_ART_COUNT;
         ui_from_config(c);   // the 3D box at once; another picture when the list is back
+        images_values(m, c);
+        return SET_CHANGED;
+    }
+    if (m->sel == IM_EXTRAS)
+    {
+        // The rest of the pictures: with the box art downloads on (turning it on here asks for those first).
+        if (!c->artDownload) return SET_ART_ASK;   // asks for these (settings_loop), the box art coming with them
+        c->artExtras = !c->artExtras;
         images_values(m, c);
         return SET_CHANGED;
     }
@@ -1311,17 +2088,18 @@ static void settings_system(UiMenu *m, const Config *c)
     UiMenuAdd(m, Tr(T_AUTOSAVE_SLOT), "");
     UiMenuAdd(m, Tr(T_BATTERY_WARN), "");
     UiMenuAdd(m, Tr(T_PERF_OVERLAY), "");   // opens its page: no value shown
+    UiMenuAdd(m, Tr(T_DEV_MODE), "");
     if (s_browser)
     {
         // For the next game only: nothing to change in the one running.
         UiMenuAdd(m, Tr(T_CPU_NEXT), "");
         UiMenuAdd(m, Tr(T_RSP_NEXT), "");
-        UiMenuAdd(m, Tr(T_START_ROM), "");
         UiMenuAdd(m, Tr(T_WIZARD), "");   // the first start's set-up again (settings_loop)
+        UiMenuAdd(m, Tr(T_EXPLORER), "");   // after a warning (settings_loop)
     }
     {
-        static const unsigned char icons[] = { UI_ICON_CONTROLS, UI_ICON_SAVE, UI_ICON_BATTERY, UI_ICON_CHART, UI_ICON_SYSTEM, UI_ICON_SYSTEM, UI_ICON_PLAY,
-                                               UI_ICON_SLIDERS };
+        static const unsigned char icons[] = { UI_ICON_CONTROLS, UI_ICON_SAVE, UI_ICON_BATTERY, UI_ICON_CHART, UI_ICON_SLIDERS, UI_ICON_SYSTEM,
+                                               UI_ICON_SYSTEM, UI_ICON_SLIDERS, UI_ICON_LIST };
         UiMenuIcons(m, icons, sizeof(icons));
     }
     settings_values(m, c);
@@ -1357,26 +2135,29 @@ static int system_input(UiMenu *m, Config *c, WORD down)
         settings_values(m, c);
         return SET_CHANGED;
     }
-    if (m->sel == SYS_STARTROM && (dir || (down & XINPUT_GAMEPAD_A)))
-    {
-        // No, the last game played, or the game selected in the list (when there is one).
-        int states = s_browserSel.empty() ? 2 : 3, cur = c->startRomMode;
-        if (!dir) dir = 1;
-        if (cur == 2 && states == 2) cur = 0;
-        cur = (cur + dir + states) % states;
-        c->startRomMode = cur;
-        if (cur == 2)
-        {
-            strncpy(c->startRom, s_browserSel.c_str(), sizeof(c->startRom) - 1);
-            c->startRom[sizeof(c->startRom) - 1] = 0;
-        }
-        settings_values(m, c);
-        return SET_CHANGED;
-    }
     if (s_browser && m->sel == SYS_WIZARD && (down & XINPUT_GAMEPAD_A)) return SET_WIZARD;
+    if (s_browser && m->sel == SYS_EXPLORER && (down & XINPUT_GAMEPAD_A)) return SET_EXPLORER;
     if (m->sel == SYS_PERF && (down & XINPUT_GAMEPAD_A))
     {
         settings_perf(m, c);
+        return SET_NONE;
+    }
+    if (m->sel == SYS_DEV && dir)
+    {
+        // Its switch: on or off here; A opens its options (turning it on first when off).
+        c->devMode = !c->devMode;
+        settings_values(m, c);
+        return SET_CHANGED;
+    }
+    if (m->sel == SYS_DEV && (down & XINPUT_GAMEPAD_A))
+    {
+        if (!c->devMode)
+        {
+            c->devMode = 1;
+            settings_dev(m, c);
+            return SET_CHANGED;
+        }
+        settings_dev(m, c);
         return SET_NONE;
     }
     if (m->sel == SYS_BATTERY && (dir || (down & XINPUT_GAMEPAD_A)))
@@ -1622,7 +2403,7 @@ static void fxpage_draw(const UiMenu *m)
 // are laid out, how long each one stays, the transition between two, their
 // order, how much they are darkened. One wide panel: the settings on the left,
 // on the right a live preview of the backdrop and a thumbnail of each layout.
-enum { WP_PICTURE = 0, WP_FIT, WP_INTERVAL, WP_TRANSITION, WP_ORDER, WP_DIM, WP_RESET, WP_COUNT };
+enum { WP_PICTURE = 0, WP_RECOMMEND, WP_FIT, WP_INTERVAL, WP_TRANSITION, WP_ORDER, WP_DIM, WP_RESET, WP_COUNT };
 static const int s_wallSecsList[] = { 0, 5, 10, 20, 30, 60, 120, 300, 600 };   // 0: never changes
 
 // The background chosen: 0 none, else 1 + its place among the pictures.
@@ -1692,6 +2473,9 @@ static int wall_input(UiMenu *m, Config *c, WORD down)
         }
         break;
     }
+    case WP_RECOMMEND:
+        c->wallRecommend = !c->wallRecommend;
+        break;
     case WP_FIT:
         c->wallFit = ((c->wallFit >= 0 && c->wallFit < UI_FIT_COUNT ? c->wallFit : 0) + (dir ? dir : 1) + UI_FIT_COUNT) % UI_FIT_COUNT;
         break;
@@ -1789,27 +2573,30 @@ static void wallpage_draw(const UiMenu *m)
     // ---- The settings, on the left.
     wall_choice_text(c, buf, sizeof(buf), 300);
     page_row(x, lw, ry, 44, Tr(T_WALL_CUSTOM), buf, m->sel == WP_PICTURE);
-    ry += 54;
+    ry += 50;
+    page_row(x, lw, ry, 44, Tr(T_WALL_RECOMMEND), "", m->sel == WP_RECOMMEND);
+    draw_value(x + lw - 44, ry + 22, toggle(c->wallRecommend), m->sel == WP_RECOMMEND);
+    ry += 50;
     _snprintf(buf, sizeof(buf) - 1, "< %s >", Tr(s_fitLabels[fit]));
     buf[sizeof(buf) - 1] = 0;
     page_row(x, lw, ry, 44, Tr(T_WALL_FIT), buf, m->sel == WP_FIT);
-    ry += 54;
+    ry += 50;
     if (c->wallInterval <= 0) _snprintf(buf, sizeof(buf) - 1, "< %s >", Tr(T_WALL_NEVER));
     else if (c->wallInterval < 60) _snprintf(buf, sizeof(buf) - 1, "< %d s >", c->wallInterval);
     else _snprintf(buf, sizeof(buf) - 1, "< %d min >", c->wallInterval / 60);
     buf[sizeof(buf) - 1] = 0;
     page_row(x, lw, ry, 44, Tr(T_WALL_INTERVAL), buf, m->sel == WP_INTERVAL);
-    ry += 54;
+    ry += 50;
     _snprintf(buf, sizeof(buf) - 1, "< %s >", Tr(s_transLabels[c->wallTransition >= 0 && c->wallTransition < UI_TRANS_COUNT ? c->wallTransition : 0]));
     buf[sizeof(buf) - 1] = 0;
     page_row(x, lw, ry, 44, Tr(T_WALL_TRANSITION), buf, m->sel == WP_TRANSITION);
-    ry += 54;
+    ry += 50;
     _snprintf(buf, sizeof(buf) - 1, "< %s >", Tr(c->wallShuffle ? T_ORDER_RANDOM : T_ORDER_NAME));
     buf[sizeof(buf) - 1] = 0;
     page_row(x, lw, ry, 44, Tr(T_WALL_ORDER), buf, m->sel == WP_ORDER);
-    ry += 62;
+    ry += 58;
     volume_bar_draw(ix, ry, iw, Tr(T_WALL_DIM), c->wallDim, 80, m->sel == WP_DIM, &fill);
-    ry += 92;
+    ry += 84;
     {
         float bw = UiTextWidth(UI_BOLD, 20, Tr(T_FX_RESET)) + 60, bx = x + (lw - bw) * 0.5f;
         if (m->sel == WP_RESET) selection_bar(bx, ry, bw, 40);
@@ -1820,7 +2607,9 @@ static void wallpage_draw(const UiMenu *m)
     UiRect(x + lw - 8, y + 90, 1, h - foot - 110, UI_COL_LINE);
     UiText(UI_BOLD, 20, px, py - 22, UI_COL_TEXT2, Tr(T_SAVER_PREVIEW), UI_LEFT);
     UiRoundRect(px, py, pw, ph, 8, D3DCOLOR_ARGB(255, 16, 17, 23), D3DCOLOR_ARGB(255, 10, 11, 15));
-    if (!c->wallCustom || !UiWallpaperPreview(px, py, pw, ph))
+    if (c->wallRecommend && s_rec[0].tex)
+        UiImage(s_rec[0].tex, px + (pw - ph * s_rec[0].w / s_rec[0].h) * 0.5f, py, ph * s_rec[0].w / s_rec[0].h, ph, 8, D3DCOLOR_ARGB(255, 255, 255, 255));
+    else if (!c->wallCustom || !UiWallpaperPreview(px, py, pw, ph))
     {
         // Off, or no picture to show: what to do about it.
         const char *say = Tr(UiWallpaperCount() ? T_WALL_OFF_HINT : T_WALL_HINT);
@@ -1846,8 +2635,11 @@ static void wallpage_draw(const UiMenu *m)
 // strong they are, how wide, whether they glow (pulsing, steady, not at all),
 // how see-through the panels are and how round their corners. A panel like
 // the others, so every change shows on the page itself.
-enum { BP_COLOR = 0, BP_OPACITY, BP_WIDTH, BP_GLOW, BP_PANEL, BP_CORNERS, BP_RESET, BP_COUNT };
-static const int s_glowLabels[3] = { T_GLOW_PULSE, T_GLOW_STEADY, T_OFF };
+enum { BP_COLOR = 0, BP_OPACITY, BP_WIDTH, BP_GLOW, BP_PANEL, BP_PANELCOLOR, BP_CORNERS, BP_RESET, BP_COUNT };
+// Config::borderGlow (GLOW_COUNT, with the edges above): 0 pulsing, 1 steady, 2 none (the values of
+// before), 3 snake, 4 fade, 5 rainbow; the row steps through them in s_glowOrder's order (none last).
+static const int s_glowLabels[GLOW_COUNT] = { T_GLOW_PULSE, T_GLOW_STEADY, T_OFF, T_GLOW_SNAKE, T_GLOW_FADE, T_GLOW_RAINBOW };
+static const int s_glowOrder[GLOW_COUNT] = { 0, 1, 3, 4, 5, 2 };
 static const int s_cornerLabels[4] = { T_CORNER_SQUARE, T_CORNER_SOFT, T_CORNER_ROUND, T_CORNER_ROUNDER };
 static const Config *s_borderCfg;
 
@@ -1888,13 +2680,22 @@ static int border_input(UiMenu *m, Config *c, WORD down)
         c->borderWidth = ((c->borderWidth >= 0 && c->borderWidth <= 4 ? c->borderWidth : 1) + (dir ? dir : 1) + 5) % 5;
         break;
     case BP_GLOW:
-        c->borderGlow = ((c->borderGlow >= 0 && c->borderGlow < 3 ? c->borderGlow : 0) + (dir ? dir : 1) + 3) % 3;
+    {
+        int k, at = 0;
+        for (k = 0; k < GLOW_COUNT; k++)
+            if (s_glowOrder[k] == c->borderGlow) at = k;
+        c->borderGlow = s_glowOrder[(at + (dir ? dir : 1) + GLOW_COUNT) % GLOW_COUNT];
         break;
+    }
     case BP_PANEL:
         if (!dir) return SET_NONE;
         c->panelOpacity += dir * 10;
         if (c->panelOpacity < 20) c->panelOpacity = 20;
         if (c->panelOpacity > 100) c->panelOpacity = 100;
+        break;
+    case BP_PANELCOLOR:
+        c->panelColor = ((c->panelColor >= 0 && c->panelColor <= FX_PALETTE_COUNT ? c->panelColor : 0) + (dir ? dir : 1) + FX_PALETTE_COUNT + 1) %
+                        (FX_PALETTE_COUNT + 1);
         break;
     case BP_CORNERS:
         c->panelRound = ((c->panelRound >= 0 && c->panelRound < 4 ? c->panelRound : 2) + (dir ? dir : 1) + 4) % 4;
@@ -1905,7 +2706,8 @@ static int border_input(UiMenu *m, Config *c, WORD down)
         c->borderOpacity = 100;
         c->borderWidth = 1;
         c->borderGlow = 0;
-        c->panelOpacity = 70;
+        c->panelOpacity = 30;
+        c->panelColor = 0;
         c->panelRound = 2;
         break;
     }
@@ -1941,12 +2743,19 @@ static void borderpage_draw(const UiMenu *m)
     buf[sizeof(buf) - 1] = 0;
     page_row(x, w, ry, 44, Tr(T_BORDER_WIDTH), buf, m->sel == BP_WIDTH);
     ry += 50;
-    _snprintf(buf, sizeof(buf) - 1, "< %s >", Tr(s_glowLabels[c->borderGlow >= 0 && c->borderGlow < 3 ? c->borderGlow : 0]));
+    _snprintf(buf, sizeof(buf) - 1, "< %s >", Tr(s_glowLabels[c->borderGlow >= 0 && c->borderGlow < GLOW_COUNT ? c->borderGlow : 0]));
     buf[sizeof(buf) - 1] = 0;
     page_row(x, w, ry, 44, Tr(T_BORDER_GLOW), buf, m->sel == BP_GLOW);
     ry += 56;
     volume_bar_draw(ix, ry, iw, Tr(T_PANEL_OPACITY), c->panelOpacity, 100, m->sel == BP_PANEL, &fill[1]);
     ry += 80;
+    // The panels' colour: the interface's own first (a dark dot), then the swatches.
+    v = c->panelColor >= 0 && c->panelColor <= FX_PALETTE_COUNT ? c->panelColor : 0;
+    if (m->sel == BP_PANELCOLOR) selection_bar(x + 28, ry - 4, w - 56, 66);
+    UiText(UI_BOLD, 20, ix, ry + 14, m->sel == BP_PANELCOLOR ? UI_COL_TEXT : UI_COL_TEXT2, Tr(T_PANEL_COLOR), UI_LEFT);
+    fx_swatches(ix, ry + 44, v, m->sel == BP_PANELCOLOR);
+    UiCircle(ix + 12, ry + 44, 12, UI_COL_PANEL_TOP | 0xFF000000);
+    ry += 76;
     _snprintf(buf, sizeof(buf) - 1, "< %s >", Tr(s_cornerLabels[c->panelRound >= 0 && c->panelRound < 4 ? c->panelRound : 2]));
     buf[sizeof(buf) - 1] = 0;
     page_row(x, w, ry, 44, Tr(T_PANEL_CORNERS), buf, m->sel == BP_CORNERS);
@@ -1966,8 +2775,10 @@ static void borderpage_draw(const UiMenu *m)
 // size and colour, its body's opacity, degrees C or F. One wide panel: the
 // items on the left, on the right a preview of the box on a screen and the
 // rest under it. In game every change shows on the real box too.
-enum { PP_ITEMS = 8, PP_POS = PP_ITEMS, PP_SIZE, PP_UNIT, PP_BOX, PP_COLOR, PP_RESET, PP_COUNT };
-static const int s_perfItemLabels[PP_ITEMS] = { T_PERF_FPS, T_PERF_CPU, T_PERF_RAM, T_PERF_RES, T_PERF_GPU, T_PERF_TCPU, T_PERF_TGPU, T_PERF_TRAM };
+// The items (rows) and the Config::perfItems bit of each: the GPU load (bit 4) is gone.
+enum { PP_ITEMS = 7, PP_POS = PP_ITEMS, PP_SIZE, PP_UNIT, PP_BOX, PP_COLOR, PP_RESET, PP_COUNT };
+static const int s_perfItemLabels[PP_ITEMS] = { T_PERF_FPS, T_PERF_CPU, T_PERF_RAM, T_PERF_RES, T_PERF_TCPU, T_PERF_TGPU, T_PERF_TRAM };
+static const int s_perfBit[PP_ITEMS] = { 0, 1, 2, 3, 5, 6, 7 };
 static const int s_perfPosLabels[UI_PERF_POS_COUNT] = { T_POS_TL, T_POS_TC, T_POS_TR, T_POS_BL, T_POS_BR };
 static const int s_perfSizeLabels[4] = { T_SIZE_S, T_SIZE_M, T_SIZE_L, T_SIZE_XL };
 static const float s_perfSizes[4] = { 14, 17, 21, 26 };
@@ -2000,24 +2811,31 @@ static int perf_input(UiMenu *m, Config *c, WORD down)
         m->sel = SYS_PERF;
         return SET_NONE;
     }
-    if (!dir && !a) return SET_NONE;
-    if (m->sel < PP_ITEMS) c->perfItems ^= 1 << m->sel;   // ticked on or off
+    // Left and right go between the two columns (the items; how the box looks), at the
+    // same height: the rows on the right were reached only by going down past every
+    // item. A changes the row's value (on the right: its next one).
+    if (dir > 0 && m->sel < PP_ITEMS)
+    {
+        m->sel = PP_POS + (m->sel < PP_COUNT - PP_POS ? m->sel : PP_COUNT - PP_POS - 1);
+        return SET_NONE;
+    }
+    if (dir < 0 && m->sel >= PP_ITEMS)
+    {
+        m->sel = m->sel - PP_POS < PP_ITEMS ? m->sel - PP_POS : PP_ITEMS - 1;
+        return SET_NONE;
+    }
+    if (!a) return SET_NONE;
+    if (m->sel < PP_ITEMS) c->perfItems ^= 1 << s_perfBit[m->sel];   // ticked on or off
     else switch (m->sel)
     {
-    case PP_POS: c->perfPos = ((c->perfPos >= 0 && c->perfPos < UI_PERF_POS_COUNT ? c->perfPos : 2) + (dir ? dir : 1) + UI_PERF_POS_COUNT) % UI_PERF_POS_COUNT; break;
-    case PP_SIZE: c->perfSize = ((c->perfSize >= 0 && c->perfSize < 4 ? c->perfSize : 1) + (dir ? dir : 1) + 4) % 4; break;
+    case PP_POS: c->perfPos = ((c->perfPos >= 0 && c->perfPos < UI_PERF_POS_COUNT ? c->perfPos : 2) + 1) % UI_PERF_POS_COUNT; break;
+    case PP_SIZE: c->perfSize = ((c->perfSize >= 0 && c->perfSize < 4 ? c->perfSize : 1) + 1) % 4; break;
     case PP_UNIT: c->perfFahrenheit = !c->perfFahrenheit; break;
-    case PP_BOX:
-        if (!dir) return SET_NONE;
-        c->perfBox += dir * 10;
-        if (c->perfBox < 0) c->perfBox = 0;
-        if (c->perfBox > 100) c->perfBox = 100;
-        break;
+    case PP_BOX: c->perfBox = c->perfBox >= 100 ? 0 : (c->perfBox / 10 + 1) * 10; break;   // 0, 10 ... 100, then 0 again
     case PP_COLOR:
-        c->perfColor = ((c->perfColor >= 0 && c->perfColor <= FX_PALETTE_COUNT ? c->perfColor : 0) + (dir ? dir : 1) + FX_PALETTE_COUNT + 1) % (FX_PALETTE_COUNT + 1);
+        c->perfColor = ((c->perfColor >= 0 && c->perfColor <= FX_PALETTE_COUNT ? c->perfColor : 0) + 1) % (FX_PALETTE_COUNT + 1);
         break;
-    case PP_RESET:
-        if (!a) return SET_NONE;   // what is shown stays: only how
+    case PP_RESET:   // what is shown stays: only how
         c->perfPos = UI_PERF_TOP_RIGHT;
         c->perfSize = 1;
         c->perfColor = 0;
@@ -2037,17 +2855,16 @@ static void perf_sample(const Config *c, char *out, size_t size)
     int k, n = 0;
     out[0] = 0;
     UiTemperatures(!c->xenia, &t[0], &t[1], &t[2]);
-    for (k = 0; k < PP_ITEMS; k++)
+    for (k = 0; k < 8; k++)
     {
         char line[48];
-        if (!(c->perfItems & (1 << k))) continue;
+        if (k == 4 || !(c->perfItems & (1 << k))) continue;   // 4: the GPU load, gone
         switch (k)
         {
         case 0: strcpy(line, "\x01" "60.0 FPS"); break;   // each line with its icon (UI_PERF_ICON_*)
         case 1: strcpy(line, "\x02" "CPU 42%"); break;
-        case 2: strcpy(line, "\x03" "RAM 236 / 512 MB"); break;
-        case 3: strcpy(line, "\x04" "1280x720 (N64 320x240)"); break;
-        case 4: strcpy(line, "\x05" "GPU 35%"); break;
+        case 2: strcpy(line, "\x03" "RAM 236MB"); break;
+        case 3: strcpy(line, "\x04" "1280x720"); break;
         default:
         {
             float v = t[k - 5];
@@ -2078,9 +2895,9 @@ static void perfpage_draw(const UiMenu *m)
     // ---- What it shows, ticked: on the left.
     for (i = 0; i < PP_ITEMS; i++)
     {
-        int on = (c->perfItems >> i) & 1, sel = m->sel == i;
+        int on = (c->perfItems >> s_perfBit[i]) & 1, sel = m->sel == i;
         const float bx = x + lw - 80, by = ry + 8;
-        static const int icons[PP_ITEMS] = { UI_PERF_ICON_FPS, UI_PERF_ICON_CPU, UI_PERF_ICON_RAM, UI_PERF_ICON_RES, UI_PERF_ICON_GPU,
+        static const int icons[PP_ITEMS] = { UI_PERF_ICON_FPS, UI_PERF_ICON_CPU, UI_PERF_ICON_RAM, UI_PERF_ICON_RES,
                                              UI_PERF_ICON_TEMP_OK, UI_PERF_ICON_TEMP_OK, UI_PERF_ICON_TEMP_OK };
         if (sel) selection_bar(x + 28, ry, lw - 56, 34);
         UiPerfIcon(icons[i], x + 44, ry + 17, 20, UiAlpha(sel ? UI_COL_TEXT : UI_COL_TEXT2, 0.75f));   // the box's own, discreet
@@ -2369,6 +3186,527 @@ int FolderPicker(IDirect3DDevice9 *dev, const char *start, char *out, int outSiz
     return result;
 }
 
+// ---- File explorer (Settings > System > File explorer, from the ROM list) ----
+// Two panels side by side - game: on the left, Hdd1: on the right at first -, each
+// a folder and its contents (folders first). LB/RB pick the panel, A opens a
+// folder, B goes up (from a drive: the drives; from the drives: out), X marks,
+// Y copies the marked items (or the one under the cursor), LT cuts them, RT
+// pastes into the panel's folder. The transfer runs on its own thread with a
+// bar (B cancels); a toast says when it is over.
+struct ExpItem { std::string name; int dir; unsigned long long size; int marked; };
+struct ExpPane { char path[260]; std::vector<ExpItem> items; int sel, top; };
+
+static bool exp_less(const ExpItem &a, const ExpItem &b)
+{
+    if (a.dir != b.dir) return a.dir > b.dir;   // folders first
+    return _stricmp(a.name.c_str(), b.name.c_str()) < 0;
+}
+
+static void exp_list(ExpPane *p)
+{
+    WIN32_FIND_DATAA fd;
+    HANDLE h;
+    char pattern[280];
+    size_t i;
+    p->items.clear();
+    if (!p->path[0])
+    {
+        for (i = 0; i < sizeof(s_pickDrives) / sizeof(s_pickDrives[0]); i++)
+        {
+            ExpItem it;
+            _snprintf(pattern, sizeof(pattern) - 1, "%s\\*", s_pickDrives[i]);
+            pattern[sizeof(pattern) - 1] = 0;
+            h = FindFirstFileA(pattern, &fd);
+            if (h != INVALID_HANDLE_VALUE) FindClose(h);
+            else if (GetFileAttributesA(s_pickDrives[i]) == 0xFFFFFFFF) continue;
+            it.name = s_pickDrives[i];
+            it.dir = 2;   // a drive
+            it.size = 0;
+            it.marked = 0;
+            p->items.push_back(it);
+        }
+    }
+    else
+    {
+        _snprintf(pattern, sizeof(pattern) - 1, "%s\\*", p->path);
+        pattern[sizeof(pattern) - 1] = 0;
+        h = FindFirstFileA(pattern, &fd);
+        if (h != INVALID_HANDLE_VALUE)
+        {
+            do
+            {
+                ExpItem it;
+                if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
+                it.name = fd.cFileName;
+                it.dir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? 1 : 0;
+                it.size = ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
+                it.marked = 0;
+                p->items.push_back(it);
+            } while (FindNextFileA(h, &fd));
+            FindClose(h);
+        }
+        std::sort(p->items.begin(), p->items.end(), exp_less);
+    }
+    if (p->sel >= (int)p->items.size()) p->sel = p->items.empty() ? 0 : (int)p->items.size() - 1;
+    if (p->sel < 0) p->sel = 0;
+}
+
+static void exp_size_text(unsigned long long n, char *out, size_t size)
+{
+    if (n >= 1024ull * 1024 * 1024) _snprintf(out, size - 1, "%.1f GB", n / (1024.0 * 1024 * 1024));
+    else if (n >= 1024 * 1024) _snprintf(out, size - 1, "%.1f MB", n / (1024.0 * 1024));
+    else if (n >= 1024) _snprintf(out, size - 1, "%.0f KB", n / 1024.0);
+    else _snprintf(out, size - 1, "%u B", (unsigned)n);
+    out[size - 1] = 0;
+}
+
+// ---- The transfer, on its own thread ----
+static struct
+{
+    std::vector<std::string> src;   // full paths
+    std::string dst;                // the folder they go into
+    int move;
+    volatile LONG running, cancel, failed;
+    volatile unsigned long long total, done;
+    char current[128];
+} s_xfer;
+
+static unsigned long long xfer_size(const std::string &path)
+{
+    WIN32_FIND_DATAA fd;
+    HANDLE h;
+    unsigned long long n = 0;
+    DWORD a = GetFileAttributesA(path.c_str());
+    if (a == 0xFFFFFFFF) return 0;
+    if (!(a & FILE_ATTRIBUTE_DIRECTORY))
+    {
+        h = FindFirstFileA(path.c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) return 0;
+        FindClose(h);
+        return ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
+    }
+    h = FindFirstFileA((path + "\\*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do
+        if (strcmp(fd.cFileName, ".") && strcmp(fd.cFileName, "..")) n += xfer_size(path + "\\" + fd.cFileName);
+    while (FindNextFileA(h, &fd));
+    FindClose(h);
+    return n;
+}
+
+// A name that is not taken in `dir`: "name", else "name (2)" ... (before the extension).
+static std::string xfer_free_name(const std::string &dir, const std::string &name)
+{
+    std::string base = name, ext;
+    size_t dot = name.rfind('.');
+    int k;
+    if (GetFileAttributesA((dir + "\\" + name).c_str()) == 0xFFFFFFFF) return name;
+    if (dot != std::string::npos && dot > 0) { base = name.substr(0, dot); ext = name.substr(dot); }
+    for (k = 2; k < 100; k++)
+    {
+        char n[16];
+        std::string cand;
+        sprintf(n, " (%d)", k);
+        cand = base + n + ext;
+        if (GetFileAttributesA((dir + "\\" + cand).c_str()) == 0xFFFFFFFF) return cand;
+    }
+    return name;
+}
+
+static int xfer_copy(const std::string &src, const std::string &dstDir, const std::string &name)
+{
+    static char buf[256 * 1024];
+    std::string dst = dstDir + "\\" + name;
+    DWORD a = GetFileAttributesA(src.c_str());
+    if (s_xfer.cancel) return 0;
+    if (a == 0xFFFFFFFF) return 0;
+    if (a & FILE_ATTRIBUTE_DIRECTORY)
+    {
+        WIN32_FIND_DATAA fd;
+        HANDLE h;
+        int ok = 1;
+        CreateDirectoryA(dst.c_str(), NULL);
+        h = FindFirstFileA((src + "\\*").c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) return 1;   // empty
+        do
+            if (strcmp(fd.cFileName, ".") && strcmp(fd.cFileName, "..")) ok &= xfer_copy(src + "\\" + fd.cFileName, dst, fd.cFileName);
+        while (ok && FindNextFileA(h, &fd));
+        FindClose(h);
+        return ok;
+    }
+    {
+        HANDLE in = CreateFileA(src.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL), out;
+        DWORD got, put;
+        int ok = 1;
+        if (in == INVALID_HANDLE_VALUE) return 0;
+        out = CreateFileA(dst.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (out == INVALID_HANDLE_VALUE) { CloseHandle(in); return 0; }
+        strncpy(s_xfer.current, name.c_str(), sizeof(s_xfer.current) - 1);
+        s_xfer.current[sizeof(s_xfer.current) - 1] = 0;
+        for (;;)
+        {
+            if (s_xfer.cancel) { ok = 0; break; }
+            if (!ReadFile(in, buf, sizeof(buf), &got, NULL)) { ok = 0; break; }
+            if (!got) break;
+            if (!WriteFile(out, buf, got, &put, NULL) || put != got) { ok = 0; break; }
+            s_xfer.done += got;
+        }
+        CloseHandle(in);
+        CloseHandle(out);
+        if (!ok) DeleteFileA(dst.c_str());   // no half file left behind
+        return ok;
+    }
+}
+
+static void xfer_delete(const std::string &path)
+{
+    DWORD a = GetFileAttributesA(path.c_str());
+    if (a == 0xFFFFFFFF) return;
+    if (a & FILE_ATTRIBUTE_DIRECTORY)
+    {
+        WIN32_FIND_DATAA fd;
+        HANDLE h = FindFirstFileA((path + "\\*").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE)
+        {
+            do
+                if (strcmp(fd.cFileName, ".") && strcmp(fd.cFileName, "..")) xfer_delete(path + "\\" + fd.cFileName);
+            while (FindNextFileA(h, &fd));
+            FindClose(h);
+        }
+        RemoveDirectoryA(path.c_str());
+    }
+    else
+        DeleteFileA(path.c_str());
+}
+
+static DWORD WINAPI xfer_thread(LPVOID)
+{
+    size_t i;
+    int ok = 1;
+    s_xfer.total = 0;
+    for (i = 0; i < s_xfer.src.size(); i++) s_xfer.total += xfer_size(s_xfer.src[i]);
+    for (i = 0; i < s_xfer.src.size() && !s_xfer.cancel; i++)
+    {
+        const std::string &src = s_xfer.src[i];
+        size_t slash = src.rfind('\\'), colon = src.find(':');
+        std::string name = slash != std::string::npos ? src.substr(slash + 1) : src, dstName;
+        dstName = xfer_free_name(s_xfer.dst, name);
+        // A move on the same drive: renamed in place, no copying.
+        if (s_xfer.move && colon != std::string::npos && s_xfer.dst.compare(0, colon + 1, src, 0, colon + 1) == 0 &&
+            MoveFileA(src.c_str(), (s_xfer.dst + "\\" + dstName).c_str()))
+        {
+            s_xfer.done += xfer_size(s_xfer.dst + "\\" + dstName);
+            continue;
+        }
+        if (!xfer_copy(src, s_xfer.dst, dstName)) { ok = 0; break; }
+        if (s_xfer.move) xfer_delete(src);
+    }
+    InterlockedExchange(&s_xfer.failed, ok && !s_xfer.cancel ? 0 : 1);
+    H64_INFO("[explorer] %s of %u item(s) into %s: %s", s_xfer.move ? "move" : "copy", (unsigned)s_xfer.src.size(), s_xfer.dst.c_str(),
+             s_xfer.failed ? "not finished" : "done");
+    InterlockedExchange(&s_xfer.running, 0);
+    return 0;
+}
+
+static void exp_pane_draw(const ExpPane *p, float x, float y, float w, float h, int active, int rows)
+{
+    const float rowH = 36, listY = y + 70;
+    char buf[200], fit[200];
+    int i;
+    if (active) edge_glow(x, y, w, h, 18);
+    UiPanel(x, y, w, h, 18);
+    _snprintf(buf, sizeof(buf) - 1, "%s", p->path[0] ? p->path : Tr(T_EXP_DRIVES));
+    buf[sizeof(buf) - 1] = 0;
+    UiTextFit(UI_BOLD, 21, w - 60, buf, fit, sizeof(fit));
+    UiText(UI_BOLD, 21, x + 28, y + 36, active ? UI_COL_TEXT : UI_COL_TEXT2, fit, UI_LEFT);
+    UiRect(x + 20, y + 58, w - 40, 1, UI_COL_LINE);
+    if (p->items.empty())
+    {
+        UiText(UI_REGULAR, 19, x + w * 0.5f, listY + 60, UI_COL_TEXT3, Tr(T_EXP_EMPTY), UI_CENTER);
+        return;
+    }
+    for (i = 0; i < rows && p->top + i < (int)p->items.size(); i++)
+    {
+        const ExpItem *it = &p->items[p->top + i];
+        float ry = listY + i * rowH, cy = ry + rowH * 0.5f;
+        int sel = p->top + i == p->sel;
+        D3DCOLOR col = sel && active ? UI_COL_TEXT : UI_COL_TEXT2;
+        if (sel && active) selection_bar(x + 12, ry + 2, w - 24, rowH - 4);
+        else if (sel) UiRoundRing(x + 12, ry + 2, w - 24, rowH - 4, 10, 1.0f, UI_COL_LINE);
+        if (it->marked)
+        {
+            // The mark: a tick in the selection's colour.
+            UiLine(x + 22, cy, x + 26, cy + 4, 2.2f, SEL_HI(255));
+            UiLine(x + 26, cy + 4, x + 33, cy - 5, 2.2f, SEL_HI(255));
+        }
+        if (it->dir) pick_icon(x + 40, cy, it->dir == 2, col);
+        else
+        {
+            UiRoundRing(x + 44, cy - 10, 16, 20, 2, 1.5f, col);   // a page
+            UiRect(x + 48, cy - 3, 8, 1.5f, col);
+            UiRect(x + 48, cy + 2, 8, 1.5f, col);
+        }
+        UiTextFit(UI_REGULAR, 19, w - (it->dir ? 110 : 220), it->name.c_str(), fit, sizeof(fit));
+        UiText(sel ? UI_BOLD : UI_REGULAR, 19, x + 74, cy, col, fit, UI_LEFT);
+        if (!it->dir)
+        {
+            exp_size_text(it->size, buf, sizeof(buf));
+            UiText(UI_REGULAR, 17, x + w - 26, cy, UI_COL_TEXT3, buf, UI_RIGHT);
+        }
+    }
+}
+
+// Pressed this frame (LT, RT: the triggers past half way, which UiInputPoll does not report).
+static int exp_triggers(int *prev)
+{
+    XINPUT_STATE st;
+    int now = 0, down;
+    if (XInputGetState(0, &st) == ERROR_SUCCESS)
+        now = (st.Gamepad.bLeftTrigger > 128 ? 1 : 0) | (st.Gamepad.bRightTrigger > 128 ? 2 : 0);
+    down = now & ~*prev;
+    *prev = now;
+    return down;
+}
+
+static int confirm_ask(IDirect3DDevice9 *dev, int title, int question, int footer);   // below, with the other questions
+
+// Deletes a file, or a folder and everything in it. 1 when all of it went.
+static int exp_delete(const std::string &path)
+{
+    DWORD at = GetFileAttributesA(path.c_str());
+    int ok = 1;
+    if (at == 0xFFFFFFFF) return 0;
+    if (at & FILE_ATTRIBUTE_DIRECTORY)
+    {
+        WIN32_FIND_DATAA fd;
+        HANDLE h = FindFirstFileA((path + "\\*").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE)
+        {
+            do
+            {
+                if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
+                ok &= exp_delete(path + "\\" + fd.cFileName);
+            } while (FindNextFileA(h, &fd));
+            FindClose(h);
+        }
+        return ok && RemoveDirectoryA(path.c_str());
+    }
+    if (at & FILE_ATTRIBUTE_READONLY) SetFileAttributesA(path.c_str(), at & ~FILE_ATTRIBUTE_READONLY);
+    return DeleteFileA(path.c_str()) != 0;
+}
+
+static void FileExplorer(IDirect3DDevice9 *dev)
+{
+    const float pw = 604, ph = 590, py = 34, gap = 24;
+    const int rows = 14;
+    static ExpPane panes[2];
+    UiInput in;
+    int active = 0, trigPrev = 3, i, clipMove = 0;
+    std::vector<std::string> clip;
+    char msg[200];
+    DWORD msgAt = 0;
+    msg[0] = 0;
+    if (!panes[0].path[0] && !panes[1].path[0])
+    {
+        strcpy(panes[0].path, "game:");
+        strcpy(panes[1].path, GetFileAttributesA("Hdd1:\\") != 0xFFFFFFFF ? "Hdd1:" : "");
+    }
+    exp_list(&panes[0]);
+    exp_list(&panes[1]);
+    UiInputInit(&in);
+    exp_triggers(&trigPrev);
+    H64_INFO("[explorer] opened");
+    for (;;)
+    {
+        WORD down = UiInputPoll(&in);
+        int trig = exp_triggers(&trigPrev);
+        ExpPane *p = &panes[active];
+        if (s_xfer.running)
+        {
+            if (down & XINPUT_GAMEPAD_B) InterlockedExchange(&s_xfer.cancel, 1);
+        }
+        else
+        {
+            if (msgAt && s_xfer.src.size() && !s_xfer.running && msgAt == 1)
+            {
+                // A transfer just ended: both panels read again, and the word for it.
+                strcpy(msg, Tr(s_xfer.failed ? T_EXP_FAILED : T_EXP_DONE));
+                msgAt = GetTickCount();
+                xb_audio_ui_sound(XB_SFX_NOTIFY);
+                s_xfer.src.clear();
+                exp_list(&panes[0]);
+                exp_list(&panes[1]);
+            }
+            if (down & (XINPUT_GAMEPAD_LEFT_SHOULDER | XINPUT_GAMEPAD_RIGHT_SHOULDER))
+                active = (down & XINPUT_GAMEPAD_RIGHT_SHOULDER) ? 1 : 0;
+            p = &panes[active];
+            if (!p->items.empty())
+            {
+                if (down & XINPUT_GAMEPAD_DPAD_UP) p->sel = (p->sel + (int)p->items.size() - 1) % (int)p->items.size();
+                if (down & XINPUT_GAMEPAD_DPAD_DOWN) p->sel = (p->sel + 1) % (int)p->items.size();
+                if (down & XINPUT_GAMEPAD_DPAD_LEFT) p->sel = p->sel > rows ? p->sel - rows : 0;
+                if (down & XINPUT_GAMEPAD_DPAD_RIGHT) p->sel = p->sel + rows < (int)p->items.size() ? p->sel + rows : (int)p->items.size() - 1;
+            }
+            if ((down & XINPUT_GAMEPAD_A) && !p->items.empty() && p->items[p->sel].dir)
+            {
+                // Into the folder (or the drive).
+                if (p->items[p->sel].dir == 2) _snprintf(p->path, sizeof(p->path) - 1, "%s", p->items[p->sel].name.c_str());
+                else
+                {
+                    char next[260];
+                    _snprintf(next, sizeof(next) - 1, "%s\\%s", p->path, p->items[p->sel].name.c_str());
+                    next[sizeof(next) - 1] = 0;
+                    strcpy(p->path, next);
+                }
+                p->path[sizeof(p->path) - 1] = 0;
+                p->sel = p->top = 0;
+                exp_list(p);
+            }
+            else if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK))
+            {
+                if (!p->path[0] || (down & XINPUT_GAMEPAD_BACK)) break;   // from the drives (or BACK): out
+                {
+                    // Up a folder; from a drive's top, the drives - the folder left stays under the cursor.
+                    char *slash = strrchr(p->path, '\\');
+                    std::string left = slash ? slash + 1 : p->path;
+                    size_t k;
+                    if (slash) *slash = 0;
+                    else p->path[0] = 0;
+                    exp_list(p);
+                    for (k = 0; k < p->items.size(); k++)
+                        if (!_stricmp(p->items[k].name.c_str(), left.c_str())) p->sel = (int)k;
+                }
+            }
+            if ((down & XINPUT_GAMEPAD_X) && p->path[0] && !p->items.empty())
+            {
+                p->items[p->sel].marked = !p->items[p->sel].marked;
+                if (p->sel + 1 < (int)p->items.size()) p->sel++;   // on to the next, to mark several in a row
+            }
+            if (((down & XINPUT_GAMEPAD_Y) || (trig & 1)) && p->path[0] && !p->items.empty())
+            {
+                // Copy (Y) or cut (LT): the marked items, or the one under the cursor.
+                clip.clear();
+                for (i = 0; i < (int)p->items.size(); i++)
+                    if (p->items[i].marked) clip.push_back(std::string(p->path) + "\\" + p->items[i].name);
+                if (clip.empty()) clip.push_back(std::string(p->path) + "\\" + p->items[p->sel].name);
+                for (i = 0; i < (int)p->items.size(); i++) p->items[i].marked = 0;
+                clipMove = (trig & 1) != 0;
+                _snprintf(msg, sizeof(msg) - 1, Tr(clipMove ? T_EXP_CLIP_MOVE : T_EXP_CLIP_COPY), (int)clip.size());
+                msg[sizeof(msg) - 1] = 0;
+                msgAt = GetTickCount();
+            }
+            if ((down & XINPUT_GAMEPAD_START) && p->path[0] && !p->items.empty())
+            {
+                // Delete (START): the marked items, or the one under the cursor - after asking.
+                std::vector<std::string> del;
+                for (i = 0; i < (int)p->items.size(); i++)
+                    if (p->items[i].marked) del.push_back(std::string(p->path) + "\\" + p->items[i].name);
+                if (del.empty()) del.push_back(std::string(p->path) + "\\" + p->items[p->sel].name);
+                if (confirm_ask(dev, T_EXP_DEL_TITLE, T_EXP_DEL_ASK, T_FOOT_EXP_DEL))
+                {
+                    size_t k;
+                    int gone = 0, all = 1;
+                    for (k = 0; k < del.size(); k++)
+                    {
+                        int ok = exp_delete(del[k]);
+                        gone += ok;
+                        all &= ok;
+                        H64_INFO("[explorer] delete %s: %s", del[k].c_str(), ok ? "done" : "failed");
+                    }
+                    if (all) _snprintf(msg, sizeof(msg) - 1, Tr(T_EXP_DELETED), gone);
+                    else _snprintf(msg, sizeof(msg) - 1, "%s", Tr(T_EXP_DEL_FAILED));
+                    msg[sizeof(msg) - 1] = 0;
+                    msgAt = GetTickCount();
+                    exp_list(&panes[0]);
+                    exp_list(&panes[1]);
+                    if (p->sel >= (int)p->items.size()) p->sel = p->items.empty() ? 0 : (int)p->items.size() - 1;
+                }
+                UiInputInit(&in);
+            }
+            if ((trig & 2) && p->path[0] && !clip.empty())
+            {
+                // Paste into this panel's folder - never a folder into itself.
+                size_t k;
+                std::string dst = p->path;
+                for (k = 0; k < clip.size(); k++)
+                {
+                    const std::string &s = clip[k];
+                    if (!_strnicmp(dst.c_str(), s.c_str(), s.size()) && (dst.size() == s.size() || dst[s.size()] == '\\')) break;
+                }
+                if (k < clip.size())
+                {
+                    strcpy(msg, Tr(T_EXP_INTO_ITSELF));
+                    msgAt = GetTickCount();
+                }
+                else
+                {
+                    HANDLE t;
+                    s_xfer.src = clip;
+                    s_xfer.dst = dst;
+                    s_xfer.move = clipMove;
+                    s_xfer.done = s_xfer.total = 0;
+                    s_xfer.current[0] = 0;
+                    s_xfer.cancel = s_xfer.failed = 0;
+                    s_xfer.running = 1;
+                    t = CreateThread(NULL, 64 * 1024, xfer_thread, NULL, 0, NULL);
+                    if (t) CloseHandle(t);
+                    else s_xfer.running = 0;
+                    if (clipMove) clip.clear();   // moved: they are not where they were any more
+                    msg[0] = 0;
+                    msgAt = 1;   // the end of the transfer shows its word (above)
+                }
+            }
+        }
+        // Keep the cursor in view.
+        for (i = 0; i < 2; i++)
+        {
+            ExpPane *q = &panes[i];
+            if (q->sel < q->top) q->top = q->sel;
+            if (q->sel >= q->top + rows) q->top = q->sel - rows + 1;
+        }
+        dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
+        UiBegin(dev);
+        UiBackdrop();
+        exp_pane_draw(&panes[0], (UI_WIDTH - 2 * pw - gap) * 0.5f, py, pw, ph, active == 0, rows);
+        exp_pane_draw(&panes[1], (UI_WIDTH + gap) * 0.5f, py, pw, ph, active == 1, rows);
+        if (s_xfer.running)
+        {
+            // The transfer: what, how far, and B to stop it.
+            const float w = 640, h = 190, x = (UI_WIDTH - w) * 0.5f, y = (UI_HEIGHT - h) * 0.5f;
+            unsigned long long tot = s_xfer.total, done = s_xfer.done;
+            float f = tot ? (float)((double)done / (double)tot) : 0.0f;
+            char a[32], b[32], line[96], fit[160];
+            UiDim();
+            edge_glow(x, y, w, h, 20);
+            UiPanel(x, y, w, h, 20);
+            UiText(UI_BOLD, 26, x + 36, y + 40, UI_COL_TEXT, Tr(s_xfer.move ? T_EXP_MOVING : T_EXP_COPYING), UI_LEFT);
+            UiTextFit(UI_REGULAR, 18, w - 72, s_xfer.current, fit, sizeof(fit));
+            UiText(UI_REGULAR, 18, x + 36, y + 76, UI_COL_TEXT2, fit, UI_LEFT);
+            if (f > 1.0f) f = 1.0f;
+            UiRoundRect(x + 36, y + 102, w - 72, 12, 6, D3DCOLOR_ARGB(50, 255, 255, 255), D3DCOLOR_ARGB(35, 255, 255, 255));
+            UiRoundRect(x + 36, y + 102, (w - 72) * f, 12, 6, SEL_HI(255), SEL_LO(255));
+            exp_size_text(done, a, sizeof(a));
+            exp_size_text(tot, b, sizeof(b));
+            _snprintf(line, sizeof(line) - 1, "%s / %s  (%d%%)", a, b, (int)(f * 100));
+            line[sizeof(line) - 1] = 0;
+            UiText(UI_REGULAR, 17, x + 36, y + 134, UI_COL_TEXT3, line, UI_LEFT);
+            UiFooter(x + w - 36 - UiFooterWidth(Tr(T_FOOT_EXP_CANCEL)), y + 160, Tr(T_FOOT_EXP_CANCEL));
+        }
+        if (msg[0] && msgAt > 1)
+        {
+            DWORD age = GetTickCount() - msgAt;
+            if (age < 3000) UiToast(msg, (float)age, 3000.0f);
+            else msg[0] = 0;
+        }
+        UiScreenFooter(Tr(T_FOOT_EXPLORER));
+        UiEnd();
+        dev->Present(NULL, NULL, NULL, NULL);
+        Sleep(16);
+    }
+    while (s_xfer.running) { InterlockedExchange(&s_xfer.cancel, 1); Sleep(20); }   // never leave one running behind
+    H64_INFO("[explorer] closed");
+}
+
 // ---- Sound page: Volumen (opens the bars page above) and Margen de audio
 // (an inline "< N ms >" cycle, moved here from the main page).
 static void settings_sound(UiMenu *m, const Config *c)
@@ -2427,7 +3765,7 @@ static int sound_input(UiMenu *m, Config *c, WORD down)
     if (m->sel == SND_MONO && (dir || (down & XINPUT_GAMEPAD_A)))
     {
         c->audioMono = !c->audioMono;
-        xb_audio_set_mono(c->audioMono);
+        if (!s_kodiSim) xb_audio_set_mono(c->audioMono);
         settings_values(m, c);
         return SET_CHANGED;
     }
@@ -2456,7 +3794,7 @@ static int sound_input(UiMenu *m, Config *c, WORD down)
             strncpy(c->musicTrack, xb_audio_music_track(cur - 3), sizeof(c->musicTrack) - 1);
             c->musicTrack[sizeof(c->musicTrack) - 1] = 0;
         }
-        if (s_browser) xb_audio_music_start(MUSIC_DIR, c->musicMode, c->musicTrack);   // heard at once (no music in game)
+        if (s_browser && !s_kodiSim) xb_audio_music_start(MUSIC_DIR, c->musicMode, c->musicTrack);   // heard at once (no music in game)
         settings_values(m, c);
         return SET_CHANGED;
     }
@@ -2466,6 +3804,7 @@ static int sound_input(UiMenu *m, Config *c, WORD down)
 static void settings_graphics(UiMenu *m, const Config *c)
 {
     s_graphicsPage = 1;
+    s_gfxPick = -1;   // the preset as the settings say (the Screen page may have changed them)
     UiMenuClear(m, Tr(T_GRAPHICS), Tr(T_FOOT_SELECT));
     UiMenuAdd(m, Tr(T_PRESET), "");
     UiMenuAdd(m, Tr(T_TEXFILTER), "");
@@ -2473,8 +3812,11 @@ static void settings_graphics(UiMenu *m, const Config *c)
     UiMenuAdd(m, Tr(T_FXAA), "");
     UiMenuAdd(m, Tr(T_SHARPEN), "");
     UiMenuAdd(m, Tr(T_BLUR), "");
+    UiMenuAdd(m, Tr(T_ANTIFLICKER), "");
+    UiMenuAdd(m, Tr(T_SCREEN_EFFECT), "");
     {
-        static const unsigned char icons[] = { UI_ICON_SLIDERS, UI_ICON_TEXTURE, UI_ICON_HD, UI_ICON_SMOOTH, UI_ICON_SHARP, UI_ICON_BLUR };
+        static const unsigned char icons[] = { UI_ICON_SLIDERS, UI_ICON_TEXTURE, UI_ICON_HD, UI_ICON_SMOOTH, UI_ICON_SHARP, UI_ICON_BLUR, UI_ICON_EYE,
+                                               UI_ICON_SCANLINES };
         UiMenuIcons(m, icons, sizeof(icons));
     }
     settings_values(m, c);
@@ -2488,16 +3830,14 @@ static void settings_screen(UiMenu *m, const Config *c)
     s_calPage = 0;   // rebuilding Screen (fresh, or back from Calibration): Calibration is definitely not showing
     UiMenuClear(m, Tr(T_SCREEN), Tr(T_FOOT_SELECT));
     UiMenuAdd(m, Tr(T_RESOLUTION), "");
+    UiMenuAdd(m, Tr(T_RES_169), "");
     UiMenuAdd(m, Tr(T_STRETCH), "");
     UiMenuAdd(m, Tr(T_PIC_CAL), "");
     UiMenuAdd(m, Tr(T_BRIGHTNESS), "");
-    UiMenuAdd(m, Tr(T_VSYNC), "");
-    UiMenuAdd(m, Tr(T_ANTIFLICKER), "");
-    UiMenuAdd(m, Tr(T_SCREEN_EFFECT), "");
     UiMenuAdd(m, Tr(T_COLOR_STYLE), "");
+    UiMenuAdd(m, Tr(T_VSYNC), "");
     {
-        static const unsigned char icons[] = { UI_ICON_SCREEN, UI_ICON_STRETCH, UI_ICON_CROSSHAIR, UI_ICON_SUN, UI_ICON_VSYNC, UI_ICON_EYE, UI_ICON_SCANLINES,
-                                               UI_ICON_PALETTE };
+        static const unsigned char icons[] = { UI_ICON_SCREEN, UI_ICON_SCREEN, UI_ICON_STRETCH, UI_ICON_CROSSHAIR, UI_ICON_SUN, UI_ICON_PALETTE, UI_ICON_VSYNC };
         UiMenuIcons(m, icons, sizeof(icons));
     }
     settings_values(m, c);
@@ -2509,10 +3849,9 @@ static void settings_cal(UiMenu *m, const Config *c)
     s_calPage = 1;
     UiMenuClear(m, Tr(T_PIC_CAL), Tr(T_FOOT_SELECT));
     UiMenuAdd(m, Tr(T_PIC_SIZE), "");
-    UiMenuAdd(m, Tr(T_PIC_LR), "");
-    UiMenuAdd(m, Tr(T_PIC_UD), "");
+    UiMenuAdd(m, Tr(T_CAL_EDGES), "");
     {
-        static const unsigned char icons[] = { UI_ICON_FRAME, UI_ICON_ARROWS_H, UI_ICON_ARROWS_V };
+        static const unsigned char icons[] = { UI_ICON_FRAME, UI_ICON_CROSSHAIR };
         UiMenuIcons(m, icons, sizeof(icons));
     }
     settings_values(m, c);
@@ -2538,20 +3877,16 @@ static int screen_input(UiMenu *m, Config *c, WORD down)
         if (!dir) dir = 1;
         switch (m->sel)
         {
-        case SCR_RES: c->resScale = (c->resScale - 1 + dir + 4) % 4 + 1; break;
+        case SCR_RES: res_step(c, 0, dir); break;
+        case SCR_RES169: res_step(c, 1, dir); break;
         case SCR_STRETCH: c->stretch = !c->stretch; break;
-        case SCR_BRIGHT:
-        {
-            int k, at = 2;
-            for (k = 0; k < 5; k++)
-                if (s_brightOrder[k] == c->brightness) at = k;
-            c->brightness = s_brightOrder[(at + dir + 5) % 5];
+        case SCR_BRIGHT:   // the bar, 5 at a time (50: as the console)
+            c->brightLevel = (c->brightLevel < 0 || c->brightLevel > 100 ? 50 : c->brightLevel) + dir * 5;
+            if (c->brightLevel < 0) c->brightLevel = 0;
+            if (c->brightLevel > 100) c->brightLevel = 100;
             break;
-        }
         case SCR_COLOR: c->colorStyle = ((c->colorStyle < 0 || c->colorStyle > 7 ? 0 : c->colorStyle) + dir + 8) % 8; break;
-        case SCR_VSYNC: c->vsync = !c->vsync; break;
-        case SCR_DEFLICKER: c->deflicker = !c->deflicker; break;
-        case SCR_SCREEN: c->screen = (c->screen + dir + 6) % 6; break;
+        case SCR_VSYNC: c->vsync = ((c->vsync < 0 || c->vsync > 2 ? 0 : c->vsync) + dir + 3) % 3; break;
         default: return SET_NONE;   // SCR_CAL with a left/right press: no value of its own to cycle
         }
         settings_values(m, c);
@@ -2570,19 +3905,170 @@ static int cal_input(UiMenu *m, Config *c, WORD down)
         m->sel = SCR_CAL;
         return SET_NONE;
     }
-    if (dir || (down & XINPUT_GAMEPAD_A))
+    if (m->sel == CAL_EDGES && (down & XINPUT_GAMEPAD_A))
     {
-        if (!dir) dir = 1;
-        switch (m->sel)
-        {
-        case CAL_SIZE: c->zoom += dir * 2; if (c->zoom < 80) c->zoom = 80; if (c->zoom > 140) c->zoom = 140; break;
-        case CAL_LR: c->offsetX += dir * 4; if (c->offsetX < -160) c->offsetX = -160; if (c->offsetX > 160) c->offsetX = 160; break;
-        case CAL_UD: c->offsetY += dir * 4; if (c->offsetY < -120) c->offsetY = -120; if (c->offsetY > 120) c->offsetY = 120; break;
-        }
+        if (!s_kodiSim) settings_edges(m, c);
+        return SET_NONE;
+    }
+    if (m->sel == CAL_SIZE && (dir || (down & XINPUT_GAMEPAD_A)))
+    {
+        // 80 % to 140 %, 5 at a time, round the ends (its list).
+        int z = (c->zoom < 80 ? 80 : c->zoom > 140 ? 140 : c->zoom) - 80;
+        z = (z / 5 + (dir ? dir : 1) + 13) % 13;
+        c->zoom = 80 + z * 5;
         settings_values(m, c);
         return SET_CHANGED;
     }
     return SET_NONE;
+}
+
+// ---- Edge calibration (Image calibration > Calibrate the edges) ----
+// The picture as the games are shown (in game: the game itself; from the ROM
+// list: a sample scene) with its four edges lit: the D-pad or the left stick
+// moves it, LT/RT (or the right stick) zoom it, until the edges sit just inside
+// the TV. A keeps it, B puts it back as it was.
+static const Config *s_edgeCfg;
+static int s_edgeSave[3];   // zoom, offsetX, offsetY when it opened
+static float s_edgeAccX, s_edgeAccY, s_edgeAccZ;
+
+static void settings_edges(UiMenu *m, const Config *c)
+{
+    UiMenuClear(m, Tr(T_CAL_EDGES), Tr(T_FOOT_EDGES));
+    m->page = UI_PAGE_EDGES;
+    m->count = 0;
+    s_edgeCfg = c;
+    s_edgeSave[0] = c->zoom; s_edgeSave[1] = c->offsetX; s_edgeSave[2] = c->offsetY;
+    s_edgeAccX = s_edgeAccY = s_edgeAccZ = 0;
+}
+
+static int edges_input(UiMenu *m, Config *c, WORD down)
+{
+    XINPUT_STATE st;
+    int ox = c->offsetX, oy = c->offsetY, z = c->zoom;
+    if (down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B))
+    {
+        if (down & XINPUT_GAMEPAD_B) { c->zoom = s_edgeSave[0]; c->offsetX = s_edgeSave[1]; c->offsetY = s_edgeSave[2]; }
+        else xb_audio_ui_sound(XB_SFX_SELECT);
+        settings_cal(m, c);
+        m->sel = CAL_EDGES;
+        return SET_CHANGED;
+    }
+    if (down & XINPUT_GAMEPAD_DPAD_LEFT) c->offsetX -= 2;
+    if (down & XINPUT_GAMEPAD_DPAD_RIGHT) c->offsetX += 2;
+    if (down & XINPUT_GAMEPAD_DPAD_UP) c->offsetY -= 2;
+    if (down & XINPUT_GAMEPAD_DPAD_DOWN) c->offsetY += 2;
+    if (XInputGetState(0, &st) == ERROR_SUCCESS)
+    {
+        // The sticks and triggers: smooth, a few pixels (or a percent) a frame at full tilt.
+        const float lx = st.Gamepad.sThumbLX / 32767.0f, ly = st.Gamepad.sThumbLY / 32767.0f, ry = st.Gamepad.sThumbRY / 32767.0f;
+        if (fabsf(lx) > 0.25f) s_edgeAccX += lx * 3.0f;
+        if (fabsf(ly) > 0.25f) s_edgeAccY -= ly * 3.0f;
+        if (fabsf(ry) > 0.25f) s_edgeAccZ += ry * 0.4f;
+        if (st.Gamepad.bRightTrigger > 40) s_edgeAccZ += st.Gamepad.bRightTrigger / 255.0f * 0.4f;
+        if (st.Gamepad.bLeftTrigger > 40) s_edgeAccZ -= st.Gamepad.bLeftTrigger / 255.0f * 0.4f;
+        while (s_edgeAccX >= 1) { c->offsetX++; s_edgeAccX -= 1; }
+        while (s_edgeAccX <= -1) { c->offsetX--; s_edgeAccX += 1; }
+        while (s_edgeAccY >= 1) { c->offsetY++; s_edgeAccY -= 1; }
+        while (s_edgeAccY <= -1) { c->offsetY--; s_edgeAccY += 1; }
+        while (s_edgeAccZ >= 1) { c->zoom++; s_edgeAccZ -= 1; }
+        while (s_edgeAccZ <= -1) { c->zoom--; s_edgeAccZ += 1; }
+    }
+    if (c->offsetX < -160) c->offsetX = -160;
+    if (c->offsetX > 160) c->offsetX = 160;
+    if (c->offsetY < -120) c->offsetY = -120;
+    if (c->offsetY > 120) c->offsetY = 120;
+    if (c->zoom < 80) c->zoom = 80;
+    if (c->zoom > 140) c->zoom = 140;
+    (void)m;
+    return ox != c->offsetX || oy != c->offsetY || z != c->zoom ? SET_CHANGED : SET_NONE;
+}
+
+static void wiz_video_preview(const Config *c, float x, float y, float w, float h, float a);
+
+static void edges_draw(const UiMenu *m)
+{
+    const Config *c = s_edgeCfg;
+    float w, h, x, y, t = UiTime(), on = 0.65f + 0.35f * sinf(t * 4.0f), k;
+    char buf[64];
+    int i;
+    if (!c) return;
+    // Where the renderer puts the picture (display_quad): 4:3, or the whole width when 16:9.
+    w = c->resWide || c->stretch ? (float)UI_WIDTH : UI_HEIGHT * 4.0f / 3.0f;
+    h = (float)UI_HEIGHT;
+    w *= c->zoom / 100.0f;
+    h *= c->zoom / 100.0f;
+    x = (UI_WIDTH - w) * 0.5f + c->offsetX;
+    y = (UI_HEIGHT - h) * 0.5f + c->offsetY;
+    if (s_browser)
+    {
+        // No game behind: a sample scene where the game would be.
+        UiRect(0, 0, UI_WIDTH, UI_HEIGHT, D3DCOLOR_ARGB(255, 0, 0, 0));
+        wiz_video_preview(c, x, y, w, h, 1.0f);
+    }
+    // The four edges, lit and breathing, each with an arrow out of its middle.
+    for (i = 1; i <= 6; i++)
+    {
+        float f = 1.0f - i / 7.0f;
+        UiRoundRing(x - i * 2, y - i * 2, w + i * 4, h + i * 4, 4 + i * 2, 2.0f, SEL_HI(70 * on * f));
+    }
+    UiRect(x, y, w, 4, SEL_HI(255 * on)); UiRect(x, y + h - 4, w, 4, SEL_HI(255 * on));
+    UiRect(x, y, 4, h, SEL_HI(255 * on)); UiRect(x + w - 4, y, 4, h, SEL_HI(255 * on));
+    k = 30;   // white corner brackets
+    UiRect(x, y, k, 6, UI_COL_TEXT); UiRect(x, y, 6, k, UI_COL_TEXT);
+    UiRect(x + w - k, y, k, 6, UI_COL_TEXT); UiRect(x + w - 6, y, 6, k, UI_COL_TEXT);
+    UiRect(x, y + h - 6, k, 6, UI_COL_TEXT); UiRect(x, y + h - k, 6, k, UI_COL_TEXT);
+    UiRect(x + w - k, y + h - 6, k, 6, UI_COL_TEXT); UiRect(x + w - 6, y + h - k, 6, k, UI_COL_TEXT);
+    icon_tri(x + w * 0.5f, y + 22, 12, 0, UI_COL_TEXT);
+    icon_tri(x + w * 0.5f, y + h - 22, 12, 2, UI_COL_TEXT);
+    icon_tri(x + 22, y + h * 0.5f, 12, 3, UI_COL_TEXT);
+    icon_tri(x + w - 22, y + h * 0.5f, 12, 1, UI_COL_TEXT);
+    {
+        // In the middle: what to do, the values, the buttons.
+        const float pw = 640, ph = 150, px = (UI_WIDTH - pw) * 0.5f, py = (UI_HEIGHT - ph) * 0.5f;
+        float fw = UiFooterWidth(m->footer);
+        UiShadow(px, py + 8, pw, ph, 18, 28, UI_COL_SHADOW);
+        UiRoundRect(px, py, pw, ph, 18, D3DCOLOR_ARGB(225, 24, 26, 34), D3DCOLOR_ARGB(225, 18, 20, 27));
+        UiRoundRing(px, py, pw, ph, 18, 1.0f, SEL_HI(160));
+        paragraph(UI_BOLD, 19, px + 28, py + 26, pw - 56, 2, UI_COL_TEXT, Tr(T_EDGES_HINT));
+        _snprintf(buf, sizeof(buf) - 1, "Zoom %d%%   X %+d   Y %+d", c->zoom, c->offsetX, c->offsetY);
+        buf[sizeof(buf) - 1] = 0;
+        UiText(UI_REGULAR, 18, px + pw * 0.5f, py + 84, UI_COL_TEXT2, buf, UI_CENTER);
+        UiFooter(px + (pw - fw) * 0.5f, py + ph - 28, m->footer);
+    }
+}
+
+// ---- Developer mode page (System > Developer mode) ----
+static void settings_dev(UiMenu *m, const Config *c)
+{
+    s_systemPage = 0;
+    s_devPage = 1;
+    UiMenuClear(m, Tr(T_DEV_MODE), Tr(T_FOOT_SELECT));
+    UiMenuAdd(m, Tr(T_GFX_LOG), "");
+    {
+        static const unsigned char icons[] = { UI_ICON_CHART };
+        UiMenuIcons(m, icons, sizeof(icons));
+    }
+    settings_values(m, c);
+}
+
+static int dev_input(UiMenu *m, Config *c, WORD down)
+{
+    int dir = (down & XINPUT_GAMEPAD_DPAD_RIGHT) ? 1 : (down & XINPUT_GAMEPAD_DPAD_LEFT) ? -1 : 0;
+    UiMenuNavigate(m, down);
+    if (down & XINPUT_GAMEPAD_B)
+    {
+        s_devPage = 0;
+        settings_system(m, c);
+        m->sel = SYS_DEV;
+        return SET_NONE;
+    }
+    if (!dir && !(down & XINPUT_GAMEPAD_A)) return SET_NONE;
+    if (m->sel == DEV_GFXLOG)
+    {
+        c->gfxLog = !c->gfxLog;
+        settings_values(m, c);
+    }
+    return SET_CHANGED;
 }
 
 // ---- Controls page ----
@@ -2831,6 +4317,8 @@ static int controls_capture(void)
 
 static void calib_open(UiMenu *m, Config *c);   // the stick calibration page, below
 
+static void settings_hotkeys(UiMenu *m, const Config *c);
+
 static int controls_input(UiMenu *m, Config *c, WORD down)
 {
     H64PadMap *map;
@@ -2890,18 +4378,9 @@ static int controls_input(UiMenu *m, Config *c, WORD down)
     }
     if (item == C_SHOTCOMBO && (down & XINPUT_GAMEPAD_A))
     {
-        s_ctl.capturing = 1;
-        s_ctl.capItem = item;
-        s_ctl.capAdd = 0;   // one source, not a mask: always replaces
-        s_ctl.capStage = 0;   // the first of the two buttons
-        s_ctl.capReleased = 0;
-        s_ctl.capStart = GetTickCount();
+        // The screenshot combo became one of the button shortcuts: their own page.
+        settings_hotkeys(m, c);
         return SET_NONE;
-    }
-    if (item == C_SHOTCOMBO && (down & XINPUT_GAMEPAD_X))
-    {
-        c->shotBtn1 = c->shotBtn2 = -1;
-        return SET_CHANGED;
     }
     if (item == C_RESET && (down & XINPUT_GAMEPAD_A))
     {
@@ -2916,7 +4395,7 @@ static int controls_input(UiMenu *m, Config *c, WORD down)
     }
     if (item == C_RUMBLE && dir)
     {
-        c->rumble = !c->rumble;   // one setting for every player
+        c->rumble = c->rumble > 0 ? 0 : 100;   // a switch, for every player (the setting keeps a strength: off 0, on 100)
         return SET_CHANGED;
     }
     if (item == C_STICK && dir)
@@ -2965,48 +4444,36 @@ static void ctl_hints(u32 mask, char *out, size_t size)
 
 static void ctl_value_text(int item, const H64PadMap *map, char *out)
 {
-    if (item == C_RUMBLE) { sprintf(out, "< %s >", onoff(s_ctl.c ? s_ctl.c->rumble : 1)); return; }
+    if (item == C_RUMBLE) { sprintf(out, "%s", toggle(s_ctl.c ? s_ctl.c->rumble > 0 : 1)); return; }   // a switch
     const char *sticks[H64_STICK_COUNT] = { Tr(T_STICK_LEFT), Tr(T_STICK_RIGHT), Tr(T_STICK_DPAD), Tr(T_OFF) };
     if (item == C_STICK) sprintf(out, "< %s >", sticks[map->stick >= 0 && map->stick < H64_STICK_COUNT ? map->stick : 0]);
-    else if (item == C_SHOTCOMBO)
-    {
-        // Both full "glyph:direction" hints together don't fit this column even with
-        // just the glyph (checked). As with RUMBLE, the row just says whether the
-        // combo is configured; which buttons got picked shows in the note right after
-        // capturing them (ctl_note, below), the same way "Z set" does for N64 buttons.
-        int b1 = s_ctl.c ? s_ctl.c->shotBtn1 : -1, b2 = s_ctl.c ? s_ctl.c->shotBtn2 : -1;
-        if (b1 >= 0 && b2 >= 0) sprintf(out, "< %s >", Tr(T_ON));
-        else if (b1 >= 0 || b2 >= 0)
-        {
-            char h[64], *p;
-            ctl_hints((u32)1 << (b1 >= 0 ? b1 : b2), h, sizeof(h));
-            if ((p = strchr(h, ':')) != NULL) *p = 0;
-            sprintf(out, "< %s >", h);
-        }
-        else sprintf(out, "< %s >", Tr(T_OFF));
-    }
+    else if (item == C_SHOTCOMBO) out[0] = 0;   // opens the shortcuts page
     else out[0] = 0;
 }
 
 // ---- The N64 controller drawn on the Controls page ----
-// A plain drawing of the controller in units (100 x 56, scaled by `s`): the
-// control being edited is outlined, and blinks while it waits for an input.
-static D3DCOLOR pad_rgb(int r, int g, int b) { return D3DCOLOR_ARGB(255, r, g, b); }
+// The picture of the controller (xb_pad.h, from n64.jpg: its background
+// transparent, no maker's logo), as big as a box allows; the control being
+// edited glows white, and blinks while it waits for an input.
+static IDirect3DTexture9 *s_padTex;
+static int s_padTried;
 
-// Where `item` is on the drawing (a box in units, its corner radius); 0: not on it.
+// Where `item` is, in the source picture's pixels (1500x1500, UI_PAD_SRC_*):
+// a box and its corner radius; 0: not on it. Z is on the back: marked on the
+// middle handle, where the finger finds it.
 static int pad_shape(int item, float *x, float *y, float *w, float *h, float *r)
 {
     static const float circles[][4] = {   // item, centre x, y, radius
-        { H64_N64_A, 78.5f, 30.0f, 3.6f }, { H64_N64_B, 73.0f, 23.0f, 3.0f }, { H64_N64_START, 50.0f, 13.5f, 2.6f },
-        { H64_N64_CUP, 86.0f, 12.5f, 2.1f }, { H64_N64_CDOWN, 86.0f, 21.5f, 2.1f },
-        { H64_N64_CLEFT, 81.5f, 17.0f, 2.1f }, { H64_N64_CRIGHT, 90.5f, 17.0f, 2.1f },
-        { C_STICK, 50.0f, 30.0f, 6.0f }, { C_CALIB, 50.0f, 30.0f, 6.0f },
+        { H64_N64_A, 1048, 630, 47 }, { H64_N64_B, 968, 545, 47 }, { H64_N64_START, 748, 557, 44 },
+        { H64_N64_CUP, 1135, 412, 35 }, { H64_N64_CDOWN, 1135, 548, 35 },
+        { H64_N64_CLEFT, 1067, 480, 35 }, { H64_N64_CRIGHT, 1203, 480, 35 },
+        { C_STICK, 750, 777, 118 }, { C_CALIB, 750, 777, 118 },
     };
     static const float boxes[][6] = {     // item, x, y, w, h, radius
-        { H64_N64_DUP, 13.8f, 10.7f, 4.4f, 4.3f, 1.0f }, { H64_N64_DDOWN, 13.8f, 19.4f, 4.4f, 4.3f, 1.0f },
-        { H64_N64_DLEFT, 9.5f, 15.0f, 4.3f, 4.4f, 1.0f }, { H64_N64_DRIGHT, 18.2f, 15.0f, 4.3f, 4.4f, 1.0f },
-        { H64_N64_L, 8.0f, 1.0f, 22.0f, 5.5f, 2.5f }, { H64_N64_R, 70.0f, 1.0f, 22.0f, 5.5f, 2.5f },   // the part above the body
-        { H64_N64_Z, 45.5f, 45.0f, 9.0f, 7.0f, 2.0f },
+        { H64_N64_DUP, 358, 428, 70, 62, 10 }, { H64_N64_DDOWN, 358, 548, 70, 62, 10 },
+        { H64_N64_DLEFT, 298, 485, 62, 66, 10 }, { H64_N64_DRIGHT, 428, 485, 62, 66, 10 },
+        { H64_N64_L, 282, 262, 228, 60, 22 }, { H64_N64_R, 990, 262, 228, 60, 22 },
+        { H64_N64_Z, 708, 975, 84, 66, 20 },
     };
     int i;
     for (i = 0; i < (int)(sizeof(circles) / sizeof(circles[0])); i++)
@@ -3025,50 +4492,51 @@ static int pad_shape(int item, float *x, float *y, float *w, float *h, float *r)
     return 0;
 }
 
-static void draw_n64_pad(float ox, float oy, float s, int hiItem, int blink)
+static void draw_n64_pad(float bx, float by, float bw, float bh, int hiItem, int blink)
 {
-    const D3DCOLOR dark = pad_rgb(54, 56, 64), shoulder = pad_rgb(78, 80, 90);
-    float x, y, w, h, r;
-    int i;
-#define PU(v) ((v) * s)
-    // Shoulder buttons behind the body, then the body: three handles and the top bar.
-    UiRoundRect(ox + PU(8), oy + PU(1), PU(22), PU(8), PU(2.5f), shoulder, shoulder);
-    UiRoundRect(ox + PU(70), oy + PU(1), PU(22), PU(8), PU(2.5f), shoulder, shoulder);
-    UiShadow(ox + PU(4), oy + PU(6), PU(92), PU(50), PU(9), 18, UI_COL_SHADOW);
-    UiRoundRect(ox + PU(6), oy + PU(12), PU(20), PU(40), PU(10), pad_rgb(152, 154, 164), pad_rgb(112, 114, 124));
-    UiRoundRect(ox + PU(74), oy + PU(12), PU(20), PU(40), PU(10), pad_rgb(152, 154, 164), pad_rgb(112, 114, 124));
-    UiRoundRect(ox + PU(41), oy + PU(12), PU(18), PU(44), PU(9), pad_rgb(152, 154, 164), pad_rgb(108, 110, 120));
-    UiRoundRect(ox + PU(4), oy + PU(6), PU(92), PU(20), PU(9), pad_rgb(178, 180, 190), pad_rgb(146, 148, 158));
-    // D-pad, Start, the stick, Z (under the middle handle on the real one).
-    UiRoundRect(ox + PU(9.5f), oy + PU(15), PU(13), PU(4.4f), PU(1), dark, dark);
-    UiRoundRect(ox + PU(13.8f), oy + PU(10.7f), PU(4.4f), PU(13), PU(1), dark, dark);
-    UiCircle(ox + PU(50), oy + PU(13.5f), PU(2.6f), pad_rgb(206, 44, 44));
-    UiCircle(ox + PU(50), oy + PU(30), PU(6), pad_rgb(66, 68, 78));
-    UiCircle(ox + PU(50), oy + PU(30), PU(4), pad_rgb(196, 198, 206));
-    UiRoundRect(ox + PU(45.5f), oy + PU(45), PU(9), PU(7), PU(2), dark, dark);
-    UiText(UI_BOLD, PU(4.5f), ox + PU(50), oy + PU(48.5f), UI_COL_TEXT2, "Z", UI_CENTER);
-    // A, B and the four C buttons.
-    UiCircle(ox + PU(78.5f), oy + PU(30), PU(3.6f), pad_rgb(52, 92, 214));
-    UiText(UI_BOLD, PU(4.2f), ox + PU(78.5f), oy + PU(30), UI_COL_TEXT, "A", UI_CENTER);
-    UiCircle(ox + PU(73), oy + PU(23), PU(3), pad_rgb(40, 164, 72));
-    UiText(UI_BOLD, PU(3.6f), ox + PU(73), oy + PU(23), UI_COL_TEXT, "B", UI_CENTER);
-    for (i = H64_N64_CUP; i <= H64_N64_CRIGHT; i++)
-        if (pad_shape(i, &x, &y, &w, &h, &r))
-            UiCircle(ox + PU(x + r), oy + PU(y + r), PU(r), pad_rgb(232, 192, 40));
-    // The control being edited: outlined; blinking while an input is awaited.
+    float pw = bw, ph = pw * UI_PAD_H / UI_PAD_W, k, ox, oy, x, y, w, h, r;
+    if (ph > bh) { ph = bh; pw = ph * UI_PAD_W / UI_PAD_H; }
+    ox = bx + (bw - pw) * 0.5f;
+    oy = by + (bh - ph) * 0.5f;
+    k = pw / UI_PAD_SRC_W;   // screen pixels per source pixel
+    if (!s_padTried && UiDevice())
+    {
+        int iw = 0, ih = 0;
+        u8 *px = h64_png_decode(s_padPng, sizeof(s_padPng), &iw, &ih, UI_PAD_W * UI_PAD_H);
+        s_padTried = 1;
+        if (px) { s_padTex = UiImageCreate(UiDevice(), px, iw, ih); free(px); }
+    }
+#define PX(v) (ox + ((v) - UI_PAD_SRC_X) * k)
+#define PY(v) (oy + ((v) - UI_PAD_SRC_Y) * k)
+    UiShadow(ox + pw * 0.06f, oy + ph * 0.08f, pw * 0.88f, ph * 0.86f, pw * 0.12f, 22, UI_COL_SHADOW);
+    if (s_padTex) UiImage(s_padTex, ox, oy, pw, ph, 0.0f, D3DCOLOR_ARGB(255, 255, 255, 255));
+    // The shoulders and Z by name (not printed on the controller).
+    {
+        const float fs = 34 * k < 11 ? 11 : 34 * k;
+        const D3DCOLOR ink = D3DCOLOR_ARGB(200, 70, 72, 82);
+        UiText(UI_BOLD, fs, PX(396), PY(292), ink, "L", UI_CENTER);
+        UiText(UI_BOLD, fs, PX(1104), PY(292), ink, "R", UI_CENTER);
+        UiRoundRect(PX(722), PY(985), 56 * k, 46 * k, 14 * k, D3DCOLOR_ARGB(150, 90, 92, 104), D3DCOLOR_ARGB(150, 70, 72, 82));
+        UiText(UI_BOLD, fs, PX(750), PY(1008), D3DCOLOR_ARGB(235, 235, 237, 243), "Z", UI_CENTER);
+    }
+    // The control looked at: white with a glow round it, breathing; faster and filled
+    // while it waits for an input.
     if (pad_shape(hiItem, &x, &y, &w, &h, &r))
     {
-        float on = blink ? 0.5f + 0.5f * sinf(UiTime() * 12.566f) : 1.0f, pad = 3.0f;
-        int a = (int)(255 * on);
-        x = ox + PU(x); y = oy + PU(y); w = PU(w); h = PU(h); r = PU(r);
-        if (blink)
+        float t = UiTime(), on = blink ? 0.5f + 0.5f * sinf(t * 12.566f) : 0.7f + 0.3f * sinf(t * 4.0f), pad = 2.5f;
+        int i;
+        x = PX(x); y = PY(y); w *= k; h *= k; r *= k;
+        for (i = 1; i <= 9; i++)
         {
-            UiShadow(x - 2, y - 2, w + 4, h + 4, r + 2, 16, D3DCOLOR_ARGB((int)(200 * on), 255, 112, 84));
-            UiRoundRect(x, y, w, h, r, D3DCOLOR_ARGB((int)(190 * on), 255, 112, 84), D3DCOLOR_ARGB((int)(190 * on), 234, 76, 58));
+            float f = 1.0f - i / 10.0f;
+            UiRoundRing(x - pad - i, y - pad - i, w + (pad + i) * 2, h + (pad + i) * 2, r + pad + i, 1.6f,
+                        D3DCOLOR_ARGB((int)(90 * on * f * f), 255, 255, 255));
         }
-        UiRoundRing(x - pad, y - pad, w + pad * 2, h + pad * 2, r + pad, 2.5f, D3DCOLOR_ARGB(a, 255, 112, 84));
+        if (blink) UiRoundRect(x, y, w, h, r, D3DCOLOR_ARGB((int)(120 * on), 255, 255, 255), D3DCOLOR_ARGB((int)(80 * on), 255, 255, 255));
+        UiRoundRing(x - pad, y - pad, w + pad * 2, h + pad * 2, r + pad, 2.2f, D3DCOLOR_ARGB((int)(140 + 115 * on), 255, 255, 255));
     }
-#undef PU
+#undef PX
+#undef PY
 }
 
 // Text at `size`, made smaller when it would be wider than `maxW`.
@@ -3083,7 +4551,7 @@ static void ctl_fit_text(int font, float size, float x, float cy, float maxW, D3
 // for, large, next to the controller drawing with that button blinking.
 static void ctl_auto_draw(void)
 {
-    const float w = 760, h = 340, x = (UI_WIDTH - w) * 0.5f, y = (UI_HEIGHT - h) * 0.5f;
+    const float w = 820, h = 420, x = (UI_WIDTH - w) * 0.5f, y = (UI_HEIGHT - h) * 0.5f;
     char buf[200];
     UiDim();
     edge_glow(x, y, w, h, 22);
@@ -3101,7 +4569,7 @@ static void ctl_auto_draw(void)
         return;
     }
     {
-        const float s = 2.8f, padX = x + w - 40 - 100 * s, padY = y + 96 + (h - 78 - 96 - 56 * s) * 0.5f;
+        const float padW = 300, padX = x + w - 40 - padW, padY = y + 92, padH = h - 78 - 92 - 10;
         const float textW = padX - 24 - (x + 40);
         const char *name = TrN64(s_ctl.capItem);
         _snprintf(buf, sizeof(buf) - 1, Tr(T_AUTO_STEP), s_ctl.autoIdx + 1, AUTO_COUNT);
@@ -3111,7 +4579,7 @@ static void ctl_auto_draw(void)
         buf[sizeof(buf) - 1] = 0;
         ctl_fit_text(UI_REGULAR, 20, x + 40, y + 140, textW, UI_COL_TEXT2, buf);
         ctl_fit_text(UI_BOLD, 56, x + 40, y + 200, textW, UI_COL_ACCENT_HI, name);
-        draw_n64_pad(padX, padY, s, s_ctl.capItem, 1);
+        draw_n64_pad(padX, padY, padW, padH, s_ctl.capItem, 1);
         // The input just set for the previous button, then BACK to cancel (the mapping goes back as it was).
         if (s_ctl.msg[0] && GetTickCount() - s_ctl.msgAt < 3000)
             UiText(UI_BOLD, 18, x + 40, y + h - 39, UI_COL_ACCENT_HI, s_ctl.msg, UI_LEFT);
@@ -3200,7 +4668,7 @@ static void controls_draw(const UiMenu *m)
         }
         else
         {
-            static const int labels[] = { T_ANALOG_STICK, T_CALIBRATION, T_SCREENSHOT_COMBO, T_RUMBLE, T_RESET_DEFAULT, T_AUTO_CONFIG };
+            static const int labels[] = { T_ANALOG_STICK, T_CALIBRATION, T_HOTKEYS, T_RUMBLE, T_RESET_DEFAULT, T_AUTO_CONFIG };
             UiText(s ? UI_BOLD : UI_REGULAR, 20, cx + 24, cy, s ? UI_COL_TEXT : UI_COL_TEXT2, Tr(labels[item - C_STICK]), UI_LEFT);
             if (s_ctl.capturing && item == s_ctl.capItem)
                 UiText(UI_BOLD, 18, cx + CTL_COLW - 18, cy, UI_COL_ACCENT_HI, Tr(T_PRESS_INPUT), UI_RIGHT);
@@ -3216,9 +4684,8 @@ static void controls_draw(const UiMenu *m)
     // bottom is anchored to row 9 (not to CTL_H): C_SHOTCOMBO sits right there, and
     // growing the panel must not push the drawing down over that row.
     {
-        float s = CTL_COLW / 100.0f, top = ctl_row_y(2) + 8, bottom = ctl_row_y(9) - 8;
-        draw_n64_pad(ctl_col_x(2), top + (bottom - top - 56 * s) * 0.5f, s,
-                     s_ctl.capturing ? s_ctl.capItem : selItem, s_ctl.capturing);
+        float top = ctl_row_y(2) + 8, bottom = ctl_row_y(9) - 8;
+        draw_n64_pad(ctl_col_x(2), top, CTL_COLW, bottom - top, s_ctl.capturing ? s_ctl.capItem : selItem, s_ctl.capturing);
     }
 
     UiRect(x + 24, y + CTL_H - 78, CTL_W - 48, 1, UI_COL_LINE);
@@ -3909,6 +5376,234 @@ void SettingsBuild(UiMenu *m, const Config *c, int perGame)
     settings_main(m, c);
 }
 
+// ---- Button shortcuts page (Controls > Button shortcuts, A) ----
+// The in-game shortcuts that can be changed (Config::hotkey, HK_*), then the fixed
+// ones for reference; under them what the selected one does. A on a changeable one
+// waits for a combination: up to 3 buttons held, then let go.
+enum { HKR_PAUSE = HK_COUNT, HKR_LIST, HKR_UISHOT, HKR_TEX, HKR_COUNT };
+static const int s_hkLabels[HKR_COUNT] = { T_HK_SAVE, T_HK_LOAD, T_HK_SLOT_PREV, T_HK_SLOT_NEXT, T_HK_SHOT,
+                                           T_HK_PAUSE, T_HK_LIST, T_HK_UISHOT, T_HK_TEX };
+static const int s_hkDesc[HKR_COUNT] = { T_HK_D_SAVE, T_HK_D_LOAD, T_HK_D_SLOT, T_HK_D_SLOT, T_HK_D_SHOT,
+                                         T_HK_D_PAUSE, T_HK_D_LIST, T_HK_D_UISHOT, T_HK_D_TEX };
+static const Config *s_hkCfg;
+static int s_hkCap = -1;          // the shortcut waiting for its combination (-1: none)
+static int s_hkCapReleased;       // every button let go since A started it
+static u32 s_hkAcc;               // the buttons held so far
+static DWORD s_hkStart;
+static char s_hkNote[160];        // a word after a change (taken from another shortcut, too many buttons)
+
+// The buttons of a combination by name, "BACK + RB" (the pad sources' names: the Controls page's).
+static void hk_text(u32 m, char *out, size_t size)
+{
+    static const u32 bits[] = { 0x0020, 0x0010, 0x0100, 0x0200, HK_LT, HK_RT, 0x1000, 0x2000, 0x4000, 0x8000,
+                                0x0001, 0x0002, 0x0004, 0x0008, 0x0040, 0x0080 };
+    static const int src[] = { -1, H64_SRC_START, H64_SRC_LB, H64_SRC_RB, H64_SRC_LT, H64_SRC_RT, H64_SRC_A, H64_SRC_B, H64_SRC_X,
+                               H64_SRC_Y, H64_SRC_DUP, H64_SRC_DDOWN, H64_SRC_DLEFT, H64_SRC_DRIGHT, H64_SRC_LTHUMB, H64_SRC_RTHUMB };
+    int k;
+    out[0] = 0;
+    if (!m) { _snprintf(out, size - 1, "%s", Tr(T_OFF)); out[size - 1] = 0; return; }
+    for (k = 0; k < (int)(sizeof(bits) / sizeof(bits[0])); k++)
+    {
+        if (!(m & bits[k])) continue;
+        if (out[0]) strncat(out, " + ", size - strlen(out) - 1);
+        strncat(out, src[k] < 0 ? "BACK" : TrSource(src[k]), size - strlen(out) - 1);
+    }
+}
+
+static int hk_count_bits(u32 m)
+{
+    int n = 0;
+    for (; m; m &= m - 1) n++;
+    return n;
+}
+
+static void settings_hotkeys(UiMenu *m, const Config *c)
+{
+    UiMenuClear(m, Tr(T_HOTKEYS), Tr(T_FOOT_HOTKEYS));
+    m->page = UI_PAGE_HOTKEYS;
+    m->count = HKR_COUNT;
+    m->sel = 0;
+    s_hkCfg = c;
+    s_hkCap = -1;
+    s_hkNote[0] = 0;
+}
+
+static int hk_input(UiMenu *m, Config *c, WORD down)
+{
+    s_hkCfg = c;
+    if (s_hkCap >= 0)
+    {
+        // Waiting for the combination: first everything let go (the A that started
+        // it), then the buttons held are gathered until all are let go again.
+        XINPUT_STATE st;
+        u32 b = 0;
+        if (XInputGetState(0, &st) == ERROR_SUCCESS)
+        {
+            b = st.Gamepad.wButtons;
+            if (st.Gamepad.bLeftTrigger > 128) b |= HK_LT;
+            if (st.Gamepad.bRightTrigger > 128) b |= HK_RT;
+        }
+        if (!s_hkCapReleased)
+        {
+            if (!b) s_hkCapReleased = 1;
+            return SET_NONE;
+        }
+        if (b) { s_hkAcc |= b; return SET_NONE; }
+        if (!s_hkAcc)
+        {
+            if (GetTickCount() - s_hkStart > 8000) { s_hkCap = -1; strcpy(s_hkNote, Tr(T_NO_INPUT)); }
+            return SET_NONE;
+        }
+        if (hk_count_bits(s_hkAcc) > 3)
+        {
+            strcpy(s_hkNote, Tr(T_HK_MANY));
+            s_hkCap = -1;
+            return SET_NONE;
+        }
+        {
+            int k;
+            s_hkNote[0] = 0;
+            for (k = 0; k < HK_COUNT; k++)
+                if (k != s_hkCap && c->hotkey[k] == s_hkAcc)
+                {
+                    c->hotkey[k] = 0;   // one combination, one shortcut
+                    strcpy(s_hkNote, Tr(T_HK_TAKEN));
+                }
+        }
+        c->hotkey[s_hkCap] = s_hkAcc;
+        s_hkCap = -1;
+        return SET_CHANGED;
+    }
+    UiMenuNavigate(m, down);
+    if (down & (XINPUT_GAMEPAD_DPAD_UP | XINPUT_GAMEPAD_DPAD_DOWN)) s_hkNote[0] = 0;   // the next row's own text
+    if (down & XINPUT_GAMEPAD_B)
+    {
+        int i;
+        controls_open(m, c);
+        for (i = 0; i < C_COUNT; i++)
+            if (s_ctlOrder[i] == C_SHOTCOMBO) m->sel = i;
+        return SET_NONE;
+    }
+    if (m->sel < HK_COUNT && (down & XINPUT_GAMEPAD_A))
+    {
+        s_hkCap = m->sel;
+        s_hkAcc = 0;
+        s_hkCapReleased = 0;
+        s_hkStart = GetTickCount();
+        s_hkNote[0] = 0;
+        return SET_NONE;
+    }
+    if (m->sel == HKR_TEX && (down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT)))
+    {
+        c->texR3 = !c->texR3;   // R3 x2 in game: the HD textures on and off
+        s_hkNote[0] = 0;
+        return SET_CHANGED;
+    }
+    if (m->sel < HK_COUNT && (down & XINPUT_GAMEPAD_X))
+    {
+        c->hotkey[m->sel] = 0;
+        s_hkNote[0] = 0;
+        return SET_CHANGED;
+    }
+    if (down & XINPUT_GAMEPAD_Y)
+    {
+        ConfigHotkeyDefaults(c);
+        c->texR3 = 1;
+        strcpy(s_hkNote, Tr(T_HK_DEFAULTS));
+        return SET_CHANGED;
+    }
+    return SET_NONE;
+}
+
+static void hkpage_draw(const UiMenu *m)
+{
+    const float w = 820, h = 680, x = 24, y = 20, foot = 78;
+    const Config *c = s_hkCfg;
+    float ry = y + 92;
+    char buf[160];
+    int i;
+    if (!c) return;
+    edge_glow(x, y, w, h, 22);
+    UiPanel(x, y, w, h, 22);
+    UiText(UI_BOLD, 30, x + 40, y + 48, UI_COL_TEXT, m->title, UI_LEFT);
+    for (i = 0; i < HKR_COUNT; i++)
+    {
+        int sel = m->sel == i;
+        if (i == HKR_PAUSE)
+        {
+            // The fixed ones under a line.
+            UiRect(x + 44, ry + 4, w - 88, 1, UI_COL_LINE);
+            ry += 12;
+        }
+        if (i < HK_COUNT)
+        {
+            if (s_hkCap == i) _snprintf(buf, sizeof(buf) - 1, "%s", ((int)(UiTime() * 2.5f) & 1) ? "..." : "");
+            else hk_text(c->hotkey[i], buf, sizeof(buf));
+        }
+        else
+        {
+            static const int fixed[] = { T_HK_V_PAUSE, T_HK_V_LIST, T_HK_V_UISHOT, T_HK_V_TEX };
+            _snprintf(buf, sizeof(buf) - 1, "%s", i == HKR_TEX && !c->texR3 ? Tr(T_OFF) : Tr(fixed[i - HKR_PAUSE]));
+        }
+        buf[sizeof(buf) - 1] = 0;
+        if (sel) selection_bar(x + 28, ry, w - 56, 44);
+        UiText(UI_BOLD, 20, x + 44, ry + 22, sel ? UI_COL_TEXT : i < HK_COUNT || i == HKR_TEX ? UI_COL_TEXT2 : UI_COL_TEXT3, Tr(s_hkLabels[i]), UI_LEFT);
+        UiText(UI_BOLD, 20, x + w - 44, ry + 22, i < HK_COUNT || i == HKR_TEX ? UI_COL_TEXT : UI_COL_TEXT3, buf, UI_RIGHT);
+        ry += 48;
+    }
+    // What the selected one does (or what to do now, waiting for a combination).
+    ry += 8;
+    UiRoundRect(x + 28, ry, w - 56, 96, 10, D3DCOLOR_ARGB(120, 20, 22, 30), D3DCOLOR_ARGB(120, 14, 15, 21));
+    paragraph(UI_REGULAR, 19, x + 48, ry + 12, w - 96, 3, s_hkCap >= 0 ? UI_COL_TEXT : UI_COL_TEXT2,
+              s_hkCap >= 0 ? Tr(T_HK_PRESS) : s_hkNote[0] ? s_hkNote : Tr(s_hkDesc[m->sel >= 0 && m->sel < HKR_COUNT ? m->sel : 0]));
+    UiRect(x + 24, y + h - foot, w - 48, 1, UI_COL_LINE);
+    UiFooter(x + 40, y + h - foot * 0.5f, m->footer);
+}
+
+// From the ROM list, the pack is chosen for the selected game (its packs are the ones
+// offered) but went only into the menu's settings: a game with its own settings
+// (config\<game>.ini, "Save for this game") kept the pack saved there, so the choice
+// showed only after turning the packs off and on in game. The choice goes into that
+// game's file too, when it has one.
+static void profile_set_hires(const Config *c)
+{
+    char folder[64], path[256], line[512], buf[96];
+    const char *slash;
+    std::string out;
+    int sawOn = 0, sawFile = 0;
+    FILE *f;
+    if (!s_browser || s_browserSel.empty() || !s_langPath[0]) return;
+    if (!RomFolderName(s_browserSel.c_str(), folder, sizeof(folder))) return;
+    slash = strrchr(s_langPath, '\\');
+    if (!slash) return;
+    _snprintf(path, sizeof(path) - 1, "%.*s\\%s.ini", (int)(slash - s_langPath), s_langPath, folder);
+    path[sizeof(path) - 1] = 0;
+    f = fopen(path, "r");
+    if (!f) return;   // no settings of its own: the menu's are the ones used
+    while (fgets(line, sizeof(line), f))
+    {
+        if (!strncmp(line, "hirestex=", 9))
+        {
+            sprintf(buf, "hirestex=%d\n", c->hiTex);
+            out += buf;
+            sawOn = 1;
+        }
+        else if (!strncmp(line, "hirestexfile=", 13))
+        {
+            if (c->hiTexFile[0]) { out += "hirestexfile="; out += c->hiTexFile; out += "\n"; }
+            sawFile = 1;
+        }
+        else out += line;
+    }
+    fclose(f);
+    if (!sawOn) { sprintf(buf, "hirestex=%d\n", c->hiTex); out += buf; }
+    if (!sawFile && c->hiTexFile[0]) { out += "hirestexfile="; out += c->hiTexFile; out += "\n"; }
+    f = fopen(path, "w");
+    if (!f) return;
+    fwrite(out.data(), 1, out.size(), f);
+    fclose(f);
+}
+
 static int graphics_input(UiMenu *m, Config *c, WORD down)
 {
     int dir = (down & XINPUT_GAMEPAD_DPAD_RIGHT) ? 1 : (down & XINPUT_GAMEPAD_DPAD_LEFT) ? -1 : 0;
@@ -3927,23 +5622,34 @@ static int graphics_input(UiMenu *m, Config *c, WORD down)
         {
         case G_PRESET:
         {
-            int pr = current_preset(c);
+            // Recommended, then the four presets (round).
+            int pr = s_gfxPick >= 0 ? s_gfxPick : current_preset(c) >= 0 ? current_preset(c) + 1 : gfx_recommended(c) ? 0 : -1;
             const GfxPreset *p;
-            pr = pr < 0 ? (dir > 0 ? 0 : 3) : (pr + dir + 4) % 4;
-            p = &s_presets[pr];
+            pr = pr < 0 ? (dir > 0 ? 0 : 4) : (pr + dir + 5) % 5;
+            s_gfxPick = pr;
+            if (pr == 0) { gfx_apply_recommended(c); break; }
+            p = &s_presets[pr - 1];
             c->texFilter = p->texFilter;
             c->smooth = p->smooth;
             c->sharpen = p->sharpen;
-            c->blur = p->blur;
+            c->blur = p->blur; c->sharpLevel = c->sharpen * 50; c->blurLevel = c->blur * 50;
             c->screen = p->screen;
             break;
         }
-        case G_FILTER: c->texFilter = (c->texFilter + dir + 3) % 3; break;
+        case G_FILTER: c->texFilter = (c->texFilter + dir + 3) % 3; s_gfxPick = -1; break;
         case G_HIRES:
         {
             // Cycles Off, then one state per pack found for the ROM in context (see
             // HiresScanPacks) - same "dir or A moves it on" pattern as the rest of this page.
             int hn = HiresPackCount(), states = hn + 1, cur = 0, k;
+            if (hn <= 1)
+            {
+                // One pack (or none): a switch.
+                c->hiTex = !(c->hiTex && hn);
+                if (hn) { strncpy(c->hiTexFile, HiresPackName(0), sizeof(c->hiTexFile) - 1); c->hiTexFile[sizeof(c->hiTexFile) - 1] = 0; }
+                if (!s_kodiSim) profile_set_hires(c);
+                break;
+            }
             if (c->hiTex && hn)
             {
                 cur = 1;
@@ -3959,11 +5665,26 @@ static int graphics_input(UiMenu *m, Config *c, WORD down)
                 strncpy(c->hiTexFile, HiresPackName(cur - 1), sizeof(c->hiTexFile) - 1);
                 c->hiTexFile[sizeof(c->hiTexFile) - 1] = 0;
             }
+            if (!s_kodiSim) profile_set_hires(c);
             break;
         }
-        case G_SMOOTH: c->smooth = !c->smooth; break;
-        case G_SHARPEN: c->sharpen = (c->sharpen + dir + 3) % 3; if (c->sharpen) c->blur = 0; break;
-        case G_BLUR: c->blur = (c->blur + dir + 3) % 3; if (c->blur) c->sharpen = 0; break;
+        case G_SMOOTH: c->smooth = !c->smooth; s_gfxPick = -1; break;
+        case G_SHARPEN:   // the bar, 10 at a time; above 0 it turns the blur off
+            c->sharpLevel += dir * 10;
+            if (c->sharpLevel < 0) c->sharpLevel = 0;
+            if (c->sharpLevel > 100) c->sharpLevel = 100;
+            if (c->sharpLevel) c->blurLevel = 0;
+            levels_to_steps(c);
+            break;
+        case G_BLUR:
+            c->blurLevel += dir * 10;
+            if (c->blurLevel < 0) c->blurLevel = 0;
+            if (c->blurLevel > 100) c->blurLevel = 100;
+            if (c->blurLevel) c->sharpLevel = 0;
+            levels_to_steps(c);
+            break;
+        case G_DEFLICKER: c->deflicker = !c->deflicker; break;
+        case G_SCREEN: c->screen = ((c->screen < 0 || c->screen > 8 ? 0 : c->screen) + dir + 9) % 9; s_gfxPick = -1; break;
         }
         settings_values(m, c);
         return SET_CHANGED;
@@ -3981,14 +5702,189 @@ int SettingsInput(UiMenu *m, Config *c, int perGame, WORD down)
     return r;
 }
 
+// Pages whose rows can be run dry (their handlers keep no state of their own beside the menu and settings).
+static int kodi_dd_page(void)
+{
+    return (s_systemPage || s_graphicsPage || s_screenPage || s_soundPage || s_interfacePage || s_imagesPage || s_saverPage) &&
+           !s_catsPage && !s_catEditPage && !s_pathsPage;
+}
+
+static int kodi_dd_open(UiMenu *m, Config *c, int perGame)
+{
+    static UiMenu mc;
+    static Config cc;
+    int row = m->sel, k, n = 0;
+    if (!kodi_dd_page() || row < 0 || row >= m->count || !kodi_arrows(m->value[row])) return 0;
+    if (!strcmp(m->label[row], Tr(T_LANGUAGE))) return 0;   // its own list (and a live change)
+    mc = *m;
+    cc = *c;
+    strncpy(s_kodiDdItem[n++], m->value[row], 63);
+    s_kodiSim = 1;
+    for (k = 1; k <= KODI_DD_MAX; k++)
+    {
+        mc.sel = row;
+        settings_input(&mc, &cc, perGame, XINPUT_GAMEPAD_DPAD_RIGHT);
+        if (mc.sel != row || strcmp(mc.value[row], s_kodiDdItem[0]) == 0) break;
+        if (n == KODI_DD_MAX) { n = 0; break; }
+        strncpy(s_kodiDdItem[n], mc.value[row], 63);
+        s_kodiDdItem[n][63] = 0;
+        n++;
+    }
+    s_kodiSim = 0;
+    ui_from_config(c);   // whatever the dry run set for the interface, as it is again
+    if (n < 2 || k > KODI_DD_MAX) return 0;   // a long range (sizes, positions): left/right as before
+    s_kodiDdRot = 0;
+    {
+        // The values come from the row's own on: a list with "Off" (the resolutions)
+        // is turned so that Off is the last, as the list itself has it.
+        char off[64], tmp[KODI_DD_MAX][64];
+        _snprintf(off, sizeof(off) - 1, "< %s >", Tr(T_RES_OFF));
+        off[sizeof(off) - 1] = 0;
+        for (k = 0; k < n; k++)
+            if (!strcmp(s_kodiDdItem[k], off)) s_kodiDdRot = (k + 1) % n;
+        memcpy(tmp, s_kodiDdItem, sizeof(tmp));
+        for (k = 0; k < n; k++) memcpy(s_kodiDdItem[k], tmp[(k + s_kodiDdRot) % n], 64);
+    }
+    s_kodiDd = row;
+    s_kodiDdN = n;
+    s_kodiDdSel = 0;
+    s_kodiDdTop = 0;
+    return 1;
+}
+
+// The open list of values: up/down, A picks, B or left closes it. A SET_* code, or -1 when no list is open.
+static int dd_input(UiMenu *m, Config *c, int perGame, WORD down)
+{
+    int i;
+    if (s_kodiDd < 0) return -1;
+    {
+        // The open list: up/down, A picks, B or left closes it.
+        if (s_kodiDd != m->sel) { s_kodiDd = -1; return -1; }
+        if (down & XINPUT_GAMEPAD_DPAD_UP) s_kodiDdSel = (s_kodiDdSel + s_kodiDdN - 1) % s_kodiDdN;
+        if (down & XINPUT_GAMEPAD_DPAD_DOWN) s_kodiDdSel = (s_kodiDdSel + 1) % s_kodiDdN;
+        if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_DPAD_LEFT)) s_kodiDd = -1;
+        if (down & XINPUT_GAMEPAD_A)
+        {
+            int steps = (s_kodiDdSel + s_kodiDdRot) % s_kodiDdN, r = SET_NONE, row = m->sel;
+            s_kodiDd = -1;
+            s_ddApply = 1;   // the steps go to the row itself: right must not open its list again
+            for (i = 0; i < steps; i++)
+            {
+                int got;
+                m->sel = row;   // the row stays selected
+                got = settings_input(m, c, perGame, XINPUT_GAMEPAD_DPAD_RIGHT);
+                if (got == SET_CHANGED) r = SET_CHANGED;
+            }
+            s_ddApply = 0;
+            UiMenuPress();
+            return r;
+        }
+        return SET_NONE;
+    }
+}
+
+// The list style: A on a row with "< >" values opens their list (left and right still step them).
+static int list_input(UiMenu *m, Config *c, int perGame, WORD down)
+{
+    int r, i;
+    if (s_kodiSim || s_ddApply) return -1;
+    r = dd_input(m, c, perGame, down);
+    if (r >= 0) return r;
+    if ((down & XINPUT_GAMEPAD_A) && m->page == UI_PAGE_LIST && m->sel >= 0 && m->sel < m->count && kodi_arrows(m->value[m->sel]) &&
+        kodi_dd_open(m, c, perGame))
+    {
+        for (i = 0; i < s_kodiDdN; i++)
+            if (!strcmp(s_kodiDdItem[i], m->value[m->sel])) s_kodiDdSel = i;
+        return SET_NONE;
+    }
+    return -1;
+}
+
+// The page's own input in the big icons style, before the page's: a SET_* code, or -1 when not taken.
+static int kodi_input(UiMenu *m, Config *c, int perGame, WORD down)
+{
+    KodiParts kp;
+    int order[UI_MENU_MAX], n, pos = 0, i, part, r;
+    if (s_kodiSim || s_ddApply) return -1;
+    kodi_parts(m, &kp);
+    if (m->sel < 0 || m->sel >= m->count) m->sel = 0;
+    r = dd_input(m, c, perGame, down);
+    if (r >= 0) return r;
+    n = kodi_order(m, &kp, order);
+    for (i = 0; i < n; i++)
+        if (order[i] == m->sel) pos = i;
+    part = kp.count >= 2 ? kp.rowPart[m->sel] : -1;
+    if (s_kodiSide && kp.count >= 2)
+    {
+        if (down & XINPUT_GAMEPAD_DPAD_UP) s_kodiPart = (s_kodiPart + kp.count - 1) % kp.count;
+        if (down & XINPUT_GAMEPAD_DPAD_DOWN) s_kodiPart = (s_kodiPart + 1) % kp.count;
+        if (down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_DPAD_RIGHT))
+        {
+            s_kodiSide = 0;
+            for (i = 0; i < n; i++)
+                if (kp.rowPart[order[i]] == s_kodiPart) { m->sel = order[i]; break; }
+        }
+        if (down & XINPUT_GAMEPAD_B) { s_kodiSide = 0; return -1; }   // B: the page's own (back)
+        return SET_NONE;
+    }
+    s_kodiSide = 0;
+    if (down & (XINPUT_GAMEPAD_DPAD_UP | XINPUT_GAMEPAD_DPAD_DOWN))
+    {
+        // Up and down in the order shown (parts may hold rows from anywhere in the page).
+        pos = (pos + ((down & XINPUT_GAMEPAD_DPAD_UP) ? n - 1 : 1)) % n;
+        m->sel = order[pos];
+        return SET_NONE;
+    }
+    if (kodi_arrows(m->value[m->sel]) && (down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_DPAD_RIGHT)) && kodi_dd_open(m, c, perGame))
+    {
+        // Its list, the value it has now selected.
+        for (i = 0; i < s_kodiDdN; i++)
+            if (!strcmp(s_kodiDdItem[i], m->value[m->sel])) s_kodiDdSel = i;
+        return SET_NONE;
+    }
+    if (kp.count >= 2 && (down & XINPUT_GAMEPAD_B))
+    {
+        // B: back to the parts first, then out.
+        s_kodiSide = 1;
+        s_kodiPart = part;
+        return SET_NONE;
+    }
+    if (kp.count >= 2 && (down & XINPUT_GAMEPAD_DPAD_LEFT) && m->value[m->sel][0] != '\x03')
+    {
+        // Left: to the parts (the values are in the lists now, only the bars take left).
+        if (!kodi_arrows(m->value[m->sel]) || kodi_dd_page())
+        {
+            s_kodiSide = 1;
+            s_kodiPart = part;
+            return SET_NONE;
+        }
+    }
+    return -1;
+}
+
 static int settings_input(UiMenu *m, Config *c, int perGame, WORD down)
 {
     s_perGame = perGame;
+    if (kodi_sub(m))
+    {
+        int r = kodi_input(m, c, perGame, down);   // big icons style: the side bar's parts, the values' lists
+        if (r >= 0) return r;
+    }
+    else
+    {
+        int r;
+        s_kodiSide = 0;
+        r = !strcmp(m->footer, Tr(T_FOOT_SELECT)) ? list_input(m, c, perGame, down) : -1;   // the lists of values, list style
+        if (r >= 0) return r;
+        if (!strcmp(m->footer, Tr(T_FOOT_SELECT)) == 0) s_kodiDd = -1;
+    }
     if (down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT)) UiMenuPress();   // the row shows the press
     if (s_catEditPage) return catedit_input(m, c, down);
     if (s_catsPage) return cats_input(m, c, down);
     if (s_graphicsPage) return graphics_input(m, c, down);
+    if (m->page == UI_PAGE_EDGES) return edges_input(m, c, down);
     if (s_calPage) return cal_input(m, c, down);
+    if (s_devPage) return dev_input(m, c, down);
     if (s_screenPage) return screen_input(m, c, down);
     if (s_saverPage) return saver_input(m, c, down);
     if (s_imagesPage) return images_input(m, c, down);
@@ -4001,6 +5897,7 @@ static int settings_input(UiMenu *m, Config *c, int perGame, WORD down)
     if (m->page == UI_PAGE_WALL) return wall_input(m, c, down);
     if (m->page == UI_PAGE_BORDER) return border_input(m, c, down);
     if (m->page == UI_PAGE_PERF) return perf_input(m, c, down);
+    if (m->page == UI_PAGE_HOTKEYS) return hk_input(m, c, down);
     if (s_soundPage) return sound_input(m, c, down);
     if (s_systemPage) return system_input(m, c, down);
     UiMenuNavigate(m, down);
@@ -4040,6 +5937,7 @@ static int settings_input(UiMenu *m, Config *c, int perGame, WORD down)
         settings_paths(m, c);
         return SET_NONE;
     }
+    if (m->sel == s_rowAbout && (down & XINPUT_GAMEPAD_A)) return SET_ABOUT;
     settings_values(m, c);
     if (down & XINPUT_GAMEPAD_A)
     {
@@ -4100,54 +5998,128 @@ static int confirm_ask(IDirect3DDevice9 *dev, int title, int question, int foote
 static int confirm_quit(IDirect3DDevice9 *dev) { return confirm_ask(dev, T_QUIT_TITLE, T_QUIT_ASK, T_FOOT_QUIT); }
 
 // ---- About ----
-// The credits panel: from the ROM browser (X) and the in-game menu.
+// Settings > About (and X in the ROM browser and the in-game menu): three tabs,
+// the emulator (version, engine, licence), the credits (who made it, what is new
+// in LAIKA 64) and the acknowledgements. In the menus' language; names and
+// projects as they are.
+static int s_aboutTab;   // 0 About, 1 Credits, 2 Acknowledgements
+static IDirect3DTexture9 *s_profileTex;   // ErickaguirreD's picture (xb_profile.h, from luna.jpg)
+static int s_profileTried;
+
+int AboutInput(WORD down)
+{
+    if (down & (XINPUT_GAMEPAD_LEFT_SHOULDER | XINPUT_GAMEPAD_DPAD_LEFT))
+    {
+        s_aboutTab = (s_aboutTab + 2) % 3;
+        xb_audio_ui_sound(XB_SFX_TAB);
+    }
+    if (down & (XINPUT_GAMEPAD_RIGHT_SHOULDER | XINPUT_GAMEPAD_DPAD_RIGHT))
+    {
+        s_aboutTab = (s_aboutTab + 1) % 3;
+        xb_audio_ui_sound(XB_SFX_TAB);
+    }
+    if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_START | XINPUT_GAMEPAD_BACK)) { s_aboutTab = 0; return 1; }
+    return 0;
+}
+
+// One credits entry: a name in bold, what it is beside it.
+static float credit_line(float x, float y, const char *name, const char *what)
+{
+    float a = UiText(UI_BOLD, 20, x, y, UI_COL_TEXT, name, UI_LEFT);
+    UiText(UI_REGULAR, 18, x + a + 14, y, UI_COL_TEXT2, what, UI_LEFT);
+    return 34;
+}
+
 void AboutDraw(void)
 {
     const float x = 150, y = 46, w = 980, h = 628, cx = x + 52, col2 = x + 560;
-    float ty;
+    float ty, tx;
+    char buf[160];
+    int i;
     UiDim();
+    edge_glow(x, y, w, h, 24);
     UiPanel(x, y, w, h, 24);
     UiBrand(cx, y + 72, BRAND_SIZE);
-    UiText(UI_REGULAR, 18, x + w - 52, y + 62, UI_COL_TEXT2, "Version " H64_VERSION_STRING, UI_RIGHT);
-    UiText(UI_REGULAR, 16, x + w - 52, y + 88, UI_COL_TEXT3, "Built " __DATE__, UI_RIGHT);
-    UiText(UI_REGULAR, 24, cx, y + 146, UI_COL_TEXT, "A Nintendo 64 emulator for the Xbox 360", UI_LEFT);
+    _snprintf(buf, sizeof(buf) - 1, Tr(T_ABOUT_VERSION), H64_VERSION_STRING);
+    buf[sizeof(buf) - 1] = 0;
+    UiText(UI_REGULAR, 18, x + w - 52, y + 62, UI_COL_TEXT2, buf, UI_RIGHT);
+    UiText(UI_REGULAR, 16, x + w - 52, y + 88, UI_COL_TEXT3, __DATE__, UI_RIGHT);
+    // The tabs.
+    tx = cx;
+    for (i = 0; i < 3; i++)
     {
-        float a = UiText(UI_REGULAR, 20, cx, y + 184, UI_COL_TEXT2, "Created by ", UI_LEFT);
-        UiText(UI_BOLD, 20, cx + a, y + 184, UI_COL_TEXT, "Mohamed Aymen (kernel64)", UI_LEFT);
+        const char *t = Tr(i == 2 ? T_CR_THANKS_TAB : i ? T_CREDITS : T_ABOUT);
+        float tw = UiTextWidth(UI_BOLD, 20, t) + 36;
+        if (i == s_aboutTab) UiRoundRect(tx, y + 122, tw, 36, 18, SEL_HI(255), SEL_HI(220));
+        else UiRoundRing(tx, y + 122, tw, 36, 18, 1.0f, UI_COL_LINE);
+        UiText(UI_BOLD, 20, tx + tw * 0.5f, y + 140, i == s_aboutTab ? UI_COL_TEXT : UI_COL_TEXT2, t, UI_CENTER);
+        tx += tw + 12;
     }
-    UiText(UI_REGULAR, 18, cx, y + 214, UI_COL_TEXT3, "github.com/kernel64/Harissa64", UI_LEFT);
-    UiRect(x + 32, y + 246, w - 64, 1, UI_COL_LINE);
-
-    ty = y + 280;
-    heading(cx, ty, "ENGINE");
-    paragraph(UI_REGULAR, 19, cx, ty + 16, 460, 6, UI_COL_TEXT2,
-              "MIPS R4300i to PowerPC dynamic recompiler.\nRSP: high-level graphics and audio, low-level interpreter.\n"
-              "RDP on the Xenos GPU, software RDP for reference.");
-    heading(col2, ty, "ACKNOWLEDGEMENTS");
-    ty += 16 + paragraph(UI_REGULAR, 19, col2, ty + 16, 368, 6, UI_COL_TEXT2,
-                         "Thanks to the ares, ParaLLEl-RDP, mupen64plus, GLideN64, libdragon and zlib projects, "
-                         "and to Timothy Lottes and AMD for their display filters. Box art and game "
-                         "information: libretro, GameDB-N64, Wikipedia.");
-    UiText(UI_REGULAR, 17, col2, ty + 18, UI_COL_TEXT3, "Details and licences: THIRD_PARTY.md", UI_LEFT);
-
-    ty = y + 474;
-    heading(cx, ty, "LICENCE");
-    paragraph(UI_REGULAR, 17, cx, ty + 14, w - 104, 4, UI_COL_TEXT3,
-              "Free software under the GNU GPL v2. Interface font: Inter (SIL Open Font License).\n"
-              "Nintendo 64 is a trademark of Nintendo; this project is not affiliated with Nintendo. "
-              "Play only games dumped from cartridges you own.");
+    UiRect(x + 32, y + 176, w - 64, 1, UI_COL_LINE);
+    ty = y + 210;
+    if (!s_aboutTab)
+    {
+        UiText(UI_REGULAR, 24, cx, ty, UI_COL_TEXT, Tr(T_ABOUT_TAGLINE), UI_LEFT);
+        ty += 60;
+        heading(cx, ty, Tr(T_ABOUT_ENGINE));
+        paragraph(UI_REGULAR, 19, cx, ty + 16, w - 104, 6, UI_COL_TEXT2, Tr(T_ABOUT_ENGINE_TEXT));
+        ty += 150;
+        heading(cx, ty, Tr(T_ABOUT_LICENCE));
+        paragraph(UI_REGULAR, 18, cx, ty + 14, w - 104, 4, UI_COL_TEXT3, Tr(T_ABOUT_LICENCE_TEXT));
+    }
+    else if (s_aboutTab == 1)
+    {
+        // The credits: ErickaguirreD with the picture (a circle with a ring and a soft
+        // glow), the original author under, then what LAIKA 64 brings in two columns.
+        const float ps = 112, px = cx, py = ty + 22, nx = px + ps + 28;
+        if (!s_profileTried && UiDevice())
+        {
+            int iw = 0, ih = 0;
+            u8 *pic = h64_png_decode(s_profilePng, sizeof(s_profilePng), &iw, &ih, UI_PROFILE_SIZE * UI_PROFILE_SIZE);
+            s_profileTried = 1;
+            if (pic) { s_profileTex = UiImageCreate(UiDevice(), pic, iw, ih); free(pic); }
+        }
+        heading(cx, ty, Tr(T_CR_DEVELOPMENT));
+        UiCircle(px + ps * 0.5f, py + ps * 0.5f, ps * 0.5f + 10, SEL_HI(40));
+        UiCircle(px + ps * 0.5f, py + ps * 0.5f, ps * 0.5f + 1, D3DCOLOR_ARGB(255, 6, 7, 10));
+        if (s_profileTex) UiImage(s_profileTex, px, py, ps, ps, ps * 0.5f, 0xFFFFFFFF);
+        UiRoundRing(px - 4, py - 4, ps + 8, ps + 8, ps * 0.5f + 4, 2.0f, SEL_HI(255));
+        UiText(UI_BOLD, 28, nx, py + 26, UI_COL_TEXT, "ErickaguirreD", UI_LEFT);
+        UiText(UI_REGULAR, 19, nx, py + 58, UI_COL_TEXT2, Tr(T_CR_LAIKA), UI_LEFT);
+        credit_line(nx, py + 92, "Mohamed Aymen (kernel64)", Tr(T_CR_BASED));
+        ty = py + ps + 34;
+        heading(cx, ty, Tr(T_CR_NEW));
+        for (i = 0; i < 10; i++)
+        {
+            const float bx = i < 5 ? cx : x + 510, by = ty + 30 + (i % 5) * 30;
+            UiCircle(bx + 4, by, 3.5f, UI_COL_ACCENT_HI);
+            UiText(UI_REGULAR, 18, bx + 18, by, UI_COL_TEXT2, Tr(T_CR_NEW_1 + i), UI_LEFT);
+        }
+    }
+    else
+    {
+        // The acknowledgements.
+        heading(cx, ty, Tr(T_CR_THANKS));
+        ty += 16 + paragraph(UI_REGULAR, 18, cx, ty + 16, w - 104, 3, UI_COL_TEXT2, Tr(T_CR_THANKS_TEXT)) + 22;
+        heading(cx, ty, Tr(T_CR_DATA));
+        paragraph(UI_REGULAR, 18, cx, ty + 16, 440, 3, UI_COL_TEXT2, Tr(T_CR_DATA_TEXT));
+        heading(col2, ty, Tr(T_CR_FONTS));
+        paragraph(UI_REGULAR, 18, col2, ty + 16, w - (col2 - x) - 52, 3, UI_COL_TEXT2, Tr(T_CR_FONTS_TEXT));
+        UiText(UI_REGULAR, 18, cx, y + h - 102, UI_COL_TEXT3, Tr(T_CR_COMMUNITY), UI_LEFT);
+    }
     UiRect(x + 32, y + h - 72, w - 64, 1, UI_COL_LINE);
-    UiFooter(cx, y + h - 36, "B:Back");
+    UiFooter(cx, y + h - 36, Tr(T_FOOT_ABOUT));
 }
 
 void AboutScreen(IDirect3DDevice9 *dev)
 {
     UiInput in;
     UiInputInit(&in);
+    s_aboutTab = 0;
     for (;;)
     {
         WORD down = UiInputPoll(&in);
-        if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_X | XINPUT_GAMEPAD_BACK)) return;
+        if (AboutInput(down)) return;
         dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
         UiBegin(dev);
         UiBackdrop();
@@ -4278,107 +6250,64 @@ void HiresPreviewScreen(IDirect3DDevice9 *dev, const Config *c)
 }
 
 // ---- Language list ----
-// Seven cards (four, then three), each with its flag and the language's own
-// name; the title and the button prompt follow the card under the cursor.
-#define LANG_CARD_W 220.0f
-#define LANG_CARD_H 196.0f
-#define LANG_GAP 24.0f
-
-static void lang_card_pos(int i, float *x, float *y)
-{
-    int row = i < 4 ? 0 : 1, n = row ? LANG_COUNT - 4 : 4, col = row ? i - 4 : i;
-    float total = n * LANG_CARD_W + (n - 1) * LANG_GAP;
-    *x = (UI_WIDTH - total) * 0.5f + col * (LANG_CARD_W + LANG_GAP);
-    *y = row ? 408.0f : 188.0f;
-}
-
-// The card in the other row nearest to card `i` (up/down).
-static int lang_other_row(int i)
-{
-    float x, y, bx, by, best = 1e9f;
-    int k, pick = i;
-    lang_card_pos(i, &x, &y);
-    for (k = 0; k < LANG_COUNT; k++)
-    {
-        float d;
-        if ((k < 4) == (i < 4)) continue;
-        lang_card_pos(k, &bx, &by);
-        d = fabsf(bx - x);
-        if (d < best) { best = d; pick = k; }
-    }
-    return pick;
-}
+// A list in a panel: each language by its own name and its code; the title and
+// the button prompt follow the row under the cursor (no flags: a language is
+// not a country).
+#define LANG_ROW_H 52.0f
+#define LANG_PANEL_W 560.0f
 
 static int s_langAutoMs;
 void LanguageScreenAuto(int ms) { s_langAutoMs = ms; }
 
 int LanguageScreen(IDirect3DDevice9 *dev, int initial, int firstStart)
 {
-    IDirect3DTexture9 *flags[LANG_COUNT];
     UiInput in;
-    UiAnim ax, ay;
+    UiAnim ay;
     int sel = initial >= 0 && initial < LANG_COUNT ? initial : LANG_EN, i, result = -2;
     DWORD openedAt = GetTickCount();
-    memset(&ax, 0, sizeof(ax));
+    const float ph = 40 + LANG_COUNT * LANG_ROW_H, px = (UI_WIDTH - LANG_PANEL_W) * 0.5f, py = 176;
     memset(&ay, 0, sizeof(ay));
-    for (i = 0; i < LANG_COUNT; i++)
-    {
-        int w = 0, h = 0;
-        u8 *px = h64_png_decode(s_flagPng[i], s_flagPngSize[i], &w, &h, FLAG_W * FLAG_H);
-        flags[i] = px ? UiImageCreate(dev, px, w, h) : NULL;
-        free(px);
-    }
     UiInputInit(&in);
     H64_INFO("[lang] language list (%s)", firstStart ? "first start" : "settings");
     while (result == -2)
     {
         WORD down = UiInputPoll(&in);
-        float cx, cy, now = UiTime();
-        if (down & XINPUT_GAMEPAD_DPAD_LEFT) sel = (sel + LANG_COUNT - 1) % LANG_COUNT;
-        if (down & XINPUT_GAMEPAD_DPAD_RIGHT) sel = (sel + 1) % LANG_COUNT;
-        if (down & (XINPUT_GAMEPAD_DPAD_UP | XINPUT_GAMEPAD_DPAD_DOWN)) sel = lang_other_row(sel);
+        float sy;
+        if (down & XINPUT_GAMEPAD_DPAD_UP) sel = (sel + LANG_COUNT - 1) % LANG_COUNT;
+        if (down & XINPUT_GAMEPAD_DPAD_DOWN) sel = (sel + 1) % LANG_COUNT;
         if ((down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_START)) || (s_langAutoMs > 0 && GetTickCount() - openedAt >= (DWORD)s_langAutoMs)) result = sel;
         else if (!firstStart && (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK))) result = -1;
 
         dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
         UiBegin(dev);
         UiBackdrop();
-        UiText(UI_BOLD, 34, UI_WIDTH * 0.5f, 134, UI_COL_TEXT, TrIn(sel, T_LANG_TITLE), UI_CENTER);
-        lang_card_pos(sel, &cx, &cy);
-        cx = anim_step(&ax, cx, 0);
-        cy = anim_step(&ay, cy, 0);
-        selection_glow(cx - 4, cy - 4, LANG_CARD_W + 8, LANG_CARD_H + 8, 24, selection_pulse());
+        UiText(UI_BOLD, 34, UI_WIDTH * 0.5f, 120, UI_COL_TEXT, TrIn(sel, T_LANG_TITLE), UI_CENTER);
+        edge_glow(px, py, LANG_PANEL_W, ph, 22);
+        UiPanel(px, py, LANG_PANEL_W, ph, 22);
+        sy = anim_step(&ay, py + 20 + sel * LANG_ROW_H, 0);
+        selection_bar(px + 16, sy + 3, LANG_PANEL_W - 32, LANG_ROW_H - 6);
         for (i = 0; i < LANG_COUNT; i++)
         {
-            float x, y;
-            int s = i == sel;
-            lang_card_pos(i, &x, &y);
-            UiShadow(x, y + 8, LANG_CARD_W, LANG_CARD_H, 20, 24, UI_COL_SHADOW);
-            UiRoundRect(x, y, LANG_CARD_W, LANG_CARD_H, 20, s ? D3DCOLOR_ARGB(255, 36, 46, 62) : UI_COL_PANEL_TOP,
-                        s ? D3DCOLOR_ARGB(255, 28, 35, 48) : UI_COL_PANEL);
-            if (s) UiRoundRing(x - 3, y - 3, LANG_CARD_W + 6, LANG_CARD_H + 6, 23, 3.0f, SEL_RING(selection_pulse()));
-            else UiRoundRing(x, y, LANG_CARD_W, LANG_CARD_H, 20, 1.0f, UI_COL_LINE);
-            if (flags[i])
+            const float ry = py + 20 + i * LANG_ROW_H + LANG_ROW_H * 0.5f;
+            char code[8];
+            int s = i == sel, k;
             {
-                const float fw = 176, fh = 117, fx = x + (LANG_CARD_W - fw) * 0.5f, fy = y + 20;
-                UiShadow(fx, fy + 4, fw, fh, 8, 12, D3DCOLOR_ARGB(140, 0, 0, 0));
-                UiImage(flags[i], fx, fy, fw, fh, 8, s ? D3DCOLOR_ARGB(255, 255, 255, 255) : D3DCOLOR_ARGB(255, 200, 200, 200));
-                UiRoundRing(fx, fy, fw, fh, 8, 1.0f, D3DCOLOR_ARGB(50, 255, 255, 255));
+                // A small badge: a letter of its own (Ñ, Ä, Ç, ع, Ã, Я, È).
+                static const char *const mark[] = { "Aa", "\xC3\x91", "\xC3\x84", "\xC3\x87", "\xEF\xBB\x89", "\xC3\x83", "\xD0\xAF", "\xC3\x88" };
+                const float bx = px + 58;
+                UiCircle(bx, ry, 17, s ? SEL_HI(255) : D3DCOLOR_ARGB(255, 52, 56, 72));
+                UiText(UI_BOLD, i == 0 ? 15 : 18, bx, ry, s ? D3DCOLOR_ARGB(255, 15, 16, 22) : UI_COL_TEXT2, i < (int)(sizeof(mark) / sizeof(mark[0])) ? mark[i] : "?", UI_CENTER);
             }
-            UiText(s ? UI_BOLD : UI_REGULAR, 22, x + LANG_CARD_W * 0.5f, y + 166, s ? UI_COL_TEXT : UI_COL_TEXT2, TrIn(i, T_LANG_NAME), UI_CENTER);
-        }
-        {
-            // The selected card's outline, pulsing gently.
-            float on = 0.75f + 0.25f * sinf(now * 4.0f);
-            UiRoundRing(cx - 3, cy - 3, LANG_CARD_W + 6, LANG_CARD_H + 6, 23, 3.0f, D3DCOLOR_ARGB((int)(255 * on), 255, 112, 84));
+            UiText(s ? UI_BOLD : UI_REGULAR, 23, px + 92, ry, s ? UI_COL_TEXT : UI_COL_TEXT2, TrIn(i, T_LANG_NAME), UI_LEFT);
+            for (k = 0; LangCode(i)[k] && k < 7; k++) code[k] = (char)toupper((u8)LangCode(i)[k]);
+            code[k] = 0;
+            UiText(UI_BOLD, 15, px + LANG_PANEL_W - 44, ry, s ? UI_COL_TEXT2 : UI_COL_TEXT3, code, UI_RIGHT);
         }
         UiScreenFooter(TrIn(sel, firstStart ? T_FOOT_LANG_FIRST : T_FOOT_LANG));
         UiEnd();
         dev->Present(NULL, NULL, NULL, NULL);
         Sleep(16);
     }
-    for (i = 0; i < LANG_COUNT; i++)
-        if (flags[i]) UiImageRelease(dev, flags[i]);
     H64_INFO("[lang] language list: %s", result >= 0 ? LangCode(result) : "left");
     return result;
 }
@@ -4402,9 +6331,12 @@ enum { WZ_LANG = 0, WZ_PAD, WZ_VIDEO, WZ_COLOR, WZ_WALL, WZ_FX, WZ_DONE, WZ_COUN
 static float wiz_ease(float t) { return t <= 0 ? 0 : t >= 1 ? 1 : 1 - (1 - t) * (1 - t) * (1 - t); }
 
 // The splash: the logo, very large, fading in, held, fading out (about 5 s; A, B or START skips it).
+static int s_splashShown;   // the logo was shown this session (the first start's welcome, or the intro)
+
 static void wiz_splash(IDirect3DDevice9 *dev)
 {
     const float total = 5.0f, start = UiTime();
+    s_splashShown = 1;
     UiInput in;
     UiInputInit(&in);
     xb_audio_ui_sound(XB_SFX_LAUNCH);
@@ -4413,13 +6345,22 @@ static void wiz_splash(IDirect3DDevice9 *dev)
         float t = UiTime() - start, a, k;
         WORD down = UiInputPoll(&in);
         if (t >= total || (down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_START))) break;
-        a = t < 1.4f ? wiz_ease(t / 1.4f) : t > total - 1.2f ? 1.0f - wiz_ease((t - (total - 1.2f)) / 1.2f) : 1.0f;
-        k = 0.94f + 0.06f * wiz_ease(t / 2.5f);   // a slow push in
+        a = t < 0.8f ? wiz_ease(t / 0.8f) : t > total - 1.2f ? 1.0f - wiz_ease((t - (total - 1.2f)) / 1.2f) : 1.0f;
+        // The logo comes out of the stars' vanishing point: from a speck to full size
+        // over 2.6 s (eased out), then a slow push in.
+        k = t < 2.6f ? 0.02f + 0.92f * wiz_ease(t / 2.6f) : 0.94f + 0.06f * wiz_ease((t - 2.6f) / 2.4f);
         dev->Clear(0, NULL, D3DCLEAR_TARGET, D3DCOLOR_ARGB(255, 0, 0, 0), 1.0f, 0);
         UiBegin(dev);
         {
+            // The hyperspace stars of the background effects, rushing out of the centre.
+            const int keep = s_bgEffect;
+            s_bgEffect = BGFX_WARP;
+            browser_effect();
+            s_bgEffect = keep;
+        }
+        {
             const float lw = 980 * k, lh = lw * 1.9f / UiBrandWidth(1.0f), lx = (UI_WIDTH - lw) * 0.5f, ly = (UI_HEIGHT - lh) * 0.5f;
-            UiShadow(lx + lw * 0.1f, ly + lh * 0.1f, lw * 0.8f, lh * 0.8f, lh * 0.4f, 160, SEL_LO(70 * a));   // a soft light behind
+            UiShadow(lx + lw * 0.1f, ly + lh * 0.1f, lw * 0.8f, lh * 0.8f, lh * 0.4f, 160, SEL_LO(90 * a));   // a soft light behind
             UiBrandFit(lx, ly, lw, lh);
             UiRect(0, 0, UI_WIDTH, UI_HEIGHT, D3DCOLOR_ARGB((int)(255 * (1.0f - a)), 0, 0, 0));   // the fade, over black
         }
@@ -4429,6 +6370,44 @@ static void wiz_splash(IDirect3DDevice9 *dev)
     }
 }
 
+// Leaving LAIKA 64 (main.cpp, before the dashboard): the intro the other way
+// round - the hyperspace stars, the logo shrinking into their vanishing point,
+// then black. 1.6 s; any button ends it sooner.
+void OutroScreen(IDirect3DDevice9 *dev)
+{
+    const float total = 1.6f, start = UiTime();
+    const int keep = s_bgEffect;
+    UiInput in;
+    if (!dev) return;
+    UiInputInit(&in);
+    xb_audio_ui_sound(XB_SFX_BACK);
+    for (;;)
+    {
+        float t = UiTime() - start, p, k, fade;
+        WORD down = UiInputPoll(&in);
+        if (t >= total || (down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_START))) break;
+        p = t / total;
+        k = 0.02f + 0.92f * (1.0f - p * p * p);          // full size to a speck, faster at the end
+        fade = p < 0.72f ? 1.0f : 1.0f - (p - 0.72f) / 0.28f;   // then into black
+        dev->Clear(0, NULL, D3DCLEAR_TARGET, D3DCOLOR_ARGB(255, 0, 0, 0), 1.0f, 0);
+        UiBegin(dev);
+        s_bgEffect = BGFX_WARP;
+        browser_effect();
+        s_bgEffect = keep;
+        {
+            const float lw = 980 * k, lh = lw * 1.9f / UiBrandWidth(1.0f), lx = (UI_WIDTH - lw) * 0.5f, ly = (UI_HEIGHT - lh) * 0.5f;
+            UiShadow(lx + lw * 0.1f, ly + lh * 0.1f, lw * 0.8f, lh * 0.8f, lh * 0.4f, 160, SEL_LO(90 * fade));
+            UiBrandFit(lx, ly, lw, lh);
+        }
+        UiRect(0, 0, UI_WIDTH, UI_HEIGHT, D3DCOLOR_ARGB((int)(255 * (1.0f - fade)), 0, 0, 0));
+        UiEnd();
+        dev->Present(NULL, NULL, NULL, NULL);
+        Sleep(16);
+    }
+    dev->Clear(0, NULL, D3DCLEAR_TARGET, D3DCOLOR_ARGB(255, 0, 0, 0), 1.0f, 0);
+    dev->Present(NULL, NULL, NULL, NULL);
+}
+
 // The page's title and the line under it; the language page's in the language under the cursor.
 static void wiz_heading(float ox, float a, const char *title, const char *sub)
 {
@@ -4436,29 +6415,65 @@ static void wiz_heading(float ox, float a, const char *title, const char *sub)
     paragraph(UI_REGULAR, 21, WIZ_X + ox, 180, WIZ_W * 0.75f, 2, UiAlpha(UI_COL_TEXT2, a), sub);
 }
 
+static IDirect3DTexture9 *s_wizFlags[LANG_COUNT];   // the language page's flags (WelcomeScreen)
+
 struct WizState
 {
     Config *c;
     int page, lang, row;   // row: on the pages of several settings (Controller, Picture)
-    IDirect3DTexture9 *flags[LANG_COUNT];
+    int preset;            // the Picture page's preset picked (0 Recommended, 1.. s_presets), -1: as the settings say
+    int dd;                // the row whose list of values is open (-1: none)
 };
+
+// The rows' height: closer when a page has many (the Picture page's seven).
+static float wiz_row_h(int n) { return n > 7 ? 42.0f : n > 6 ? 48.0f : 56.0f; }
 
 // A page's settings, one a row: the label at the left, "< value >" at the right.
 static void wiz_rows(float ox, float a, const char *const *labels, const char *const *values, int n, int sel, float width)
 {
     int i;
+    const float rh = wiz_row_h(n);
     for (i = 0; i < n; i++)
     {
-        float ry = 262.0f + i * 56, rx = WIZ_X + ox;
+        float ry = 262.0f + i * rh, rx = WIZ_X + ox;
         char buf[128];
         int s = i == sel;
-        if (s) selection_bar(rx - 14, ry, width + 20, 46);
-        UiText(s ? UI_BOLD : UI_REGULAR, 21, rx + 10, ry + 23, UiAlpha(s ? UI_COL_TEXT : UI_COL_TEXT2, a), labels[i], UI_LEFT);
-        if (values[i]) _snprintf(buf, sizeof(buf) - 1, "< %s >", values[i]);
-        else _snprintf(buf, sizeof(buf) - 1, "%s", UI_CH_RCHEVRON);   // opens a page (A)
-        buf[sizeof(buf) - 1] = 0;
-        UiText(UI_BOLD, 21, rx + width - 10, ry + 23, UiAlpha(s ? UI_COL_TEXT : UI_COL_TEXT2, a), buf, UI_RIGHT);
-        UiRect(rx, ry + 52, width, 1, UiAlpha(UI_COL_LINE, a));
+        if (s) selection_bar(rx - 14, ry, width + 20, rh - 10);
+        UiText(s ? UI_BOLD : UI_REGULAR, 21, rx + 10, ry + (rh - 10) * 0.5f, UiAlpha(s ? UI_COL_TEXT : UI_COL_TEXT2, a), labels[i], UI_LEFT);
+        if (values[i] && (switch_value(values[i]) >= 0 || values[i][0] == '\x03'))
+        {
+            draw_value(rx + width - 10, ry + (rh - 10) * 0.5f, values[i], s);   // a switch sliding as it turns, or a bar
+            UiRect(rx, ry + rh - 4, width, 1, UiAlpha(UI_COL_LINE, a));
+            continue;
+        }
+        if (values[i] && values[i][0] == '\x04')
+        {
+            // A colour of the background effect: its swatch ("Original" for none).
+            const int k = atoi(values[i] + 1);
+            const float cy = ry + (rh - 10) * 0.5f;
+            if (k > 0 && k <= FX_PALETTE_COUNT)
+            {
+                UiCircle(rx + width - 24, cy, 13, UiAlpha(D3DCOLOR_ARGB(255, s_fxPalette[k][0], s_fxPalette[k][1], s_fxPalette[k][2]), a));
+                if (s) UiRoundRing(rx + width - 41, cy - 17, 34, 34, 17, 2.0f, UiAlpha(UI_COL_TEXT, a));
+            }
+            else UiText(UI_BOLD, 21, rx + width - 10, cy, UiAlpha(s ? UI_COL_TEXT : UI_COL_TEXT2, a), Tr(T_FX_ORIGINAL), UI_RIGHT);
+            UiRect(rx, ry + rh - 4, width, 1, UiAlpha(UI_COL_LINE, a));
+            continue;
+        }
+        if (values[i])
+        {
+            // A value: its list opens with A (no left/right arrows); a small mark says so.
+            float tw = UiText(UI_BOLD, 21, rx + width - 30, ry + (rh - 10) * 0.5f, UiAlpha(s ? UI_COL_TEXT : UI_COL_TEXT2, a), values[i], UI_RIGHT);
+            (void)tw;
+            icon_tri(rx + width - 12, ry + (rh - 10) * 0.5f + 1, 9, 2, UiAlpha(s ? SEL_HI(255) : UI_COL_TEXT3, a));
+        }
+        else
+        {
+            _snprintf(buf, sizeof(buf) - 1, "%s", UI_CH_RCHEVRON);   // opens a page (A)
+            buf[sizeof(buf) - 1] = 0;
+            UiText(UI_BOLD, 21, rx + width - 10, ry + (rh - 10) * 0.5f, UiAlpha(s ? UI_COL_TEXT : UI_COL_TEXT2, a), buf, UI_RIGHT);
+        }
+        UiRect(rx, ry + rh - 4, width, 1, UiAlpha(UI_COL_LINE, a));
     }
 }
 
@@ -4468,76 +6483,263 @@ static const char *wiz_stick_name(const Config *c)
     return Tr(st == H64_STICK_RIGHT ? T_STICK_RIGHT : st == H64_STICK_DPAD ? T_STICK_DPAD : st == H64_STICK_NONE ? T_OFF : T_STICK_LEFT);
 }
 
-static const char *wiz_res_name(const Config *c)
+// Recommended: 1366x768 (16:9), brightness 50 %, colours as they are, no software stretch.
+static int wiz_recommended(const Config *c)
 {
-    static const char *const res[4] = { NULL, "x2 640x480", "x3 960x720", "HD 1280x720 (16:9)" };
-    int r = c->resScale < 1 ? 1 : c->resScale > 4 ? 4 : c->resScale;
-    return r == 1 ? Tr(T_RES_NATIVE) : res[r - 1];
+    return c->resWide && c->res169 == 4 && c->brightLevel == 50 && c->colorStyle == 0 && !c->stretch;
 }
 
-static const char *wiz_preset_name(const Config *c)
+static void wiz_apply_preset(WizState *w, int pick)
 {
-    int pr = current_preset(c);
-    return pr < 0 ? Tr(T_CUSTOM) : Tr(s_presets[pr].name);
-}
-
-// The Picture page's preview: a small made-up game scene, as the chosen
-// settings would show it - its pixels as big as the resolution leaves them,
-// in 4:3 or stretched, under the screen effect (scanlines, CRT, LCD grid),
-// with the brightness and the colour style applied to its colours.
-static void wiz_scene_rgb(float u, float v, float *rgb)
-{
-    float r, g, b, d;
-    // The sky, darker at the top; the sun.
-    r = 0.30f + 0.35f * v; g = 0.55f + 0.30f * v; b = 0.95f;
-    d = (u - 0.78f) * (u - 0.78f) * 1.6f + (v - 0.22f) * (v - 0.22f);
-    if (d < 0.009f) { r = 1.0f; g = 0.88f; b = 0.35f; }
-    // Two rows of hills, then the ground.
-    if (v > 0.56f + 0.07f * sinf(u * 9.0f + 1.0f)) { r = 0.30f; g = 0.62f; b = 0.35f; }
-    if (v > 0.66f + 0.05f * sinf(u * 6.0f + 2.5f)) { r = 0.20f; g = 0.72f; b = 0.25f; }
-    if (v > 0.84f) { r = 0.55f + 0.1f * (fmodf(u * 12.0f, 1.0f) > 0.5f); g = 0.36f; b = 0.18f; }
-    // A hero (red cap, face, blue clothes) and a coin.
-    if (u > 0.28f && u < 0.36f && v > 0.62f && v < 0.84f)
+    Config *c = w->c;
+    if (pick == 0)
     {
-        if (v < 0.67f) { r = 0.90f; g = 0.15f; b = 0.12f; }
-        else if (v < 0.74f) { r = 1.0f; g = 0.78f; b = 0.6f; }
-        else { r = 0.15f; g = 0.30f; b = 0.85f; }
+        c->resWide = 1; c->res169 = 4;
+        c->texFilter = 1;   // bilinear
+        c->brightLevel = 50;
+        c->colorStyle = 0;
+        c->stretch = 0;
     }
-    d = (u - 0.56f) * (u - 0.56f) * 1.6f + (v - 0.55f) * (v - 0.55f);
-    if (d < 0.0016f) { r = 1.0f; g = 0.82f; b = 0.1f; }
-    rgb[0] = r; rgb[1] = g; rgb[2] = b;
+    else
+    {
+        // The Graphics page's presets: texture filter, smoothing, sharpening, blur, screen effect.
+        const GfxPreset *p = &s_presets[pick - 1];
+        c->texFilter = p->texFilter;
+        c->smooth = p->smooth;
+        c->sharpen = p->sharpen;
+        c->blur = p->blur; c->sharpLevel = c->sharpen * 50; c->blurLevel = c->blur * 50;
+        c->screen = p->screen;
+    }
+    w->preset = pick;
 }
 
-static void wiz_video_preview(const Config *c, float x, float y, float w, float h, float a)
+static int wiz_preset_now(const WizState *w)
 {
-    static const int cols[4] = { 48, 80, 112, 144 };   // the resolution: native, x2, x3, HD
-    static const float bright[5] = { 1.0f, 0.8f, 0.65f, 1.25f, 1.55f };
-    const int res = (c->resScale < 1 ? 1 : c->resScale > 4 ? 4 : c->resScale) - 1, scr = c->screen < 0 || c->screen > 5 ? 0 : c->screen;
-    const int cs = c->colorStyle < 0 || c->colorStyle > 7 ? 0 : c->colorStyle;
-    const float pw = c->stretch ? w : h * 4.0f / 3.0f, px = x + (w - pw) * 0.5f;
-    const int nx = cols[res], ny = nx * 3 / 4;
-    const float bw = pw / nx, bh = h / ny, gam = bright[c->brightness < 0 || c->brightness > 4 ? 0 : c->brightness];
-    int i, j;
-    UiRoundRect(x, y, w, h, 8, UiAlpha(D3DCOLOR_ARGB(255, 0, 0, 0), a), UiAlpha(D3DCOLOR_ARGB(255, 0, 0, 0), a));
+    int pr;
+    if (w->preset >= 0) return w->preset;
+    if (wiz_recommended(w->c)) return 0;
+    pr = current_preset(w->c);
+    return pr < 0 ? -1 : pr + 1;
+}
+
+static const char *wiz_preset_name(const WizState *w)
+{
+    int pick = wiz_preset_now(w);
+    return pick < 0 ? Tr(T_CUSTOM) : pick == 0 ? Tr(T_PRESET_RECOMMENDED) : Tr(s_presets[pick - 1].name);
+}
+
+// A resolution row's value (no arrows: the rows add them).
+static const char *wiz_res_value(const Config *c, int wide)
+{
+    static char s[2][32];
+    u32 w, h;
+    if ((c->resWide != 0) != wide) return Tr(T_RES_OFF);
+    ConfigResSize(wide, wide ? c->res169 : c->res43, &w, &h);
+    sprintf(s[wide], "%ux%u", w, h);
+    return s[wide];
+}
+
+// The value of a row of the Controller and Picture pages (NULL: a row that opens a page).
+static const char *wiz_value(const WizState *w, int row)
+{
+    static const int scrLabels[9] = { T_SCREEN_NONE, T_SCANLINES, T_CRT, T_CRT_CURVED, T_LCD_GRID, T_LIGHT_SCANLINES, T_SCR_VIGNETTE, T_SCR_APERTURE, T_SCR_DOTS };
+    static char lv[16];
+    static char col[3][8];
+    const Config *c = w->c;
+    if (w->page == WZ_PAD)
+    {
+        // The buttons and the stick open their pages; the Rumble Pak last, a switch.
+        return row == 2 ? toggle(c->rumble > 0) : NULL;
+    }
+    if (w->page == WZ_FX)
+    {
+        if (row == 0) return Tr(s_fxLabels[c->bgEffect >= 0 && c->bgEffect < BGFX_COUNT ? c->bgEffect : 0]);
+        if (row >= 1 && row <= 3)
+        {
+            sprintf(col[row - 1], "\x04%d", c->fxColor[row - 1] >= 0 && c->fxColor[row - 1] <= FX_PALETTE_COUNT ? c->fxColor[row - 1] : 0);
+            return col[row - 1];
+        }
+        return NULL;
+    }
+    if (w->page != WZ_VIDEO) return NULL;
+    switch (row)
+    {
+    case 0: return wiz_preset_name(w);
+    case 1: return wiz_res_value(c, 0);
+    case 2: return wiz_res_value(c, 1);
+    case 3: return Tr(scrLabels[c->screen < 0 || c->screen > 8 ? 0 : c->screen]);
+    case 4: sprintf(lv, "\x03%d", c->brightLevel < 0 || c->brightLevel > 100 ? 50 : c->brightLevel); return lv;   // bars, as in the settings
+    case 5: sprintf(col[0], "\x03%d", c->sharpLevel < 0 || c->sharpLevel > 100 ? 0 : c->sharpLevel); return col[0];
+    case 6: return Tr(s_colorStyleLabels[c->colorStyle < 0 || c->colorStyle > 7 ? 0 : c->colorStyle]);
+    case 7: return toggle(c->stretch);
+    }
+    return NULL;
+}
+
+static int wiz_rows_of(int page) { return page == WZ_PAD ? 3 : page == WZ_VIDEO ? 8 : page == WZ_FX ? 4 : 0; }
+
+// One step of a row's value (left/right, and the lists' dry runs).
+static void wiz_step(WizState *w, int row, int dx)
+{
+    Config *c = w->c;
+    if (w->page == WZ_PAD)
+    {
+        if (row == 2) c->rumble = c->rumble > 0 ? 0 : 100;   // the switch: off, or full strength
+        return;
+    }
+    if (w->page == WZ_FX)
+    {
+        if (row == 0) c->bgEffect = ((c->bgEffect >= 0 && c->bgEffect < BGFX_COUNT ? c->bgEffect : 0) + dx + BGFX_COUNT) % BGFX_COUNT;
+        if (row >= 1 && row <= 3)
+        {
+            int *v = &c->fxColor[row - 1];
+            *v = ((*v >= 0 && *v <= FX_PALETTE_COUNT ? *v : 0) + dx + FX_PALETTE_COUNT + 1) % (FX_PALETTE_COUNT + 1);
+        }
+        return;
+    }
+    if (w->page != WZ_VIDEO) return;
+    if (row == 0)
+    {
+        int pick = wiz_preset_now(w);
+        wiz_apply_preset(w, ((pick < 0 ? (dx > 0 ? -1 : 0) : pick) + dx + 5) % 5);
+        return;
+    }
+    w->preset = -1;   // another setting: the preset is as the settings say again
+    if (row == 1) res_step(c, 0, dx);
+    if (row == 2) res_step(c, 1, dx);
+    if (row == 3) c->screen = ((c->screen < 0 || c->screen > 8 ? 0 : c->screen) + dx + 9) % 9;
+    if (row == 4)
+    {
+        // A bar, as in the settings: 5 at a time (50: as the console).
+        c->brightLevel = (c->brightLevel < 0 || c->brightLevel > 100 ? 50 : c->brightLevel) + dx * 5;
+        if (c->brightLevel < 0) c->brightLevel = 0;
+        if (c->brightLevel > 100) c->brightLevel = 100;
+    }
+    if (row == 5)
+    {
+        // Sharpness, a bar: 10 at a time; above 0 it turns the blur off.
+        c->sharpLevel = (c->sharpLevel < 0 || c->sharpLevel > 100 ? 0 : c->sharpLevel) + dx * 10;
+        if (c->sharpLevel < 0) c->sharpLevel = 0;
+        if (c->sharpLevel > 100) c->sharpLevel = 100;
+        if (c->sharpLevel) c->blurLevel = 0;
+        levels_to_steps(c);
+    }
+    if (row == 6) c->colorStyle = ((c->colorStyle < 0 || c->colorStyle > 7 ? 0 : c->colorStyle) + dx + 8) % 8;
+    if (row == 7) c->stretch = !c->stretch;
+}
+
+// A row's list of values (as the settings' lists): its values from a dry run on a copy.
+static int wiz_dd_open(WizState *w)
+{
+    WizState ww = *w;
+    Config cc = *w->c;
+    const char *v;
+    char off[64], tmp[KODI_DD_MAX][64];
+    int n = 0, k;
+    ww.c = &cc;
+    v = wiz_value(&ww, w->row);
+    if (!v || switch_value(v) >= 0 || v[0] == '\x03' || v[0] == '\x04') return 0;   // a switch, a bar or a colour: left/right, no list
+    _snprintf(s_kodiDdItem[n++], 63, "< %s >", v);
+    for (k = 1; k <= KODI_DD_MAX; k++)
+    {
+        wiz_step(&ww, w->row, 1);
+        v = wiz_value(&ww, w->row);
+        _snprintf(tmp[0], 63, "< %s >", v);
+        tmp[0][63] = 0;
+        if (!strcmp(tmp[0], s_kodiDdItem[0]) || n == KODI_DD_MAX) break;
+        strcpy(s_kodiDdItem[n++], tmp[0]);
+    }
+    if (n < 2) return 0;
+    s_kodiDdRot = 0;
+    _snprintf(off, sizeof(off) - 1, "< %s >", Tr(T_RES_OFF));
+    off[sizeof(off) - 1] = 0;
+    for (k = 0; k < n; k++)
+        if (!strcmp(s_kodiDdItem[k], off)) s_kodiDdRot = (k + 1) % n;   // "Off" the last, as in the settings
+    memcpy(tmp, s_kodiDdItem, sizeof(tmp));
+    for (k = 0; k < n; k++) memcpy(s_kodiDdItem[k], tmp[(k + s_kodiDdRot) % n], 64);
+    s_kodiDdN = n;
+    s_kodiDdSel = (n - s_kodiDdRot) % n;   // the value it has now
+    s_kodiDdTop = 0;
+    w->dd = w->row;
+    return 1;
+}
+
+// The Picture page's preview: the reference picture (xb_wizref.h) as the chosen
+// settings would show it - its pixels as big as the resolution leaves them,
+// with the colour style and the brightness applied - made into one texture
+// when they change (it was thousands of rectangles a frame: the page slowed
+// down), then the screen effect over it.
+static u8 *s_wizRef;                 // the reference picture, RGBA
+static IDirect3DTexture9 *s_wizPrev; // the preview as made for s_wizPrevKey
+static int s_wizPrevKey[5] = { -1, -1, -1, -1, -1 };
+
+static void wiz_preview_make(int nx, int ny, int cs, int lv)
+{
+    const int k = (512 + nx - 1) / nx, tw = nx * k, th = ny * k;   // upscaled by whole pixels (no blur between them)
+    const float gam = lv >= 50 ? 1.0f - 0.4f * (lv - 50) / 50.0f : 1.0f + 0.6f * (50 - lv) / 50.0f;
+    u8 *small, *big;
+    int i, j, x, y;
+    if (!s_wizRef)
+    {
+        int w = 0, h = 0;
+        s_wizRef = h64_png_decode(s_wizRefPng, sizeof(s_wizRefPng), &w, &h, WIZREF_W * WIZREF_H);
+        if (!s_wizRef) return;
+    }
+    small = (u8 *)malloc(nx * ny * 4);
+    big = (u8 *)malloc(tw * th * 4);
+    if (!small || !big) { free(small); free(big); return; }
     for (j = 0; j < ny; j++)
         for (i = 0; i < nx; i++)
         {
-            float rgb[3], o[3], l;
-            int k;
-            wiz_scene_rgb((i + 0.5f) / nx, (j + 0.5f) / ny, rgb);
-            // The colour style (as the display shader's matrix), then the brightness.
+            // The area of the picture this pixel covers, averaged; then the style and brightness.
+            int x0 = i * WIZREF_W / nx, x1 = (i + 1) * WIZREF_W / nx, y0 = j * WIZREF_H / ny, y1 = (j + 1) * WIZREF_H / ny, n = 0, q;
+            float rgb[3] = { 0, 0, 0 }, o[3], l;
+            if (x1 <= x0) x1 = x0 + 1;
+            if (y1 <= y0) y1 = y0 + 1;
+            for (y = y0; y < y1; y++)
+                for (x = x0; x < x1; x++, n++)
+                    for (q = 0; q < 3; q++) rgb[q] += s_wizRef[(y * WIZREF_W + x) * 4 + q];
+            for (q = 0; q < 3; q++) rgb[q] /= 255.0f * n;
             l = 0.299f * rgb[0] + 0.587f * rgb[1] + 0.114f * rgb[2];
-            for (k = 0; k < 3; k++) o[k] = rgb[k];
-            if (cs == 1 || cs == 2) for (k = 0; k < 3; k++) o[k] = l + (rgb[k] - l) * (cs == 1 ? 1.35f : 1.7f);
+            for (q = 0; q < 3; q++) o[q] = rgb[q];
+            if (cs == 1 || cs == 2) for (q = 0; q < 3; q++) o[q] = l + (rgb[q] - l) * (cs == 1 ? 1.35f : 1.7f);
             if (cs == 3 || cs == 7) o[0] = o[1] = o[2] = l;
             if (cs == 4) { o[0] = l * 1.35f; o[1] = l * 1.2f; o[2] = l * 0.93f; }
             if (cs == 5) { o[0] *= 1.08f; o[2] *= 0.86f; }
             if (cs == 6) { o[0] *= 0.88f; o[1] *= 0.98f; o[2] *= 1.12f; }
             if (cs == 7) { o[0] *= 0.62f; o[1] *= 0.78f; o[2] *= 0.36f; }
-            for (k = 0; k < 3; k++) o[k] = powf(o[k] < 0 ? 0 : o[k] > 1 ? 1 : o[k], gam);
-            UiRect(px + i * bw, y + j * bh, bw + 0.6f, bh + 0.6f,
-                   UiAlpha(D3DCOLOR_ARGB(255, (int)(o[0] * 255), (int)(o[1] * 255), (int)(o[2] * 255)), a));
+            for (q = 0; q < 3; q++) small[(j * nx + i) * 4 + q] = (u8)(powf(o[q] < 0 ? 0 : o[q] > 1 ? 1 : o[q], gam) * 255.0f);
+            small[(j * nx + i) * 4 + 3] = 255;
         }
+    for (y = 0; y < th; y++)
+        for (x = 0; x < tw; x++)
+            memcpy(big + (y * tw + x) * 4, small + ((y / k) * nx + x / k) * 4, 4);
+    if (s_wizPrev) UiImageRelease(UiDevice(), s_wizPrev);
+    s_wizPrev = UiImageCreate(UiDevice(), big, tw, th);
+    free(small);
+    free(big);
+}
+
+static void wiz_video_preview(const Config *c, float x, float y, float w, float h, float a)
+{
+    u32 rw, rh;
+    int wide;
+    ConfigResCurrent(c, &rw, &rh, &wide);
+    const int scr = c->screen < 0 || c->screen > 8 ? 0 : c->screen;
+    const int cs = c->colorStyle < 0 || c->colorStyle > 7 ? 0 : c->colorStyle;
+    const float pw = wide || c->stretch ? w : h * 4.0f / 3.0f, px = x + (w - pw) * 0.5f;
+    // The pixels: as many rows as the height gives (36 at 240 lines, 108 at 720), across as the shape gives.
+    const int ny = 36 + (int)(rh - 240) * 72 / 480, nx = wide ? ny * 16 / 9 : ny * 4 / 3;
+    const int lv = c->brightLevel < 0 || c->brightLevel > 100 ? 50 : c->brightLevel;
+    const float bw = pw / nx, bh = h / ny;
+    int i, j;
+    if (s_wizPrevKey[0] != nx || s_wizPrevKey[1] != ny || s_wizPrevKey[2] != cs || s_wizPrevKey[3] != lv || !s_wizPrev)
+    {
+        s_wizPrevKey[0] = nx; s_wizPrevKey[1] = ny; s_wizPrevKey[2] = cs; s_wizPrevKey[3] = lv;
+        wiz_preview_make(nx, ny, cs, lv);
+    }
+    UiRoundRect(x, y, w, h, 8, UiAlpha(D3DCOLOR_ARGB(255, 0, 0, 0), a), UiAlpha(D3DCOLOR_ARGB(255, 0, 0, 0), a));
+    if (s_wizPrev) UiImage(s_wizPrev, px, y, pw, h, 0.0f, UiAlpha(D3DCOLOR_ARGB(255, 255, 255, 255), a));
     // The screen effect over it.
     if (scr == 1 || scr == 2 || scr == 3 || scr == 5)
         for (j = 0; j < ny; j++) UiRect(px, y + j * bh + bh * 0.55f, pw, bh * 0.45f, UiAlpha(D3DCOLOR_ARGB(scr == 5 ? 60 : 120, 0, 0, 0), a));
@@ -4560,8 +6762,24 @@ static void wiz_controls(IDirect3DDevice9 *dev, Config *c, int calib)
 {
     UiMenu m;
     UiInput in;
-    if (calib) calib_open(&m, c);
-    else controls_open(&m, c);
+    if (calib)
+    {
+        calib_open(&m, c);
+        calib_start(CT_WIZARD);   // the automatic calibration at once: rest, then circles
+    }
+    else
+    {
+        // The automatic mapping at once (each N64 button asked in turn), without its question.
+        controls_open(&m, c);
+        s_ctl.autoSaved = c->padMap[s_ctl.player];
+        s_ctl.autoMode = AUTO_RUN;
+        s_ctl.autoIdx = 0;
+        s_ctl.capturing = 1;
+        s_ctl.capItem = s_autoOrder[0];
+        s_ctl.capAdd = 0;
+        s_ctl.capReleased = 0;
+        s_ctl.capStart = GetTickCount();
+    }
     UiInputInit(&in);
     for (;;)
     {
@@ -4593,35 +6811,39 @@ static void wiz_page(const WizState *w, int page, float ox, float a)
             float ry = 262.0f + i * 44, rx = WIZ_X + ox;
             int s = i == w->lang;
             if (s) selection_bar(rx - 14, ry, 520, 40);
-            if (w->flags[i]) UiImage(w->flags[i], rx + 6, ry + 7, 39, 26, 4, UiAlpha(D3DCOLOR_ARGB(255, 255, 255, 255), a));
-            UiText(s ? UI_BOLD : UI_REGULAR, 21, rx + 62, ry + 20, UiAlpha(s ? UI_COL_TEXT : UI_COL_TEXT2, a), TrIn(i, T_LANG_NAME), UI_LEFT);
+            UiText(s ? UI_BOLD : UI_REGULAR, 21, rx + 14, ry + 20, UiAlpha(s ? UI_COL_TEXT : UI_COL_TEXT2, a), TrIn(i, T_LANG_NAME), UI_LEFT);
+            if (s_wizFlags[i])
+            {
+                // Its flag at the right of the row (Spanish: Mexico's).
+                UiImage(s_wizFlags[i], rx + 452, ry + 7, 39, 26, 4, UiAlpha(D3DCOLOR_ARGB(255, 255, 255, 255), a));
+                UiRoundRing(rx + 452, ry + 7, 39, 26, 4, 1.0f, UiAlpha(D3DCOLOR_ARGB(60, 255, 255, 255), a));
+            }
         }
         break;
     case WZ_PAD:
     {
-        const char *labels[4], *values[4];
+        const char *labels[3], *values[3];
+        WizState shown = *w;
+        shown.page = WZ_PAD;
         wiz_heading(ox, a, Tr(T_WIZ_PAD_TITLE), Tr(T_WIZ_PAD_SUB));
-        labels[0] = Tr(T_ANALOG_STICK); values[0] = wiz_stick_name(c);
-        labels[1] = Tr(T_RUMBLE); values[1] = onoff(c->rumble);
-        labels[2] = Tr(T_WIZ_MAP_BUTTONS); values[2] = NULL;   // the Controls page
-        labels[3] = Tr(T_WIZ_CAL_STICK); values[3] = NULL;     // the stick calibration
-        wiz_rows(ox, a, labels, values, 4, w->row, 760);
+        labels[0] = Tr(T_WIZ_MAP_BUTTONS); values[0] = NULL;   // the automatic mapping, straight away
+        labels[1] = Tr(T_WIZ_CAL_STICK); values[1] = NULL;     // the automatic calibration, straight away
+        labels[2] = Tr(T_RUMBLE); values[2] = wiz_value(&shown, 2);   // a switch
+        wiz_rows(ox, a, labels, values, 3, w->row, 760);
+        if (w->dd >= 0 && page == w->page) dd_draw(WIZ_X + ox + 750, 262.0f + (w->dd + 1) * wiz_row_h(3) - 8, wiz_row_h(3));
         break;
     }
     case WZ_VIDEO:
     {
-        const char *labels[6], *values[6];
-        const char *scr[6] = { Tr(T_SCREEN_NONE), Tr(T_SCANLINES), Tr(T_CRT), Tr(T_CRT_CURVED), Tr(T_LCD_GRID), Tr(T_LIGHT_SCANLINES) };
-        const char *br[5] = { Tr(T_NORMAL), Tr(T_LIGHTER), Tr(T_MUCH_LIGHTER), Tr(T_DARKER), Tr(T_MUCH_DARKER) };
+        static const int names[8] = { T_PRESET, T_RESOLUTION, T_RES_169, T_SCREEN_EFFECT, T_BRIGHTNESS, T_SHARPEN, T_COLOR_STYLE, T_STRETCH };
+        const char *labels[8], *values[8];
+        WizState shown = *w;
+        shown.page = WZ_VIDEO;
         wiz_heading(ox, a, Tr(T_WIZ_VIDEO_TITLE), Tr(T_WIZ_VIDEO_SUB));
-        labels[0] = Tr(T_PRESET); values[0] = wiz_preset_name(c);
-        labels[1] = Tr(T_RESOLUTION); values[1] = wiz_res_name(c);
-        labels[2] = Tr(T_SCREEN_EFFECT); values[2] = scr[c->screen < 0 || c->screen > 5 ? 0 : c->screen];
-        labels[3] = Tr(T_BRIGHTNESS); values[3] = br[c->brightness < 0 || c->brightness > 4 ? 0 : c->brightness];
-        labels[4] = Tr(T_COLOR_STYLE); values[4] = Tr(s_colorStyleLabels[c->colorStyle < 0 || c->colorStyle > 7 ? 0 : c->colorStyle]);
-        labels[5] = Tr(T_STRETCH); values[5] = onoff(c->stretch);
-        wiz_rows(ox, a, labels, values, 6, w->row, 540);
+        for (i = 0; i < 8; i++) { labels[i] = Tr(names[i]); values[i] = wiz_value(&shown, i); }
+        wiz_rows(ox, a, labels, values, 8, w->row, 540);
         wiz_video_preview(c, WIZ_X + 580 + ox, 268, WIZ_W - 580, (WIZ_W - 580) * 9.0f / 16.0f, a);   // how it looks
+        if (w->dd >= 0 && page == w->page) dd_draw(WIZ_X + ox + 530, 262.0f + (w->dd + 1) * wiz_row_h(8) - 8, wiz_row_h(8));
         break;
     }
     case WZ_COLOR:
@@ -4675,14 +6897,24 @@ static void wiz_page(const WizState *w, int page, float ox, float a)
     }
     case WZ_FX:
     {
-        const int fx = c->bgEffect >= 0 && c->bgEffect < BGFX_COUNT ? c->bgEffect : 0;
+        // The effect (its list) and its three colours (left/right through the swatches;
+        // "Original" keeps the effect's own); it plays behind as they change.
+        static char colLabel[3][32];
+        const char *labels[4], *values[4];
+        WizState shown = *w;
+        shown.page = WZ_FX;
         wiz_heading(ox, a, Tr(T_WIZ_FX_TITLE), Tr(T_WIZ_FX_SUB));
-        _snprintf(buf, sizeof(buf) - 1, "< %s >", Tr(s_fxLabels[fx]));
-        buf[sizeof(buf) - 1] = 0;
-        UiTextShadowed(UI_BOLD, 34, UI_WIDTH * 0.5f + ox, 380, UiAlpha(UI_COL_TEXT, a), buf, UI_CENTER);
-        _snprintf(buf, sizeof(buf) - 1, "%d / %d", fx + 1, BGFX_COUNT);
-        buf[sizeof(buf) - 1] = 0;
-        UiText(UI_REGULAR, 19, UI_WIDTH * 0.5f + ox, 428, UiAlpha(UI_COL_TEXT2, a), buf, UI_CENTER);
+        labels[0] = Tr(T_FX_EFFECT);
+        for (i = 0; i < 3; i++)
+        {
+            _snprintf(colLabel[i], sizeof(colLabel[i]) - 1, Tr(T_FX_COLOR), i + 1);
+            colLabel[i][sizeof(colLabel[i]) - 1] = 0;
+            labels[i + 1] = colLabel[i];
+        }
+        for (i = 0; i < 4; i++) values[i] = wiz_value(&shown, i);
+        wiz_rows(ox, a, labels, values, 4, w->row, 640);
+        if (w->dd >= 0 && page == w->page) dd_draw(WIZ_X + ox + 630, 262.0f + (w->dd + 1) * wiz_row_h(4) - 8, wiz_row_h(4));
+        (void)buf;
         break;
     }
     default:
@@ -4697,7 +6929,7 @@ static void wiz_page(const WizState *w, int page, float ox, float a)
         UiLine(cx - 5, cy + 14, cx + 20, cy - 13, 6.0f, UiAlpha(D3DCOLOR_ARGB(255, 15, 16, 22), a));
         values[0] = Tr(T_LANG_NAME);
         values[1] = wiz_stick_name(c);
-        values[2] = wiz_preset_name(c);
+        values[2] = wiz_preset_name(w);
         values[3] = Tr(s_selLabels[c->selColor >= 0 && c->selColor < SEL_COLORS ? c->selColor : 0]);
         values[4] = Tr(c->wallCustom ? T_WALL_OPT_MINE : T_WALL_OPT_NONE);
         values[5] = Tr(s_fxLabels[c->bgEffect >= 0 && c->bgEffect < BGFX_COUNT ? c->bgEffect : 0]);
@@ -4725,15 +6957,28 @@ static void wiz_chrome(const WizState *w)
         UiRoundRect(WIZ_X + i * 22, 628, i == w->page ? 16.0f : 8.0f, 8, 4, i == w->page ? SEL_HI(255) : D3DCOLOR_ARGB(80, 255, 255, 255),
                     i == w->page ? SEL_LO(255) : D3DCOLOR_ARGB(80, 255, 255, 255));
     {
-        const char *next = Tr(w->page == WZ_DONE ? T_WIZ_START : T_WIZ_NEXT), *back = Tr(T_WIZ_BACK);
-        float nw = UiTextWidth(UI_BOLD, 19, next) + 56, bw = UiTextWidth(UI_BOLD, 19, back) + 56, by = 608, bh = 44, nx = UI_WIDTH - WIZ_X - nw;
-        UiRoundRect(nx, by, nw, bh, 8, SEL_HI(255), SEL_LO(255));
-        UiText(UI_BOLD, 19, nx + nw * 0.5f, by + bh * 0.5f, D3DCOLOR_ARGB(255, 15, 16, 22), next, UI_CENTER);
+        // Each a rounded pill with its controller buttons in their circles (RB, and A
+        // where A is not a list's), the way the prompts at the bottom show them.
+        char next[96], back[96];
+        float nw, bw, by = 604, bh = 50, nx;
+        const int onNext = 0;
+        _snprintf(next, sizeof(next) - 1, "%s:%s", w->page == WZ_LANG ? "A/RB" : "RB", Tr(w->page == WZ_DONE ? T_WIZ_START : T_WIZ_NEXT));
+        next[sizeof(next) - 1] = 0;
+        _snprintf(back, sizeof(back) - 1, "B/LB:%s", Tr(T_WIZ_BACK));
+        back[sizeof(back) - 1] = 0;
+        nw = UiFooterWidth(next) + 40;
+        bw = UiFooterWidth(back) + 40;
+        nx = UI_WIDTH - WIZ_X - nw;
+        if (onNext && wiz_rows_of(w->page)) selection_glow(nx - 4, by - 4, nw + 8, bh + 8, bh * 0.5f + 4, selection_pulse());
+        UiRoundRect(nx, by, nw, bh, bh * 0.5f, onNext ? SEL_LO(200) : D3DCOLOR_ARGB(235, 40, 44, 58), onNext ? SEL_LO(160) : D3DCOLOR_ARGB(235, 30, 33, 44));
+        UiRoundRing(nx, by, nw, bh, bh * 0.5f, onNext ? 3.0f : 2.0f, SEL_HI(255));
+        UiFooter(nx + 20, by + bh * 0.5f, next);
         if (w->page > 0)
         {
             float bx = nx - 14 - bw;
-            UiRoundRing(bx, by, bw, bh, 8, 1.5f, D3DCOLOR_ARGB(140, 255, 255, 255));
-            UiText(UI_BOLD, 19, bx + bw * 0.5f, by + bh * 0.5f, UI_COL_TEXT, back, UI_CENTER);
+            UiRoundRect(bx, by, bw, bh, bh * 0.5f, D3DCOLOR_ARGB(200, 30, 33, 44), D3DCOLOR_ARGB(200, 24, 26, 35));
+            UiRoundRing(bx, by, bw, bh, bh * 0.5f, 1.5f, D3DCOLOR_ARGB(140, 255, 255, 255));
+            UiFooter(bx + 20, by + bh * 0.5f, back);
         }
     }
 }
@@ -4746,20 +6991,24 @@ void WelcomeScreen(IDirect3DDevice9 *dev, Config *c, int splash)
     float changedAt = -10.0f;
     memset(&w, 0, sizeof(w));
     w.c = c;
+    w.preset = -1;
+    w.dd = -1;
     w.lang = LangFromCode(c->lang) >= 0 ? LangFromCode(c->lang) : LangFromConsole();
     LangSet(w.lang);
     s_browser = 1;   // the menus' look as in the ROM list (sounds, wallpapers)
     ui_from_config(c);
     H64_INFO("[menu] welcome");
-    if (splash) wiz_splash(dev);
-    changedAt = UiTime();   // the first page slides in too
-    for (i = 0; i < LANG_COUNT; i++)
+    for (i = 0; i < LANG_COUNT && i < (int)(sizeof(s_flagPng) / sizeof(s_flagPng[0])); i++)
     {
         int fw = 0, fh = 0;
         u8 *px = h64_png_decode(s_flagPng[i], s_flagPngSize[i], &fw, &fh, FLAG_W * FLAG_H);
-        w.flags[i] = px ? UiImageCreate(dev, px, fw, fh) : NULL;
+        s_wizFlags[i] = px ? UiImageCreate(dev, px, fw, fh) : NULL;
         free(px);
     }
+    // Its own music: a space piece for Laika (assistant\laika_orbit.mp3), the menus' after.
+    xb_audio_music_start("game:\\assistant", XB_MUSIC_TRACK, "laika_orbit.mp3");
+    if (splash) wiz_splash(dev);
+    changedAt = UiTime();   // the first page slides in too
     UiInputInit(&in);
     for (;;)
     {
@@ -4767,6 +7016,33 @@ void WelcomeScreen(IDirect3DDevice9 *dev, Config *c, int splash)
         int dx = (down & XINPUT_GAMEPAD_DPAD_RIGHT) ? 1 : (down & XINPUT_GAMEPAD_DPAD_LEFT) ? -1 : 0;
         int dy = (down & XINPUT_GAMEPAD_DPAD_DOWN) ? 1 : (down & XINPUT_GAMEPAD_DPAD_UP) ? -1 : 0;
         float now = UiTime(), t;
+        if (w.dd >= 0)
+        {
+            // A row's list is open: up/down in it, A picks, B or left closes it.
+            if (down & XINPUT_GAMEPAD_DPAD_UP) s_kodiDdSel = (s_kodiDdSel + s_kodiDdN - 1) % s_kodiDdN;
+            if (down & XINPUT_GAMEPAD_DPAD_DOWN) s_kodiDdSel = (s_kodiDdSel + 1) % s_kodiDdN;
+            if (down & XINPUT_GAMEPAD_A)
+            {
+                int steps = (s_kodiDdSel + s_kodiDdRot) % s_kodiDdN, k;
+                for (k = 0; k < steps; k++) wiz_step(&w, w.row, 1);
+                UiMenuPress();
+            }
+            if (down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_DPAD_LEFT)) w.dd = -1;
+            down = 0;   // nothing else this time
+            dx = dy = 0;
+        }
+        else if ((down & XINPUT_GAMEPAD_A) && w.row < wiz_rows_of(w.page) && wiz_value(&w, w.row) && switch_value(wiz_value(&w, w.row)) >= 0)
+        {
+            wiz_step(&w, w.row, 1);   // A on a switch: it turns
+            UiMenuPress();
+            down = 0;
+            dx = dy = 0;
+        }
+        else if ((down & XINPUT_GAMEPAD_A) && w.row < wiz_rows_of(w.page) && wiz_value(&w, w.row) && wiz_dd_open(&w))
+        {
+            down = 0;   // A on a row with values: its list
+            dx = dy = 0;
+        }
         // ---- The page's choice.
         switch (w.page)
         {
@@ -4774,34 +7050,11 @@ void WelcomeScreen(IDirect3DDevice9 *dev, Config *c, int splash)
             if (dy || dx) { w.lang = (w.lang + (dy ? dy : dx) + LANG_COUNT) % LANG_COUNT; LangSet(w.lang); }
             break;
         case WZ_PAD:
-            if (dy) w.row = (w.row + dy + 4) % 4;
-            if (dx && w.row == 0) c->padMap[0].stick = (c->padMap[0].stick + dx + H64_STICK_COUNT) % H64_STICK_COUNT;
-            if (dx && w.row == 1) c->rumble = !c->rumble;
-            break;
         case WZ_VIDEO:
-            if (dy) w.row = (w.row + dy + 6) % 6;
-            if (dx && w.row == 0)
-            {
-                // The Graphics page's presets: texture filter, smoothing, sharpening, blur, screen effect.
-                int pr = current_preset(c);
-                const GfxPreset *p = &s_presets[((pr < 0 ? 0 : pr) + dx + 4) % 4];
-                c->texFilter = p->texFilter;
-                c->smooth = p->smooth;
-                c->sharpen = p->sharpen;
-                c->blur = p->blur;
-                c->screen = p->screen;
-            }
-            if (dx && w.row == 1) c->resScale = ((c->resScale < 1 ? 1 : c->resScale > 4 ? 4 : c->resScale) - 1 + dx + 4) % 4 + 1;
-            if (dx && w.row == 2) c->screen = ((c->screen < 0 || c->screen > 5 ? 0 : c->screen) + dx + 6) % 6;
-            if (dx && w.row == 3)
-            {
-                int k, at = 2;
-                for (k = 0; k < 5; k++)
-                    if (s_brightOrder[k] == c->brightness) at = k;
-                c->brightness = s_brightOrder[(at + dx + 5) % 5];
-            }
-            if (dx && w.row == 4) c->colorStyle = ((c->colorStyle < 0 || c->colorStyle > 7 ? 0 : c->colorStyle) + dx + 8) % 8;
-            if (dx && w.row == 5) c->stretch = !c->stretch;
+        case WZ_FX:
+            // The rows (RB goes on; A is the rows' own: lists, switches, pages).
+            if (dy) w.row = (w.row + dy + wiz_rows_of(w.page)) % wiz_rows_of(w.page);
+            if (dx && w.row < wiz_rows_of(w.page) && wiz_value(&w, w.row)) wiz_step(&w, w.row, dx);
             break;
         case WZ_COLOR:
             if (dx || dy) c->selColor = (c->selColor + (dx ? dx : dy) + SEL_COLORS) % SEL_COLORS;
@@ -4809,19 +7062,18 @@ void WelcomeScreen(IDirect3DDevice9 *dev, Config *c, int splash)
         case WZ_WALL:
             if ((dx || dy) && UiWallpaperCount()) c->wallCustom = !c->wallCustom;
             break;
-        case WZ_FX:
-            if (dx || dy) c->bgEffect = (c->bgEffect + (dx ? dx : dy) + BGFX_COUNT) % BGFX_COUNT;
-            break;
         }
         ui_from_config(c);
         // ---- On, back.
-        if ((down & XINPUT_GAMEPAD_A) && w.page == WZ_PAD && w.row >= 2)
+        if ((down & XINPUT_GAMEPAD_A) && w.page == WZ_PAD && w.row <= 1)
         {
-            // Map the buttons, or calibrate the stick: the Controls pages themselves, then back here.
-            wiz_controls(dev, c, w.row == 3);
+            // Map the buttons, or calibrate the stick: the automatic set-up of the Controls pages, then back here.
+            wiz_controls(dev, c, w.row == 1);
             UiInputInit(&in);
         }
-        else if (down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_START))
+        // RB / LB: next and back from any row (A on the pad page's last rows opens their pages,
+        // and the D-pad changes the values: the Next and Back buttons could not be reached).
+        else if (down & ((w.page == WZ_LANG ? XINPUT_GAMEPAD_A : 0) | XINPUT_GAMEPAD_START | XINPUT_GAMEPAD_RIGHT_SHOULDER))   // A only picks the language
         {
             if (w.page == WZ_LANG) lang_change(c, w.lang);   // kept at once, as Settings does
             if (w.page == WZ_DONE) break;
@@ -4830,7 +7082,7 @@ void WelcomeScreen(IDirect3DDevice9 *dev, Config *c, int splash)
             changedAt = now;
             w.row = 0;
         }
-        else if ((down & XINPUT_GAMEPAD_B) && w.page > 0)
+        else if ((down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_LEFT_SHOULDER)) && w.page > 0)
         {
             prev = w.page--;
             dir = -1;
@@ -4865,7 +7117,8 @@ void WelcomeScreen(IDirect3DDevice9 *dev, Config *c, int splash)
         Sleep(16);
     }
     for (i = 0; i < LANG_COUNT; i++)
-        if (w.flags[i]) UiImageRelease(dev, w.flags[i]);
+        if (s_wizFlags[i]) { UiImageRelease(dev, s_wizFlags[i]); s_wizFlags[i] = NULL; }
+    xb_audio_music_start(MUSIC_DIR, c->musicMode, c->musicTrack);   // the menus' music again
     s_browser = wasBrowser;
     H64_INFO("[menu] welcome done: %s, colour %d, wallpapers %d, effect %d", LangCode(w.lang), c->selColor, c->wallCustom, c->bgEffect);
 }
@@ -4956,6 +7209,46 @@ static std::string clean_name(const char *name, size_t len)
     }
     while (!out.empty() && (out[out.size() - 1] == ' ' || out[out.size() - 1] == '-')) out.erase(out.size() - 1);
     return out.empty() ? std::string(name, len) : out;
+}
+
+// Whether UsbN answers (a memory is plugged in there): a listing, or one that finds nothing.
+static int usb_present(int n)
+{
+    WIN32_FIND_DATAA fd;
+    char pattern[16];
+    HANDLE h;
+    DWORD err;
+    sprintf(pattern, "Usb%d:\\*", n);
+    h = FindFirstFileA(pattern, &fd);
+    if (h != INVALID_HANDLE_VALUE) { FindClose(h); return 1; }
+    err = GetLastError();
+    return err == ERROR_FILE_NOT_FOUND || err == ERROR_NO_MORE_FILES;
+}
+
+// The ROMs on a memory: its top and its folders, 3 deep (e.g. Usb1:\roms\n64\...).
+static void scan_rom_tree(const std::string &dir, int depth, std::vector<RomEntry> *out)
+{
+    WIN32_FIND_DATAA fd;
+    HANDLE f = FindFirstFileA((dir + "\\*").c_str(), &fd);
+    if (f == INVALID_HANDLE_VALUE) return;
+    do
+    {
+        const char *dot = strrchr(fd.cFileName, '.');
+        if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+        {
+            if (depth < 3 && out->size() < 4000) scan_rom_tree(dir + "\\" + fd.cFileName, depth + 1, out);
+            continue;
+        }
+        if (!dot || (_stricmp(dot, ".z64") && _stricmp(dot, ".n64") && _stricmp(dot, ".v64") && _stricmp(dot, ".zip"))) continue;
+        {
+            RomEntry e;
+            e.file = dir + "\\" + fd.cFileName;
+            e.shown = clean_name(fd.cFileName, dot - fd.cFileName);
+            out->push_back(e);
+        }
+    } while (FindNextFileA(f, &fd) && out->size() < 4000);
+    FindClose(f);
 }
 
 static void scan_roms(std::vector<RomEntry> *out)
@@ -5204,12 +7497,22 @@ static void cat_name(const GameCat *cat, char *out, size_t size)
 static int s_tab, s_tabGames;   // the tab shown, and how many games it has
 static int s_romsTotal;         // games in game:\roms\ (0: the "copy ROMs" screen, no tabs)
 
-static int tab_count(void) { cats_load(); return 2 + s_catCount; }
+// A USB memory plugged in while the ROM list is up, its games added (RomBrowser): its drive (UsbN), -1 none.
+static int s_usbMerged = -1;
+static int tab_count(void) { cats_load(); return 2 + s_catCount + (s_usbMerged >= 0 ? 1 : 0); }
+static int tab_is_usb(int tab) { return s_usbMerged >= 0 && tab == 2 + s_catCount; }
+static int rom_on_usb(const std::string &file)
+{
+    char pre[8];
+    sprintf(pre, "Usb%d:", s_usbMerged);
+    return s_usbMerged >= 0 && !_strnicmp(file.c_str(), pre, 5);
+}
 
 static void tab_name(int tab, char *out, size_t size)
 {
     if (tab == 0) _snprintf(out, size - 1, "%s", Tr(T_CAT_ALL));
     else if (tab == 1) _snprintf(out, size - 1, "%s", Tr(T_FAVORITES));
+    else if (tab_is_usb(tab)) _snprintf(out, size - 1, "%s", Tr(T_CAT_USB));
     else cat_name(&s_cats[tab - 2], out, size);
     out[size - 1] = 0;
 }
@@ -5220,9 +7523,10 @@ static void tab_filter(const std::vector<RomEntry> &all, std::vector<RomEntry> *
     size_t i;
     out->clear();
     if (s_tab < 0 || s_tab >= tab_count()) s_tab = 0;
-    if (s_tab >= 2) lib_load();
+    if (s_tab >= 2 && !tab_is_usb(s_tab)) lib_load();
     for (i = 0; i < all.size(); i++)
-        if (s_tab == 0 || (s_tab == 1 && fav_is(all[i].file)) || (s_tab >= 2 && game_in_cat(all[i].file, &s_cats[s_tab - 2])))
+        if (s_tab == 0 || (s_tab == 1 && fav_is(all[i].file)) || (tab_is_usb(s_tab) && rom_on_usb(all[i].file)) ||
+            (s_tab >= 2 && !tab_is_usb(s_tab) && game_in_cat(all[i].file, &s_cats[s_tab - 2])))
             out->push_back(all[i]);
     s_tabGames = (int)out->size();
 }
@@ -5573,22 +7877,6 @@ static void rom_details(const char *path, RomInfo *info)
     h64_rom_free(&rom);
 }
 
-// Up to two initials of a game's name ("Super Mario 64 (USA)" -> "SM") for its tile.
-static void initials(const char *name, char *out)
-{
-    int n = 0, start = 1;
-    for (; *name && n < 2; name++)
-    {
-        char c = *name;
-        if (c == '(' || c == '[') break;
-        if (start && ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')))
-            out[n++] = (c >= 'a' && c <= 'z') ? (char)(c - 32) : c;
-        start = c == ' ' || c == '-' || c == '_';
-    }
-    if (!n) out[n++] = '?';
-    out[n] = 0;
-}
-
 // The settings for all games, from the ROM list.
 static void settings_loop(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, int ctlTest)
 {
@@ -5647,6 +7935,23 @@ static void settings_loop(IDirect3DDevice9 *dev, Config *c, const char *settings
             UiInputInit(&in);
             continue;
         }
+        if (r == SET_ABOUT)
+        {
+            int row = m.sel;
+            AboutScreen(dev);   // Settings > About
+            m.sel = row;
+            UiInputInit(&in);
+            continue;
+        }
+        if (r == SET_EXPLORER)
+        {
+            // System > File explorer: only after the warning.
+            if (confirm_ask(dev, T_EXP_WARN_TITLE, T_EXP_WARN, T_FOOT_EXP_WARN)) FileExplorer(dev);
+            settings_system(&m, c);
+            m.sel = SYS_EXPLORER;
+            UiInputInit(&in);
+            continue;
+        }
         if (r == SET_WIZARD)
         {
             // System > Setup assistant: the first start's pages, kept at once.
@@ -5672,7 +7977,13 @@ static void settings_loop(IDirect3DDevice9 *dev, Config *c, const char *settings
         if (r == SET_ART_ASK)
         {
             // Box art downloads turned on only once confirmed (RomBrowser starts them when this page is left).
-            if (confirm_ask(dev, -1, T_ART_ASK, T_FOOT_ART_ASK)) c->artDownload = 1;
+            // From the Screenshots and logos row: the question names those (the box art comes with them).
+            const int extras = s_imagesPage && m.sel == IM_EXTRAS;
+            if ((extras ? confirm_ask(dev, T_ART_EXTRAS, T_ART_ASK_EXTRAS, T_FOOT_ART_ASK) : confirm_ask(dev, -1, T_ART_ASK, T_FOOT_ART_ASK)))
+            {
+                c->artDownload = 1;
+                if (extras) c->artExtras = 1;
+            }
             settings_values(&m, c);
             UiInputInit(&in);
             continue;
@@ -5699,10 +8010,12 @@ static void settings_loop(IDirect3DDevice9 *dev, Config *c, const char *settings
 // ---- Box art in the browser ----
 // The browser's copies of what xb_art.cpp sends (textures and text), by ROM
 // file; the least recently shown is dropped when the table is full. Room for
-// a covers grid's page and the two read ahead around it (3 x 15), so turning
-// to a page seen a moment ago shows it at once (400x232 textures: ~24 MB at
-// most, freed when a game starts).
-#define ART_VIEWS 64
+// a covers grid's page and the two read ahead around it (3 x 15 - big covers and
+// the carousel ask for more), so turning to a page seen a moment ago shows it at
+// once. 64 was less than some layouts ask for at once: covers were dropped and read
+// again while the pages were turned (slow with many ROMs). 400x232 textures: ~47 MB
+// at most, in the ROM list only (freed when a game starts).
+#define ART_VIEWS 128
 struct ArtView
 {
     int used;
@@ -5714,6 +8027,11 @@ struct ArtView
     int kind, kinds;    // the picture's ART_KIND_* asked for, and the ones there are of the game
     int shownKind;      // the one it shows (the box when that one is not there): only a box is drawn in 3D
     float coverAt;      // UiTime() when the cover arrived (its fade-in)
+    // The picture it showed before another kind of it came (RS, the automatic turns):
+    // kept a moment so the two cross-fade (view_cover), then released.
+    IDirect3DTexture9 *prev;
+    int prevW, prevH, prevBox;
+    float swapAt;
     DWORD lastUse;
 };
 static ArtView s_views[ART_VIEWS];
@@ -5723,7 +8041,35 @@ static void view_free(IDirect3DDevice9 *dev, ArtView *v)
 {
     if (v->cover) UiImageRelease(dev, v->cover);
     if (v->glow) UiImageRelease(dev, v->glow);
+    if (v->prev) UiImageRelease(dev, v->prev);
     memset(v, 0, sizeof(*v));
+}
+
+// A game's picture changing kind: the one before fades out, growing a little, while
+// the new one fades in from a little smaller (0 to 1 over VIEW_SWAP seconds).
+#define VIEW_SWAP 0.5f
+static float smooth01(float t);   // below
+static float view_swap(const ArtView *v)
+{
+    return v->prev ? smooth01((UiTime() - v->swapAt) / VIEW_SWAP) : 1.0f;
+}
+
+// A game's picture in a box of the layout (all but the card, which keeps each one's
+// own proportions), cross-fading from the one before while it changes.
+static void view_cover(const ArtView *v, float x, float y, float w, float h, float r, D3DCOLOR color)
+{
+    const float e = view_swap(v);
+    const int a = (int)(color >> 24);
+    const D3DCOLOR rgb = color & 0xFFFFFF;
+    if (e < 1.0f)
+    {
+        const float gw = w * 0.04f * e, gh = h * 0.04f * e, sw = w * 0.04f * (1.0f - e), sh = h * 0.04f * (1.0f - e);
+        // The old one stays nearly whole until the new one is well in (no dip in between).
+        cover_draw(v->prev, x - gw * 0.5f, y - gh * 0.5f, w + gw, h + gh, r, rgb | ((DWORD)(a * (1.0f - e * e)) << 24), v->prevBox);
+        cover_draw(v->cover, x + sw * 0.5f, y + sh * 0.5f, w - sw, h - sh, r, rgb | ((DWORD)(a * e) << 24), v->shownKind == ART_KIND_BOX);
+        return;
+    }
+    cover_draw(v->cover, x, y, w, h, r, color, v->shownKind == ART_KIND_BOX);
 }
 
 static ArtView *view_find(const char *path)
@@ -5742,9 +8088,20 @@ static ArtView *view_find(const char *path)
 static void views_take(IDirect3DDevice9 *dev)
 {
     ArtResult r;
-    while (ArtTake(&r))
+    int made = 0, i;
+    // The pictures cross-faded out: released.
+    for (i = 0; i < ART_VIEWS; i++)
+        if (s_views[i].prev && UiTime() - s_views[i].swapAt > VIEW_SWAP + 0.1f)
+        {
+            UiImageRelease(dev, s_views[i].prev);
+            s_views[i].prev = NULL;
+        }
+    // At most 3 new pictures a frame: a whole page (or three) arriving at once made
+    // dozens of textures in one frame - a visible hitch. The rest come next frames.
+    while (made < 3 && ArtTake(&r))
     {
         ArtView *v;
+        made++;
         if (r.kind != ArtKindFor(r.path))
         {
             // Read for the kind of picture shown before (Interface > Game images, the right stick): it is sent again.
@@ -5753,10 +8110,21 @@ static void views_take(IDirect3DDevice9 *dev)
         }
         v = view_find(r.path);
         float coverAt = UiTime();
+        IDirect3DTexture9 *prev = NULL;
+        int prevW = 0, prevH = 0, prevBox = 0;
         if (v)
         {
             // Newer files for a ROM already shown (a download finished): a cover it had does not fade in again.
-            if (v->cover && r.cover) coverAt = v->coverAt;
+            if (v->cover && (r.cover || r.dxt)) coverAt = v->coverAt;
+            // Another kind of its picture (RS, the automatic turns): the one shown kept to cross-fade from.
+            if (v->cover && (r.cover || r.dxt) && (r.kind != v->kind || r.shownKind != v->shownKind))
+            {
+                prev = v->cover;
+                prevW = v->coverW;
+                prevH = v->coverH;
+                prevBox = v->shownKind == ART_KIND_BOX;
+                v->cover = NULL;
+            }
             view_free(dev, v);
         }
         else
@@ -5781,17 +8149,81 @@ static void views_take(IDirect3DDevice9 *dev)
         v->kind = r.kind;
         v->kinds = r.kinds;
         v->shownKind = r.shownKind;
-        if (r.cover)
+        if (r.dxt || r.cover)
         {
-            v->cover = UiImageCreate(dev, r.cover, r.coverW, r.coverH);
+            // Compressed (the cover cache's): a straight copy, its padding cut off when drawn.
+            v->cover = r.dxt ? UiImageCreateDxt1(dev, r.dxt, r.dxtW, r.dxtH) : UiImageCreate(dev, r.cover, r.coverW, r.coverH);
             v->coverW = r.coverW;
             v->coverH = r.coverH;
         }
         if (r.glow) v->glow = UiImageCreate(dev, r.glow, ART_GLOW_W, ART_GLOW_H);
         v->coverAt = coverAt;
+        if (prev)
+        {
+            if (v->cover)
+            {
+                v->prev = prev;
+                v->prevW = prevW;
+                v->prevH = prevH;
+                v->prevBox = prevBox;
+                v->swapAt = UiTime();
+            }
+            else UiImageRelease(dev, prev);
+        }
         v->lastUse = ++s_viewClock;
         ArtResultFree(&r);
     }
+}
+
+// The menus' music volume, changed with RS up/down in the ROM list: a small bar at the
+// top that slides in, shows the level, and slides away after a moment.
+static float s_musicVolAt = -10.0f;
+#define VOLBAR_SHOW 3.0f    // seconds shown after the last change
+#define VOLBAR_SLIDE 0.3f   // sliding in and out
+
+// A volume step: the bar comes in, or - already in - stays put (each step restarting
+// its slide made it vanish and come back while the stick was held).
+static void music_volume_poke(void)
+{
+    float t = UiTime() - s_musicVolAt;
+    s_musicVolAt = t >= 0 && t < VOLBAR_SHOW + VOLBAR_SLIDE ? UiTime() - VOLBAR_SLIDE : UiTime();
+}
+
+static void music_volume_bar(int volume)
+{
+    const float showFor = VOLBAR_SHOW, slide = VOLBAR_SLIDE, w = 300, h = 46;
+    float t = UiTime() - s_musicVolAt, a, y;
+    char num[16];
+    if (t < 0 || t > showFor + slide) return;
+    a = t < slide ? t / slide : t > showFor ? 1.0f - (t - showFor) / slide : 1.0f;
+    a = a * a * (3.0f - 2.0f * a);
+    y = -h + (24 + h) * a;
+    UiShadow((UI_WIDTH - w) * 0.5f, y + 6, w, h, 14, 24, D3DCOLOR_ARGB((int)(120 * a), 0, 0, 0));
+    UiRoundRect((UI_WIDTH - w) * 0.5f, y, w, h, 14, D3DCOLOR_ARGB((int)(230 * a), 33, 35, 46), D3DCOLOR_ARGB((int)(230 * a), 27, 29, 38));
+    menu_icon(UI_ICON_MUSIC, (UI_WIDTH - w) * 0.5f + 28, y + h * 0.5f, UiAlpha(UI_COL_TEXT, a));
+    {
+        const float bx = (UI_WIDTH - w) * 0.5f + 54, bw = w - 54 - 70, by = y + h * 0.5f - 4;
+        UiRoundRect(bx, by, bw, 8, 4, D3DCOLOR_ARGB((int)(50 * a), 255, 255, 255), D3DCOLOR_ARGB((int)(35 * a), 255, 255, 255));
+        UiRoundRect(bx, by, bw * volume / 100.0f, 8, 4, UiAlpha(SEL_HI(255), a), UiAlpha(SEL_LO(255), a));
+    }
+    sprintf(num, "%d%%", volume);
+    UiText(UI_BOLD, 19, (UI_WIDTH + w) * 0.5f - 18, y + h * 0.5f, UiAlpha(UI_COL_TEXT, a), num, UI_RIGHT);
+}
+
+// "Downloading", discreet, bottom right over the footer: a picture is being fetched (any view).
+static void download_badge(void)
+{
+    const char *t = Tr(T_DOWNLOADING);
+    float tw = UiTextWidth(UI_BOLD, 17, t), w = tw + 56, h = 32, x = UI_WIDTH - UI_SAFE_X - w, y = 612;
+    int k;
+    UiRoundRect(x, y, w, h, 16, D3DCOLOR_ARGB(200, 33, 35, 46), D3DCOLOR_ARGB(200, 27, 29, 38));
+    UiRoundRing(x, y, w, h, 16, 1.0f, UI_COL_LINE);
+    for (k = 0; k < 3; k++)   // three dots taking turns
+    {
+        float on = fmodf(UiTime() * 2.0f - k * 0.33f, 1.0f);
+        UiCircle(x + 18 + k * 8, y + h * 0.5f, 2.5f, UiAlpha(SEL_HI(255), on < 0.5f ? 1.0f : 0.35f));
+    }
+    UiText(UI_BOLD, 17, x + w - 14, y + h * 0.5f, UI_COL_TEXT2, t, UI_RIGHT);
 }
 
 // The right stick, left or right, newly pushed (-1, 1; 0 none): the selected game's next picture.
@@ -5808,11 +8240,12 @@ static int right_stick_step(void)
 }
 
 // The selected game's picture in its next kind there is (box, a picture from the game, the title screen, the logo).
-static void art_step(const std::string &file, int dir)
+// 1 when it changed; `sound` 0 for the automatic turns (below).
+static int art_step(const std::string &file, int dir, int sound = 1)
 {
     const ArtView *v = view_find(file.c_str());
     int k, cur;
-    if (!v || !dir || !(v->kinds & (v->kinds - 1))) return;   // one picture or none: nothing to go through
+    if (!v || !dir || !(v->kinds & (v->kinds - 1))) return 0;   // one picture or none: nothing to go through
     cur = v->kind;
     for (k = 1; k < ART_KIND_COUNT; k++)
     {
@@ -5820,9 +8253,34 @@ static void art_step(const std::string &file, int dir)
         if (v->kinds & (1 << next))
         {
             ArtShowKind(file.c_str(), next == ArtGetKind() ? -1 : next);
-            xb_audio_ui_sound(dir > 0 ? XB_SFX_VALUE_UP : XB_SFX_VALUE_DOWN);
-            return;
+            if (sound) xb_audio_ui_sound(dir > 0 ? XB_SFX_VALUE_UP : XB_SFX_VALUE_DOWN);
+            return 1;
         }
+    }
+    return 0;
+}
+
+// Staying on a game: after 2 s its pictures take turns by themselves (box, a picture
+// from the game, the title screen, the logo - those there are), one every 2.5 s; the
+// game left goes back to its own picture (the one Interface > Game images shows).
+static void art_auto_turn(const std::string &file)
+{
+    static std::string at;
+    static float next;
+    static int turned;
+    const float now = UiTime();
+    if (file != at)
+    {
+        if (turned && !at.empty()) ArtShowKind(at.c_str(), -1);   // back to its own picture
+        at = file;
+        next = now + 2.0f;
+        turned = 0;
+        return;
+    }
+    if (!file.empty() && now >= next)
+    {
+        turned |= art_step(file, 1, 0);
+        next = now + 2.5f;
     }
 }
 
@@ -5831,6 +8289,9 @@ static void views_clear(IDirect3DDevice9 *dev)
     int i;
     for (i = 0; i < ART_VIEWS; i++)
         if (s_views[i].used) view_free(dev, &s_views[i]);
+    rec_free(&s_rec[0]);   // the wallpapers' recommendation: picked again in the list
+    rec_free(&s_rec[1]);
+    UiImageFlush(dev);   // freed now, not when the GPU is next looked at: a game may follow
     ArtForgetAll();
 }
 
@@ -5851,31 +8312,14 @@ static float smooth01(float t)
     return t * t * (3.0f - 2.0f * t);
 }
 
-// A colour pair picked from a game's name (the placeholder's gradient).
-static void name_colors(const char *name, D3DCOLOR *top, D3DCOLOR *bottom)
-{
-    static const D3DCOLOR tops[6] = { D3DCOLOR_ARGB(255, 240, 92, 66), D3DCOLOR_ARGB(255, 245, 150, 60), D3DCOLOR_ARGB(255, 150, 100, 235),
-                                      D3DCOLOR_ARGB(255, 70, 140, 240), D3DCOLOR_ARGB(255, 40, 180, 170), D3DCOLOR_ARGB(255, 110, 190, 80) };
-    static const D3DCOLOR bottoms[6] = { D3DCOLOR_ARGB(255, 150, 28, 30), D3DCOLOR_ARGB(255, 180, 70, 20), D3DCOLOR_ARGB(255, 80, 40, 150),
-                                         D3DCOLOR_ARGB(255, 30, 70, 160), D3DCOLOR_ARGB(255, 16, 100, 110), D3DCOLOR_ARGB(255, 40, 110, 50) };
-    u32 hsh = 2166136261u;
-    const char *p;
-    for (p = name; *p; p++) hsh = (hsh ^ (u8)*p) * 16777619u;
-    *top = tops[hsh % 6];
-    *bottom = bottoms[hsh % 6];
-}
-
-// The picture area when there is no box art: the name's gradient and its initials.
+// The picture area while a game's cover comes (or when it has none): a plain
+// dark tile, no initials nor colours of its own - the page keeps its shape.
 static void stage_placeholder(float x, float y, float w, float h, const char *name, float a)
 {
-    D3DCOLOR top, bottom;
-    char ini[4];
+    (void)name;
     if (a <= 0.01f) return;
-    name_colors(name, &top, &bottom);
-    initials(name, ini);
-    UiRoundRect(x, y, w, h, 16, UiAlpha(top, a * 0.85f), UiAlpha(bottom, a * 0.85f));
-    UiRoundRect(x + 2, y + 2, w - 4, h * 0.5f, 14, UiAlpha(D3DCOLOR_ARGB(30, 255, 255, 255), a), D3DCOLOR_ARGB(0, 255, 255, 255));
-    UiTextShadowed(UI_BOLD, 92, x + w * 0.5f, y + h * 0.5f, UiAlpha(D3DCOLOR_ARGB(235, 255, 255, 255), a), ini, UI_CENTER);
+    UiRoundRect(x, y, w, h, 16, UiAlpha(D3DCOLOR_ARGB(150, 38, 40, 52), a), UiAlpha(D3DCOLOR_ARGB(150, 30, 32, 42), a));
+    UiRoundRing(x, y, w, h, 16, 1.0f, UiAlpha(D3DCOLOR_ARGB(26, 255, 255, 255), a));
 }
 
 // A small rounded label ("Platform", "1-4 players"); returns its width.
@@ -5928,7 +8372,18 @@ static void card_draw(const char *shown, const RomInfo *ri, const ArtView *v, in
         cx = ix + (iw - cw) * 0.5f;
         cy = py + (CARD_PIC_H - chh) * 0.5f + (1.0f - ca) * 6.0f;
         UiShadow(cx, cy + 6, cw, chh, 12, 18, UiAlpha(D3DCOLOR_ARGB(140, 0, 0, 0), ca * a));
-        cover_draw(v->cover, cx, cy, cw, chh, 12, UiAlpha(D3DCOLOR_ARGB(255, 255, 255, 255), ca * a), v->shownKind == ART_KIND_BOX);
+        const float e = view_swap(v);
+        if (e < 1.0f)
+        {
+            // The picture before, in its own proportions, fading out as this one comes.
+            float pw = (float)v->prevW, ph = (float)v->prevH, pk = iw / pw, gk = 1.0f + 0.04f * e;
+            if (ph * pk > CARD_PIC_H) pk = CARD_PIC_H / ph;
+            pw *= pk * gk;
+            ph *= pk * gk;
+            cover_draw(v->prev, ix + (iw - pw) * 0.5f, py + (CARD_PIC_H - ph) * 0.5f, pw, ph, 12,
+                       UiAlpha(D3DCOLOR_ARGB(255, 255, 255, 255), ca * a * (1.0f - e * e)), v->prevBox);
+        }
+        cover_draw(v->cover, cx, cy, cw, chh, 12, UiAlpha(D3DCOLOR_ARGB(255, 255, 255, 255), ca * a * e), v->shownKind == ART_KIND_BOX);
         if (!s_cover3d || v->shownKind != ART_KIND_BOX) UiRoundRing(cx, cy, cw, chh, 12, 1.0f, UiAlpha(D3DCOLOR_ARGB(46, 255, 255, 255), ca * a));
     }
     // Which of its pictures this is, when it has more than one (RS: the next).
@@ -6970,16 +9425,23 @@ static void browser_draw(const std::vector<RomEntry> &roms, int sel, int top, in
     }
     else
     {
-        float sy = anim_step(&selAnim, listY + pad + (sel - top) * rowH, 0), textW = listW - 100;
+        float sy = anim_step(&selAnim, listY + pad + (sel - top) * rowH, 0), textW = listW - 180;
         selection_bar(listX + 10, sy + 1, listW - (n > rows ? 36 : 20), rowH - 2);
+        UiRoundRect(listX + 12, sy + 6, 4, rowH - 12, 2, SEL_HI(255), SEL_LO(255));   // an accent down its left edge
         for (i = 0; i < rows && top + i < n; i++)
         {
-            float cy = listY + pad + i * rowH + rowH * 0.5f;
+            // Each row: the game's small cover (its box, as the list's card shows it), the
+            // favourite star over its corner, the name, the year at the right.
+            const float cy = listY + pad + i * rowH + rowH * 0.5f, th = rowH - 10, tw = th * 400 / 232, thx = listX + 26;
+            const ArtView *rv = view_find(roms[top + i].file.c_str());
             int s = top + i == sel;
+            UiRoundRect(thx, cy - th * 0.5f, tw, th, 4, D3DCOLOR_ARGB(90, 30, 32, 42), D3DCOLOR_ARGB(90, 24, 26, 34));
+            if (rv && rv->cover) cover_draw(rv->cover, thx, cy - th * 0.5f, tw, th, 4, D3DCOLOR_ARGB(255, s ? 255 : 210, s ? 255 : 210, s ? 255 : 210), 0);
+            if (fav_is(roms[top + i].file)) fav_star(thx + tw - 2, cy - th * 0.5f + 3, 10, 1.0f);
             UiTextFit(s ? UI_BOLD : UI_REGULAR, 21, textW, roms[top + i].shown.c_str(), buf, sizeof(buf));
-            // The favourite star in its own column at the left, the names lined up after it.
-            if (fav_is(roms[top + i].file)) fav_star(listX + 34, cy, 13, 1.0f);
-            UiText(s ? UI_BOLD : UI_REGULAR, 21, listX + 56, cy, s ? UI_COL_TEXT : UI_COL_TEXT2, buf, UI_LEFT);
+            UiText(s ? UI_BOLD : UI_REGULAR, 21, thx + tw + 16, cy, s ? UI_COL_TEXT : UI_COL_TEXT2, buf, UI_LEFT);
+            if (rv && rv->hasInfo && rv->info.year[0])
+                UiText(UI_REGULAR, 16, listX + listW - (n > rows ? 32 : 20), cy, s ? UI_COL_TEXT2 : UI_COL_TEXT3, rv->info.year, UI_RIGHT);
         }
         if (n > rows)
         {
@@ -7024,11 +9486,13 @@ struct GridLayout
 };
 static const GridLayout s_gridCovers = { 5, 3, 70, 110, 215, 125, 16, 16, 20 };
 static const GridLayout s_gridBig = { 3, 2, 70, 110, 360, 209, 19, 30, 26 };
+// BD_MOSAIC: 7 x 4, 28 covers 150 wide - the last row ends at 610.
+static const GridLayout s_gridMosaic = { 7, 4, 70, 110, 150, 87, 14, 14, 8 };
 #define GRID_LABEL_GAP 6.0f
 #define GRID_LABEL_H 24.0f
 #define GRID_SLIDE 120.0f   // how far a page slides as it changes (fading as it goes)
 
-static const GridLayout *grid_layout(int design) { return design == BD_BIG ? &s_gridBig : &s_gridCovers; }
+static const GridLayout *grid_layout(int design) { return design == BD_BIG ? &s_gridBig : design == BD_MOSAIC ? &s_gridMosaic : &s_gridCovers; }
 static int grid_per_page(const GridLayout *g) { return g->cols * g->rows; }
 static float grid_col_x(const GridLayout *g, int col) { return g->x + col * (g->tileW + g->colGap); }
 static float grid_row_y(const GridLayout *g, int row) { return g->y + row * (g->imgH + GRID_LABEL_GAP + GRID_LABEL_H + g->rowGap); }
@@ -7065,7 +9529,8 @@ static void browser_draw_covers(const std::vector<RomEntry> &roms, int sel, int 
         int restart = lastG != g, pg, sc = (sel - page * perPage) % g->cols, sr = (sel - page * perPage) / g->cols;
         float pp, a = selection_pulse(), selFade, rx, ry;
         lastG = g;
-        pp = anim_step_rate(&pageAnim, (float)page, restart || fabsf(pageAnim.value - page) > 1.0f, 9.0f, 0.002f);
+        // A little slower than the rest (6, was 9): the covers of the page coming in have time to arrive.
+        pp = anim_step_rate(&pageAnim, (float)page, restart || fabsf(pageAnim.value - page) > 1.0f, 6.0f, 0.002f);
         selFade = 1.0f - fabsf(page - pp);
         rx = anim_step_rate(&ringX, grid_col_x(g, sc), restart, 14.0f, 0.25f);
         ry = anim_step_rate(&ringY, grid_row_y(g, sr) + (page - pp) * GRID_SLIDE, restart, 14.0f, 0.25f);
@@ -7086,7 +9551,7 @@ static void browser_draw_covers(const std::vector<RomEntry> &roms, int sel, int 
                 const ArtView *v = view_find(roms[idx].file.c_str());
                 char fit[96];
                 UiRoundRect(cx, cy, g->tileW, g->imgH, 12, UiAlpha(D3DCOLOR_ARGB(255, 22, 23, 31), fade), UiAlpha(D3DCOLOR_ARGB(255, 16, 17, 23), fade));
-                if (v && v->cover) cover_draw(v->cover, cx, cy, g->tileW, g->imgH, 12, D3DCOLOR_ARGB((int)(255 * fade), 255, 255, 255), v->shownKind == ART_KIND_BOX);
+                if (v && v->cover) view_cover(v, cx, cy, g->tileW, g->imgH, 12, D3DCOLOR_ARGB((int)(255 * fade), 255, 255, 255));
                 else stage_placeholder(cx, cy, g->tileW, g->imgH, roms[idx].shown.c_str(), fade);
                 if (fav_is(roms[idx].file))
                 {
@@ -7114,6 +9579,8 @@ static void browser_draw_covers(const std::vector<RomEntry> &roms, int sel, int 
 #define CAR_GAP 6.0f                       // between a cover and its reflection
 #define CAR_SPREAD 4                       // covers shown on each side
 
+static void browser_draw_spotlight(const std::vector<RomEntry> &roms, int sel);   // below
+
 static void browser_draw_carousel(const std::vector<RomEntry> &roms, int sel)
 {
     static UiAnim pos;
@@ -7127,7 +9594,7 @@ static void browser_draw_carousel(const std::vector<RomEntry> &roms, int sel)
     sprintf(buf, "%d / %d", sel + 1, n);
     UiText(UI_REGULAR, 19, UI_WIDTH - UI_SAFE_X, 64, UI_COL_TEXT2, buf, UI_RIGHT);
     // The row glides; only a long jump (round the end of the list) cuts straight there.
-    p = anim_step_rate(&pos, (float)sel, !pos.live || fabsf(pos.value - sel) > 3 * CAR_SPREAD, 9.0f, 0.002f);
+    p = anim_step_rate(&pos, (float)sel, !pos.live || fabsf(pos.value - sel) > 3 * CAR_SPREAD, 6.0f, 0.002f);   // as the grid's pages
     {
         // Behind the middle cover, as the selection changes: a soft flash and a ring opening out, a few
         // streaks of light going the way the row moves - where the selection went, at a glance.
@@ -7189,7 +9656,7 @@ static void browser_draw_carousel(const std::vector<RomEntry> &roms, int sel)
             UiRoundRect(x, y, w, h, 12, UiAlpha(D3DCOLOR_ARGB(255, 22, 23, 31), alpha), UiAlpha(D3DCOLOR_ARGB(255, 16, 17, 23), alpha));
         if (v && v->cover)
         {
-            cover_draw(v->cover, x, y, w, h, 12, D3DCOLOR_ARGB((int)(255 * alpha), tint, tint, tint), v->shownKind == ART_KIND_BOX);
+            view_cover(v, x, y, w, h, 12, D3DCOLOR_ARGB((int)(255 * alpha), tint, tint, tint));
             UiImageMirror(v->cover, x, CAR_FLOOR + CAR_GAP, w, h, 12, 0.5f,
                           D3DCOLOR_ARGB((int)(110 * alpha), tint, tint, tint), D3DCOLOR_ARGB(0, tint, tint, tint));
         }
@@ -7206,6 +9673,74 @@ static void browser_draw_carousel(const std::vector<RomEntry> &roms, int sel)
         UiTextFit(UI_BOLD, 36, UI_WIDTH - 2 * UI_SAFE_X - 60, roms[sel].shown.c_str(), fit, sizeof(fit));
         tw = UiTextShadowed(UI_BOLD, 36, UI_WIDTH * 0.5f, ty, UI_COL_TEXT, fit, UI_CENTER);
         if (fav_is(roms[sel].file)) fav_star(UI_WIDTH * 0.5f - tw * 0.5f - 30, ty, 22, 1.0f);   // a favourite: its star before the name
+    }
+    UiScreenFooter(Tr(T_FOOT_BROWSER));
+}
+
+// ---- Spotlight: the selection big (its cover, name, facts and a few lines
+// about it) over a row of the games around it, gliding as the selection moves.
+#define SPOT_TW 150.0f
+#define SPOT_TH 87.0f
+#define SPOT_GAP 16.0f
+#define SPOT_ROW_Y 500.0f
+static void browser_draw_spotlight(const std::vector<RomEntry> &roms, int sel)
+{
+    static UiAnim pos;
+    static int lastSel = -1;
+    static float changedAt = -10.0f;
+    const int n = (int)roms.size();
+    const ArtView *v = n ? view_find(roms[sel].file.c_str()) : NULL;
+    const H64GameInfo *gi = v && v->hasInfo && v->info.found ? &v->info : NULL;
+    const float cx = 70, cy = 112, cw = 520, ch = cw * 232 / 400, tx = cx + cw + 44, tw = UI_WIDTH - UI_SAFE_X - tx;
+    float p, a = selection_pulse(), fade, ty;
+    char buf[200];
+    int i;
+    UiBackdrop();
+    browser_effect();
+    UiBrand(UI_SAFE_X, 72, BRAND_SIZE);
+    browser_tabs(UI_WIDTH * 0.5f, 72, 1, 520);
+    sprintf(buf, "%d / %d", sel + 1, n);
+    UiText(UI_REGULAR, 19, UI_WIDTH - UI_SAFE_X, 64, UI_COL_TEXT2, buf, UI_RIGHT);
+    if (!n) { UiScreenFooter(Tr(T_FOOT_BROWSER)); return; }
+    if (sel != lastSel) { lastSel = sel; changedAt = UiTime(); }
+    fade = smooth01((UiTime() - changedAt) / 0.25f);   // the big part fades in as the selection changes
+    // The big cover, glowing.
+    selection_glow(cx - 6, cy - 6, cw + 12, ch + 12, 18, a * fade);
+    UiRoundRect(cx, cy, cw, ch, 16, D3DCOLOR_ARGB(255, 22, 23, 31), D3DCOLOR_ARGB(255, 16, 17, 23));
+    if (v && v->cover) view_cover(v, cx, cy, cw, ch, 16, D3DCOLOR_ARGB((int)(255 * fade), 255, 255, 255));
+    else stage_placeholder(cx, cy, cw, ch, roms[sel].shown.c_str(), 1.0f);
+    // Its name, facts and description at the right.
+    ty = cy + 18;
+    ty += paragraph(UI_BOLD, 34, tx, ty, tw, 2, UiAlpha(UI_COL_TEXT, fade), gi && gi->title[0] ? gi->title : roms[sel].shown.c_str()) + 10;
+    if (fav_is(roms[sel].file)) fav_star(tx + 12, ty + 4, 18, fade);
+    if (gi)
+    {
+        _snprintf(buf, sizeof(buf) - 1, "%s%s%s%s%s", gi->year, gi->year[0] && gi->genre[0] ? "  -  " : "", gi->genre,
+                  (gi->year[0] || gi->genre[0]) && gi->developer[0] ? "  -  " : "", gi->developer);
+        buf[sizeof(buf) - 1] = 0;
+        UiText(UI_REGULAR, 19, tx + (fav_is(roms[sel].file) ? 32 : 0), ty + 4, UiAlpha(UI_COL_TEXT2, fade), buf, UI_LEFT);
+        ty += 40;
+        if (gi->description[0]) paragraph(UI_REGULAR, 19, tx, ty, tw, 8, UiAlpha(UI_COL_TEXT2, fade), gi->description);
+    }
+    // The row: the games around the selection, gliding (a long jump cuts straight there).
+    p = anim_step_rate(&pos, (float)sel, !pos.live || fabsf(pos.value - sel) > 8, 9.0f, 0.002f);
+    for (i = (int)floorf(p) - 5; i <= (int)ceilf(p) + 5; i++)
+    {
+        float d = i - p, x = UI_WIDTH * 0.5f - SPOT_TW * 0.5f + d * (SPOT_TW + SPOT_GAP), y = SPOT_ROW_Y, al;
+        const ArtView *rv;
+        int s = i == sel;
+        if (i < 0 || i >= n || x + SPOT_TW < 0 || x > UI_WIDTH) continue;
+        al = 1.0f - fabsf(d) * 0.13f;
+        if (al <= 0.05f) continue;
+        rv = view_find(roms[i].file.c_str());
+        if (s)
+        {
+            selection_glow(x - 5, y - 5, SPOT_TW + 10, SPOT_TH + 10, 12, a);
+            UiRoundRing(x - 5, y - 5, SPOT_TW + 10, SPOT_TH + 10, 12, 3.0f, SEL_RING(a));
+        }
+        UiRoundRect(x, y, SPOT_TW, SPOT_TH, 10, UiAlpha(D3DCOLOR_ARGB(255, 22, 23, 31), al), UiAlpha(D3DCOLOR_ARGB(255, 16, 17, 23), al));
+        if (rv && rv->cover) view_cover(rv, x, y, SPOT_TW, SPOT_TH, 10, D3DCOLOR_ARGB((int)(255 * al), s ? 255 : 200, s ? 255 : 200, s ? 255 : 200));
+        else stage_placeholder(x, y, SPOT_TW, SPOT_TH, roms[i].shown.c_str(), al);
     }
     UiScreenFooter(Tr(T_FOOT_BROWSER));
 }
@@ -7304,7 +9839,7 @@ static void cover_detail_draw(const RomEntry *rom, const RomInfo *ri, const ArtV
         UiRoundRing(boxX - 4, boxY - 4, boxW + 8, boxH + 8, 18, 3.0f, SEL_RING(a));
     }
     UiRoundRect(boxX, boxY, boxW, boxH, 16, D3DCOLOR_ARGB(255, 22, 23, 31), D3DCOLOR_ARGB(255, 16, 17, 23));
-    if (v && v->cover) cover_draw(v->cover, boxX, boxY, boxW, boxH, 16, D3DCOLOR_ARGB(255, 255, 255, 255), v->shownKind == ART_KIND_BOX);
+    if (v && v->cover) view_cover(v, boxX, boxY, boxW, boxH, 16, D3DCOLOR_ARGB(255, 255, 255, 255));
     else stage_placeholder(boxX, boxY, boxW, boxH, rom->shown.c_str(), 1.0f);
 
     UiText(UI_BOLD, 28, textX, boxY, UI_COL_TEXT, titleBuf, UI_LEFT);
@@ -7360,6 +9895,7 @@ static int cover_detail_screen(IDirect3DDevice9 *dev, const std::vector<RomEntry
         dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
         UiBegin(dev);
         if (design == BD_CAROUSEL) browser_draw_carousel(roms, sel);
+        else if (design == BD_SPOTLIGHT) browser_draw_spotlight(roms, sel);
         else browser_draw_covers(roms, sel, page, grid_layout(design));
         cover_detail_draw(rom, &ri, view_find(rom->file.c_str()), (UiTime() - openAt) / DETAIL_OPEN_S);
         UiEnd();
@@ -7401,6 +9937,7 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
     char newVersion[32], msg[256], drive[16];
     DWORD msgAt = 0, demoAt = GetTickCount(), idleAt = GetTickCount();
     float selAt = 0;
+    float viewAt = -10.0f;   // when B changed the view (its fade-in)
     msg[0] = 0;
     // Every folder of Settings > Paths, there to be filled from the first start on; the ROMs' read from its own.
     paths_apply(c);
@@ -7408,12 +9945,15 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
     scan_roms(&allRoms);
     s_romsTotal = (int)allRoms.size();
     for (i = 0; i < (int)allRoms.size(); i++) allPaths.push_back(allRoms[i].file.c_str());
+    s_recPaths.clear();   // the wallpapers' recommendations come from these
+    for (i = 0; i < (int)allRoms.size(); i++) s_recPaths.push_back(allRoms[i].file);
     roms = allRoms;   // the tab is applied once the box art (game information) is reachable, below
     for (i = 0; i < (int)roms.size(); i++)
     {
         paths.push_back(roms[i].file.c_str());
         if (!_stricmp(roms[i].file.c_str(), c->lastRom)) sel = i;
     }
+    if (!s_booted && c->intro && !s_splashShown) wiz_splash(dev);   // Interface > Welcome intro: the LAIKA 64 logo
     if (!s_booted)
     {
         // Settings > System > Game at start: the last game played, or the one
@@ -7460,8 +10000,9 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
     if (!settingsPath[i] || !i) strcpy(drive, "game");
     ArtSetKind(art_kind_of(c));
     ArtStart(drive);
-    ArtSetLang(LangCode(LangGet()));   // the games' descriptions in the menus' language
+    ArtSetLang(art_lang(c));   // the games' descriptions in the menus' language
     ArtSetNetwork(c->artDownload && art_net_possible(c));
+    ArtSetExtras(c->artExtras);
     ArtPause(0);
     strncpy(s_libDrive, drive, sizeof(s_libDrive) - 1);   // favourites and categories: <drive>:\config\ too
     if (s_tab)
@@ -7479,7 +10020,7 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
         page = roms.empty() ? 0 : sel / grid_per_page(grid_layout(c->browserDesign));
     }
     else s_tabGames = (int)roms.size();
-    UiSetSkinWant(c->skinName);
+    UiSetSkinWant("");   // Skins are gone (Interface): an old choice in the file stays unused
     // The sound settings of config\settings.ini (main.cpp read only harissa64v2.ini's at start):
     // before the music starts, so it starts at its own volume.
     xb_audio_set_game_volume(c->volumeGame);
@@ -7505,6 +10046,86 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
         WORD down = UiInputPoll(&in);
         ArtStatus st;
         int n = (int)roms.size();
+        {
+            // USB memories, every 2 s: one plugged in asks whether to add its games (and
+            // gets the USB tab); taken out, its games and the tab go. Those there at the
+            // start count as there.
+            static int usbMask = -1;
+            static DWORD usbAt;
+            if (!c->xenia && GetTickCount() - usbAt >= 2000)
+            {
+                int k, now = 0;
+                usbAt = GetTickCount();
+                for (k = 0; k < 3; k++)
+                    if (usb_present(k)) now |= 1 << k;
+                if (usbMask < 0) usbMask = now;
+                for (k = 0; k < 3; k++)
+                {
+                    int bit = 1 << k;
+                    if ((now & bit) && !(usbMask & bit))
+                    {
+                        H64_INFO("[menu] memory plugged in: Usb%d", k);
+                        xb_audio_ui_sound(XB_SFX_NOTIFY);
+                        if (s_usbMerged < 0 && confirm_ask(dev, T_USB_FOUND, T_USB_SCAN_ASK, T_FOOT_USB))
+                        {
+                            std::vector<RomEntry> add;
+                            std::string keep = n ? roms[sel].file : std::string();
+                            char drv[8];
+                            size_t j;
+                            sprintf(drv, "Usb%d:", k);
+                            scan_rom_tree(drv, 0, &add);
+                            s_usbMerged = k;
+                            for (j = 0; j < add.size(); j++) allRoms.push_back(add[j]);
+                            std::sort(allRoms.begin(), allRoms.end(), rom_less);
+                            allPaths.clear();
+                            for (j = 0; j < allRoms.size(); j++) allPaths.push_back(allRoms[j].file.c_str());
+                            s_romsTotal = (int)allRoms.size();
+                            sel = browser_retab(allRoms, &roms, &paths, keep);
+                            n = (int)roms.size();
+                            _snprintf(msg, sizeof(msg) - 1, Tr(T_USB_ADDED), (int)add.size());
+                            msg[sizeof(msg) - 1] = 0;
+                            H64_INFO("[menu] Usb%d: %d game(s) added", k, (int)add.size());
+                        }
+                        else
+                            _snprintf(msg, sizeof(msg) - 1, "%s", Tr(T_USB_FOUND));
+                        msg[sizeof(msg) - 1] = 0;
+                        msgAt = GetTickCount();
+                        UiInputInit(&in);
+                        down = 0;
+                    }
+                    if (!(now & bit) && (usbMask & bit))
+                    {
+                        H64_INFO("[menu] memory taken out: Usb%d", k);
+                        if (s_usbMerged == k)
+                        {
+                            std::string keep = n ? roms[sel].file : std::string();
+                            size_t j;
+                            std::vector<RomEntry> left;
+                            if (tab_is_usb(s_tab)) s_tab = 0;
+                            for (j = 0; j < allRoms.size(); j++)
+                                if (!rom_on_usb(allRoms[j].file)) left.push_back(allRoms[j]);
+                            s_usbMerged = -1;
+                            allRoms = left;
+                            allPaths.clear();
+                            for (j = 0; j < allRoms.size(); j++) allPaths.push_back(allRoms[j].file.c_str());
+                            s_romsTotal = (int)allRoms.size();
+                            sel = browser_retab(allRoms, &roms, &paths, keep);
+                            n = (int)roms.size();
+                        }
+                        strcpy(msg, Tr(T_USB_REMOVED));
+                        msgAt = GetTickCount();
+                        xb_audio_ui_sound(XB_SFX_NOTIFY);
+                    }
+                }
+                if (now != usbMask)
+                {
+                    usbMask = now;
+                    top = sel >= rows ? sel - rows + 1 : 0;
+                    page = n ? sel / grid_per_page(grid_layout(c->browserDesign)) : 0;
+                    lastSel = detailsFor = -1;   // the pictures and the card asked for again
+                }
+            }
+        }
         // The screen saver, after Config::saverTime minutes without any input.
         if (down || saver_any_input()) idleAt = GetTickCount();
         else if (c->saverMode > SAVER_OFF && c->saverMode < SAVER_COUNT && c->browserDemo <= 0 &&
@@ -7526,6 +10147,34 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
         if (ArtTakeNote(msg, sizeof(msg))) { msgAt = GetTickCount(); xb_audio_ui_sound(XB_SFX_NOTIFY); }
         if (BatteryCheck(c, msg, sizeof(msg))) { msgAt = GetTickCount(); xb_audio_ui_sound(XB_SFX_NOTIFY); }
         if (n) art_step(roms[sel].file, right_stick_step());   // RS: the selected game's next picture, in every view
+        art_auto_turn(n ? roms[sel].file : std::string());     // and by itself after a moment on it
+        {
+            // RS up and down: the menus' music volume, 2 % a step while held; kept when the stick is let go.
+            static DWORD stepAt;
+            static int changed;
+            XINPUT_STATE ps;
+            int ry = 0, rx = 0;
+            if (XInputGetState(0, &ps) == ERROR_SUCCESS) { ry = ps.Gamepad.sThumbRY; rx = ps.Gamepad.sThumbRX; }
+            if ((ry > 20000 || ry < -20000) && abs(ry) > abs(rx))
+            {
+                DWORD now = GetTickCount();
+                if (now - stepAt >= 70)
+                {
+                    c->volumeMusic += ry > 0 ? 2 : -2;
+                    if (c->volumeMusic < 0) c->volumeMusic = 0;
+                    if (c->volumeMusic > 100) c->volumeMusic = 100;
+                    xb_audio_set_music_volume(c->volumeMusic);
+                    music_volume_poke();
+                    stepAt = now;
+                    changed = 1;
+                }
+            }
+            else if (changed)
+            {
+                changed = 0;
+                ConfigWriteMenuKeys(c, settingsPath, 1);
+            }
+        }
         if ((down & XINPUT_GAMEPAD_BACK) && confirm_quit(dev))
         {
             views_clear(dev);
@@ -7565,11 +10214,17 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
                 if (detailsFor != sel) { rom_details(roms[sel].file.c_str(), &details); detailsFor = sel; }
                 if (sel != lastSel)
                 {
-                    // The selection first, then its neighbours (read ahead from the files already there).
-                    const char *want[5];
+                    // The selection first, then every row shown (each has its small cover now),
+                    // then a row either side read ahead.
+                    const char *want[64];
                     int k, cnt = 0;
-                    static const int order[5] = { 0, 1, -1, 2, -2 };
-                    for (k = 0; k < 5 && k < n; k++) want[cnt++] = paths[(sel + order[k] + n * 2) % n];
+                    want[cnt++] = paths[sel];
+                    for (k = -1; k <= rows && cnt < 64; k++)
+                    {
+                        int idx = top + k;
+                        if (idx < 0 || idx >= n || idx == sel) continue;
+                        want[cnt++] = paths[idx];
+                    }
                     ArtWant(want, cnt);
                     selAt = UiTime();
                     lastSel = sel;
@@ -7582,7 +10237,7 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
                 // opens the enlarged screen; only a Play there (not just opening it)
                 // launches, same side effects as the list's A press, kept in one place.
                 const GridLayout *g = grid_layout(c->browserDesign);
-                const int perPage = grid_per_page(g), carousel = c->browserDesign == BD_CAROUSEL;
+                const int perPage = grid_per_page(g), carousel = design_row(c->browserDesign);
                 if (carousel)
                 {
                     if (down & XINPUT_GAMEPAD_DPAD_LEFT) sel = (sel + n - 1) % n;
@@ -7686,9 +10341,9 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
                 }
             }
         }
-        if ((down & XINPUT_GAMEPAD_B) && n)
+        if ((down & XINPUT_GAMEPAD_X) && n)
         {
-            // B: the selected game in or out of the favourites (on the Favourites tab: out of the list).
+            // X: the selected game in or out of the favourites (on the Favourites tab: out of the list).
             int now = fav_toggle(roms[sel].file);
             xb_audio_ui_sound_instead(now ? XB_SFX_FAV_ON : XB_SFX_FAV_OFF);
             strncpy(msg, Tr(now ? T_FAV_ADDED : T_FAV_REMOVED), sizeof(msg) - 1);
@@ -7724,7 +10379,7 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
                 }
             }
             detailsFor = -1;   // the card's texts again (the language may have changed)
-            ArtSetLang(LangCode(LangGet()));   // the language may have changed: the descriptions follow it
+            ArtSetLang(art_lang(c));   // the language may have changed: the descriptions follow it
             if (ArtGetKind() != art_kind_of(c))
             {
                 // Another kind of picture (Interface > Game images): every view read again in it.
@@ -7732,6 +10387,7 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
                 ArtSetKind(art_kind_of(c));
             }
             ArtSetNetwork(c->artDownload && art_net_possible(c));
+            ArtSetExtras(c->artExtras);
             if (!artWas && c->artDownload && !allRoms.empty() && art_net_possible(c)) ArtBulkStart(&allPaths[0], (int)allPaths.size(), 0);   // downloads just turned on
             // The categories may have changed: the tab again (or "every game" if its category went).
             sel = browser_retab(allRoms, &roms, &paths, keep);
@@ -7746,10 +10402,11 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
             AboutScreen(dev);   // no ROMs: no view to change, X keeps the About page (FOOT_BROWSER_EMPTY)
             UiInputInit(&in);
         }
-        else if (down & XINPUT_GAMEPAD_X)
+        else if ((down & XINPUT_GAMEPAD_B) && s_romsTotal)
         {
-            // "Interface view": the next layout (list, covers, big covers, carousel; Interfaz > Diseño), kept at once.
+            // B, "Interface view": the next layout (list, covers, big covers, carousel; Interfaz > Diseño), kept at once.
             c->browserDesign = (c->browserDesign + 1) % BD_COUNT;
+            viewAt = UiTime();   // it fades in (browser_view_veil), the covers arriving meanwhile
             ConfigWriteMenuKeys(c, settingsPath, 1);
             page = n ? sel / grid_per_page(grid_layout(c->browserDesign)) : 0;
             if (sel < top || sel >= top + rows) top = sel >= rows ? sel - rows + 1 : 0;
@@ -7781,8 +10438,23 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
                          n && !_stricmp(st.busyPath, roms[sel].file.c_str()), selAt, &st);
         else if (c->browserDesign == BD_CAROUSEL)
             browser_draw_carousel(roms, sel);
+        else if (c->browserDesign == BD_SPOTLIGHT)
+            browser_draw_spotlight(roms, sel);
         else
             browser_draw_covers(roms, sel, page, grid_layout(c->browserDesign));
+        {
+            // Another view: it comes in under a veil that lifts slowly (0.9 s), so the
+            // covers it asks for have time to arrive instead of popping in one by one.
+            float t = (UiTime() - viewAt) / 0.9f;
+            if (t >= 0.0f && t < 1.0f)
+            {
+                float a = 1.0f - t * t * (3.0f - 2.0f * t);
+                UiRect(0, 0, UI_WIDTH, UI_HEIGHT, UiAlpha(UI_COL_BG_BOTTOM, a));
+            }
+        }
+        if (st.busyPath[0] && (c->browserDesign != BD_LIST || !n || _stricmp(st.busyPath, roms[sel].file.c_str())))
+            download_badge();   // the list's card says it for the selection; the rest of the views here
+        music_volume_bar(c->volumeMusic);
         if (msg[0])
         {
             DWORD age = GetTickCount() - msgAt;

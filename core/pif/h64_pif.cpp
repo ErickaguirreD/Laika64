@@ -115,7 +115,12 @@ static void joybus_command(H64System *sys, int channel, const u8 *tx, int txLen,
     {
         const H64Pad *p = &sys->pad[channel];
         int pak = channel == 0 && sys->save->pak;
-        int rumble = !pak && (sys->rumblePaks & (1u << channel)) != 0;
+        // With both, port 1 holds a pak that is both at once: the Controller Pak's
+        // memory below 0x8000, the Rumble Pak's (0x80 identification, motor at
+        // 0xC000) from there up. Quake 64 / Quake II save to the Controller Pak and
+        // vibrate too: with only one of them in, they asked for the other.
+        int rumble = (sys->rumblePaks & (1u << channel)) != 0;
+        u32 at = txLen >= 3 ? ((u32)tx[1] << 8 | tx[2]) & 0xFFE0u : 0;
         switch (tx[0])
         {
         case 0x00:   // info
@@ -125,7 +130,7 @@ static void joybus_command(H64System *sys, int channel, const u8 *tx, int txLen,
             return;
         case 0x02:   // pak read
         case 0x03:   // pak write
-            if (pak && h64_save_pak_command(sys->save, tx, txLen, rx, rxLen) >= 0) return;
+            if (pak && !(rumble && at >= 0x8000) && h64_save_pak_command(sys->save, tx, txLen, rx, rxLen) >= 0) return;
             if (rumble && rumble_command(sys, channel, tx, txLen, rx, rxLen)) return;
             break;
         case 0x01:   // buttons and stick

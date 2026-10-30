@@ -25,6 +25,32 @@ static int parse_one_source(const char *text)
     return -1;
 }
 
+// The internal resolutions. The N64 target and its depth must fit the EDRAM
+// beside the back buffer and the copy-back target (h64_xenos.cpp): about 904
+// tiles of 80x16 each, so 1120x840 and 1366x768 are the largest.
+static const u16 s_res43[][2] = { { 320, 240 }, { 480, 360 }, { 640, 480 }, { 800, 600 }, { 960, 720 }, { 1024, 768 }, { 1120, 840 } };
+static const u16 s_res169[][2] = { { 432, 240 }, { 640, 360 }, { 848, 480 }, { 1280, 720 }, { 1366, 768 } };
+
+int ConfigResCount(int wide)
+{
+    return wide ? (int)(sizeof(s_res169) / sizeof(s_res169[0])) : (int)(sizeof(s_res43) / sizeof(s_res43[0]));
+}
+
+void ConfigResSize(int wide, int index, u32 *w, u32 *h)
+{
+    const u16 (*t)[2] = wide ? s_res169 : s_res43;
+    int n = ConfigResCount(wide);
+    if (index < 0 || index >= n) index = wide ? 3 : 4;
+    *w = t[index][0];
+    *h = t[index][1];
+}
+
+void ConfigResCurrent(const Config *c, u32 *w, u32 *h, int *wide)
+{
+    *wide = c->resWide != 0;
+    ConfigResSize(*wide, *wide ? c->res169 : c->res43, w, h);
+}
+
 void ConfigDefaults(Config *c)
 {
     strcpy(c->mode, "play");
@@ -39,11 +65,12 @@ void ConfigDefaults(Config *c)
     c->perfBox = 75;
     c->perfFahrenheit = 0;
     c->artKind = 0;
-    c->uiFont = 0;
+    c->uiFont = 1;   // Roboto
     memset(c->path, 0, sizeof(c->path));
     c->colorStyle = 0;
     c->updateCheck = 0;   // off by default while the GitHub repo's name/URL is still in flux (LAIKA 64 rebrand)
     c->artDownload = 1;
+    c->artExtras = 1;
     c->browserDemo = 0;
     c->browserSel[0] = 0;
     c->artAll = 0;
@@ -66,7 +93,7 @@ void ConfigDefaults(Config *c)
     c->lang[0] = 0;
     c->uiLang[0] = 0;
     c->langPick = 0;
-    c->rumble = 1;
+    c->rumble = 100;
     c->padLoss = PADLOSS_OFF;
     c->autoSaveSlot = 9;
     c->batteryWarn = 0;
@@ -75,7 +102,7 @@ void ConfigDefaults(Config *c)
     c->startRom[0] = 0;
     c->shotBtn1 = c->shotBtn2 = -1;
     c->browserDesign = 0;
-    c->bgEffect = 1;   // the waves
+    c->bgEffect = 18;   // the nebula (BGFX_NEBULA): what the setup assistant shows
     c->fxColor[0] = c->fxColor[1] = c->fxColor[2] = 0;   // the effect's own colours
     c->fxOpacity = 100;
     c->fxSpeed = 100;
@@ -92,7 +119,12 @@ void ConfigDefaults(Config *c)
     c->borderOpacity = 100;
     c->borderWidth = 1;
     c->borderGlow = 0;
-    c->panelOpacity = 70;
+    c->panelOpacity = 30;
+    c->panelColor = 0;
+    c->intro = 1;
+    c->settingsView = 1;   // big icons
+    c->brightLevel = -1;
+    c->sharpLevel = c->blurLevel = -1;
     c->panelRound = 2;
     c->saverMode = 0;
     c->saverTime = 5;
@@ -101,8 +133,9 @@ void ConfigDefaults(Config *c)
     c->volumeMusic = 100;
     c->volumeSfx = 100;
     c->audioMono = 0;
-    c->musicMode = 0;
-    c->musicTrack[0] = 0;
+    // LAIKA 64's own piece (the assistant's, also in music\): over and over, until another is chosen.
+    c->musicMode = 2;   // XB_MUSIC_TRACK
+    strcpy(c->musicTrack, "laika_orbit.mp3");
     c->langAuto = 0;
     c->fpuFlags = 1;
     c->jitFpu = 1;
@@ -114,7 +147,11 @@ void ConfigDefaults(Config *c)
     c->strict = 0;
     c->superblocks = 1;
     c->smooth = 1;
-    c->resScale = 3;
+    c->res43 = 4;    // 960x720
+    c->res169 = 4;   // 1366x768: with the defaults below, the assistant's "Recommended"
+    c->resWide = 1;
+    c->wallRecommend = 0;
+    c->descTranslate = 1;
     c->texFilter = 1;
     c->hiTex = 1;
     c->hiTexFile[0] = 0;
@@ -126,6 +163,9 @@ void ConfigDefaults(Config *c)
     c->deflicker = 0;
     c->zoom = 100;
     c->offsetX = c->offsetY = 0;
+    c->devMode = c->gfxLog = 0;
+    c->texR3 = 1;   // R3 x2: the HD textures on and off in game
+    ConfigHotkeyDefaults(c);
     c->stretch = 0;
     c->asyncGfx = 1;
     c->parseWorker = 1;
@@ -154,6 +194,7 @@ int ConfigParseFile(Config *c, const char *path)
     // (2.0.2-2.0.4): their vsync=1 is not a choice, and V-Sync made busy
     // games slower (Mario Tennis); it is off by default again.
     int menuFile = 0, settingsVer = 0, vsync = -1;
+    int shotSeen = 0, hkShotSeen = 0;   // an old screenshot combo, and the shortcut that replaces it
     if (!f) return 0;
     while (fgets(line, sizeof(line), f))
     {
@@ -162,6 +203,35 @@ int ConfigParseFile(Config *c, const char *path)
         if (!strncmp(line, "# Written by the Harissa64 V2 menu", 34)) menuFile = 1;
         if (line[0] == '#' || line[0] == ';' || !eq) continue;
         *eq = 0;
+        // Outside the chain below: it is at the compiler's limit of nested else-ifs.
+        if (!strcmp(line, "devmode")) c->devMode = atoi(eq + 1);
+        if (!strcmp(line, "gfxlog")) c->gfxLog = atoi(eq + 1);
+        if (!strcmp(line, "texr3")) c->texR3 = atoi(eq + 1);
+        if (!strcmp(line, "panelcolor")) c->panelColor = atoi(eq + 1);
+        if (!strcmp(line, "intro")) c->intro = atoi(eq + 1);
+        if (!strcmp(line, "setview")) c->settingsView = atoi(eq + 1);
+        if (!strcmp(line, "brightlevel")) c->brightLevel = atoi(eq + 1);
+        if (!strcmp(line, "sharplevel")) c->sharpLevel = atoi(eq + 1);
+        if (!strcmp(line, "blurlevel")) c->blurLevel = atoi(eq + 1);
+        if (!strcmp(line, "res43")) c->res43 = atoi(eq + 1);
+        if (!strcmp(line, "desctr")) c->descTranslate = atoi(eq + 1) != 0;
+        if (!strcmp(line, "wallrec")) c->wallRecommend = atoi(eq + 1) != 0;
+        if (!strcmp(line, "res169")) c->res169 = atoi(eq + 1);
+        if (!strcmp(line, "reswide")) c->resWide = atoi(eq + 1) != 0;
+        if (!strcmp(line, "resolution"))
+        {
+            // Older files: 1-3 native x1, x2, x3 (4:3), 4 HD 1280x720 (16:9).
+            int r = atoi(eq + 1);
+            if (r == 4) { c->resWide = 1; c->res169 = 3; }
+            else if (r >= 1 && r <= 3) { c->resWide = 0; c->res43 = (r - 1) * 2; }
+        }
+        {
+            static const char *const hk[HK_COUNT] = { "hk_save", "hk_load", "hk_slotprev", "hk_slotnext", "hk_shot" };
+            int k;
+            for (k = 0; k < HK_COUNT; k++)
+                if (!strcmp(line, hk[k])) { c->hotkey[k] = (u32)strtoul(eq + 1, NULL, 16); if (k == HK_SHOT) hkShotSeen = 1; }
+        }
+        if (!strcmp(line, "shotbtn1") || !strcmp(line, "shotbtn2")) shotSeen = 1;
         if (!strcmp(line, "mode")) { strncpy(c->mode, eq + 1, sizeof(c->mode) - 1); c->mode[sizeof(c->mode) - 1] = 0; }
         else if (!strcmp(line, "cpu")) { strncpy(c->cpu, eq + 1, sizeof(c->cpu) - 1); c->cpu[sizeof(c->cpu) - 1] = 0; }
         else if (!strcmp(line, "rom")) { strncpy(c->rom, eq + 1, sizeof(c->rom) - 1); c->rom[sizeof(c->rom) - 1] = 0; }
@@ -200,6 +270,7 @@ int ConfigParseFile(Config *c, const char *path)
         else if (!strcmp(line, "colorstyle")) c->colorStyle = atoi(eq + 1);
         else if (!strcmp(line, "updatecheck")) c->updateCheck = atoi(eq + 1);
         else if (!strcmp(line, "artdownload")) c->artDownload = atoi(eq + 1);
+        else if (!strcmp(line, "artextras")) c->artExtras = atoi(eq + 1);
         else if (!strcmp(line, "browserdemo")) c->browserDemo = atoi(eq + 1);
         else if (!strcmp(line, "browsersel")) { strncpy(c->browserSel, eq + 1, sizeof(c->browserSel) - 1); c->browserSel[sizeof(c->browserSel) - 1] = 0; }
         else if (!strcmp(line, "artall")) c->artAll = atoi(eq + 1);
@@ -260,7 +331,7 @@ int ConfigParseFile(Config *c, const char *path)
         else if (!strcmp(line, "lang")) { strncpy(c->lang, eq + 1, sizeof(c->lang) - 1); c->lang[sizeof(c->lang) - 1] = 0; }
         else if (!strcmp(line, "uilang")) { strncpy(c->uiLang, eq + 1, sizeof(c->uiLang) - 1); c->uiLang[sizeof(c->uiLang) - 1] = 0; }
         else if (!strcmp(line, "langpick")) c->langPick = atoi(eq + 1);
-        else if (!strcmp(line, "rumble")) c->rumble = atoi(eq + 1);
+        else if (!strcmp(line, "rumble")) { c->rumble = atoi(eq + 1); if (c->rumble == 1) c->rumble = 100; if (c->rumble < 0 || c->rumble > 100) c->rumble = 100; }
         else if (!strcmp(line, "padloss"))
         {
             int v = atoi(eq + 1);
@@ -298,7 +369,6 @@ int ConfigParseFile(Config *c, const char *path)
         else if (!strcmp(line, "strict")) c->strict = atoi(eq + 1);
         else if (!strcmp(line, "superblocks")) c->superblocks = atoi(eq + 1);
         else if (!strcmp(line, "smooth")) c->smooth = atoi(eq + 1);
-        else if (!strcmp(line, "resolution")) c->resScale = atoi(eq + 1);
         else if (!strcmp(line, "texfilter")) c->texFilter = atoi(eq + 1);
         else if (!strcmp(line, "hirestex")) c->hiTex = atoi(eq + 1) != 0;
         else if (!strcmp(line, "hirestexfile")) { strncpy(c->hiTexFile, eq + 1, sizeof(c->hiTexFile) - 1); c->hiTexFile[sizeof(c->hiTexFile) - 1] = 0; }
@@ -343,7 +413,35 @@ int ConfigParseFile(Config *c, const char *path)
     }
     fclose(f);
     if (vsync >= 0 && !(menuFile && settingsVer < 2 && vsync == 1)) c->vsync = vsync;
+    if (c->brightLevel < 0 || c->brightLevel > 100)
+    {
+        // The five steps of before (normal, lighter, much lighter, darker, much darker) on the bar.
+        static const int level[5] = { 50, 75, 94, 29, 4 };
+        c->brightLevel = level[c->brightness >= 0 && c->brightness <= 4 ? c->brightness : 0];
+    }
+    // The sharpening and blur steps of before (off, low/soft, high/strong) on the bars.
+    if (c->sharpLevel < 0 || c->sharpLevel > 100) c->sharpLevel = (c->sharpen >= 0 && c->sharpen <= 2 ? c->sharpen : 0) * 50;
+    if (c->blurLevel < 0 || c->blurLevel > 100) c->blurLevel = (c->blur >= 0 && c->blur <= 2 ? c->blur : 0) * 50;
+    if (shotSeen && !hkShotSeen)
+    {
+        // A file from before the shortcuts page: its screenshot combo (two pad sources) as one.
+        static const u32 bit[H64_SRC_LTHUMB + 2] = { 0x1000, 0x2000, 0x4000, 0x8000, 0x0100, 0x0200, HK_LT, HK_RT, 0x0010,
+                                                       0x0001, 0x0002, 0x0004, 0x0008, 0x0040, 0x0080 };
+        u32 m = 0;
+        if (c->shotBtn1 >= 0 && c->shotBtn1 <= H64_SRC_RTHUMB) m |= bit[c->shotBtn1];
+        if (c->shotBtn2 >= 0 && c->shotBtn2 <= H64_SRC_RTHUMB) m |= bit[c->shotBtn2];
+        c->hotkey[HK_SHOT] = c->shotBtn1 >= 0 && c->shotBtn2 >= 0 ? m : 0;
+    }
     return 1;
+}
+
+void ConfigHotkeyDefaults(Config *c)
+{
+    c->hotkey[HK_SAVE] = 0x0020 | 0x0200;        // BACK + RB
+    c->hotkey[HK_LOAD] = 0x0020 | 0x0100;        // BACK + LB
+    c->hotkey[HK_SLOT_PREV] = 0x0020 | 0x0004;   // BACK + D-pad left
+    c->hotkey[HK_SLOT_NEXT] = 0x0020 | 0x0008;   // BACK + D-pad right
+    c->hotkey[HK_SHOT] = 0;
 }
 
 int ConfigWriteMenuKeys(const Config *c, const char *path, int withLastRom)
@@ -355,15 +453,22 @@ int ConfigWriteMenuKeys(const Config *c, const char *path, int withLastRom)
             c->smooth, c->perfItems ? 1 : 0);
     fprintf(f, "perfitems=%d\nperfpos=%d\nperfsize=%d\nperfcolor=%d\nperfbox=%d\nperffahrenheit=%d\n", c->perfItems, c->perfPos, c->perfSize,
             c->perfColor, c->perfBox, c->perfFahrenheit);
-    fprintf(f, "resolution=%d\ntexfilter=%d\nsharpen=%d\nblur=%d\nscreen=%d\nbrightness=%d\nvsync=%d\nstretch=%d\ndeflicker=%d\n", c->resScale,
+    fprintf(f, "res43=%d\nres169=%d\nreswide=%d\nwallrec=%d\ndesctr=%d\n", c->res43, c->res169, c->resWide, c->wallRecommend, c->descTranslate);
+    fprintf(f, "texfilter=%d\nsharpen=%d\nblur=%d\nscreen=%d\nbrightness=%d\nvsync=%d\nstretch=%d\ndeflicker=%d\n",
             c->texFilter, c->sharpen, c->blur, c->screen, c->brightness, c->vsync, c->stretch, c->deflicker);
     fprintf(f, "hirestex=%d\n", c->hiTex);
     if (c->hiTexFile[0]) fprintf(f, "hirestexfile=%s\n", c->hiTexFile);
     fprintf(f, "shotbtn1=%s\nshotbtn2=%s\n", c->shotBtn1 >= 0 ? h64_padmap_source_name(c->shotBtn1) : "none",
             c->shotBtn2 >= 0 ? h64_padmap_source_name(c->shotBtn2) : "none");
     fprintf(f, "zoom=%d\nposx=%d\nposy=%d\nrumble=%d\n", c->zoom, c->offsetX, c->offsetY, c->rumble);
+    fprintf(f, "devmode=%d\ngfxlog=%d\ntexr3=%d\n", c->devMode, c->gfxLog, c->texR3);
+    fprintf(f, "setview=%d\n", c->settingsView);
+    fprintf(f, "panelcolor=%d\nintro=%d\nbrightlevel=%d\nsharplevel=%d\nblurlevel=%d\n", c->panelColor, c->intro, c->brightLevel,
+            c->sharpLevel, c->blurLevel);
+    fprintf(f, "hk_save=%X\nhk_load=%X\nhk_slotprev=%X\nhk_slotnext=%X\nhk_shot=%X\n", c->hotkey[HK_SAVE], c->hotkey[HK_LOAD],
+            c->hotkey[HK_SLOT_PREV], c->hotkey[HK_SLOT_NEXT], c->hotkey[HK_SHOT]);
     fprintf(f, "padloss=%d\nautosaveslot=%d\nbatterywarn=%d\nuisounds=%d\n", c->padLoss, c->autoSaveSlot, c->batteryWarn, c->uiSounds);
-    if (withLastRom) fprintf(f, "artdownload=%d\nbrowserdesign=%d\nbgeffect=%d\n", c->artDownload, c->browserDesign, c->bgEffect);
+    if (withLastRom) fprintf(f, "artdownload=%d\nartextras=%d\nbrowserdesign=%d\nbgeffect=%d\n", c->artDownload, c->artExtras, c->browserDesign, c->bgEffect);
     if (withLastRom)
         fprintf(f, "fxcolor1=%d\nfxcolor2=%d\nfxcolor3=%d\nfxopacity=%d\nfxspeed=%d\n", c->fxColor[0], c->fxColor[1], c->fxColor[2],
                 c->fxOpacity, c->fxSpeed);

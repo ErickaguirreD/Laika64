@@ -21,8 +21,8 @@ static void ref_pad(const H64PadInput *g, H64Pad *pad)
 {
     u16 b = 0;
     if (g->buttons & H64_XB_A) b |= 0x8000;
-    if (g->buttons & H64_XB_B) b |= 0x4000;
-    if ((g->buttons & (H64_XB_X | H64_XB_Y)) || g->lt > 64 || g->rt > 64) b |= 0x2000;
+    if (g->buttons & H64_XB_X) b |= 0x4000;   // B on X, Z on LT (the default since 2026-10-28)
+    if (g->lt > 64) b |= 0x2000;
     if (g->buttons & H64_XB_START) b |= 0x1000;
     if (g->buttons & H64_XB_DPAD_UP) b |= 0x0800;
     if (g->buttons & H64_XB_DPAD_DOWN) b |= 0x0400;
@@ -176,7 +176,7 @@ void test_padmap(H64TestContext *ctx)
     H64_CHECK(ctx, h64_padmap_parse_key(&d, "map_a", "xb,rt"));
     H64_CHECK_EQ(ctx, d.src[H64_N64_A], (1u << H64_SRC_B) | (1u << H64_SRC_RT));
     H64_CHECK(ctx, h64_padmap_parse_key(&d, "map_b", "nonsense"));     // ignored
-    H64_CHECK_EQ(ctx, d.src[H64_N64_B], 1u << H64_SRC_B);
+    H64_CHECK_EQ(ctx, d.src[H64_N64_B], 1u << H64_SRC_X);
     H64_CHECK(ctx, h64_padmap_parse_key(&d, "map_stick", "right"));
     H64_CHECK_EQ(ctx, d.stick, H64_STICK_RIGHT);
     H64_CHECK(ctx, h64_padmap_parse_key(&d, "map_stick", "sideways"));  // ignored

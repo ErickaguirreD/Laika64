@@ -16,7 +16,7 @@
 #include "xb_update.h"
 
 #define UPDATE_HOST "github.com"
-#define UPDATE_PATH "/kernel64/Harissa64/releases/latest"
+#define UPDATE_PATH "/ErickaguirreD/Laika64/releases/latest"
 
 static volatile LONG s_started, s_found;
 static char s_current[32], s_latest[32];

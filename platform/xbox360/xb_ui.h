@@ -84,6 +84,10 @@ void UiPanel(float x, float y, float w, float h, float r);
 void UiSetPanelStyle(D3DCOLOR edge, float edgeWidth, int bodyPercent, float roundness);
 // A panel's corner radius `r` as the panels are drawn now.
 float UiPanelRadius(float r);
+// What is drawn next scaled by k around (cx, cy); k = 1: as it is again.
+void UiSetScale(float cx, float cy, float k);
+// The panels' body colour: a dark tint of (r, g, b); r < 0: the interface's own.
+void UiSetPanelColor(int r, int g, int b);
 // `c` with its alpha multiplied by `a` (0..1): fades.
 D3DCOLOR UiAlpha(D3DCOLOR c, float a);
 
@@ -91,6 +95,20 @@ D3DCOLOR UiAlpha(D3DCOLOR c, float a);
 // A texture from 8-bit RGBA pixels (bytes R, G, B, A); NULL on failure. Draw
 // it at about its own size: it has no mipmaps.
 IDirect3DTexture9 *UiImageCreate(IDirect3DDevice9 *dev, const unsigned char *rgba, int w, int h);
+// Released pictures still waiting for the GPU (UiImageRelease keeps them until
+// it is done with them) freed now: before a game takes the memory.
+void UiImageFlush(IDirect3DDevice9 *dev);
+// A picture of the menus' own as the background (the wallpapers' game
+// recommendations): `fn` draws it and returns 1, or 0 to leave the usual one;
+// darkened as the wallpapers are. NULL: none.
+void UiSetBackdropLayer(int (*fn)(void));
+// The LAIKA 64 logo in the colour nearest `rgb` (0xRRGGBB): blue, green, red,
+// purple or gold (xb_logo_variants.h); -1, or a colour without hue: the original.
+void UiSetLogoColor(int rgb);
+// The same from DXT1 blocks as the Xbox 360's GPU reads them (w, h multiples of 4): copied as they are.
+IDirect3DTexture9 *UiImageCreateDxt1(IDirect3DDevice9 *dev, const unsigned char *blocks, int w, int h);
+// The device the interface draws with (NULL before UiInit): for pictures made on first use.
+IDirect3DDevice9 *UiDevice(void);
 // Waits for the GPU to be done with it, then releases it (outside UiBegin/UiEnd).
 void UiImageRelease(IDirect3DDevice9 *dev, IDirect3DTexture9 *tex);
 // Draws the whole picture stretched over (x, y, w, h), corners rounded by `r`,

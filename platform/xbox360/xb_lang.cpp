@@ -39,6 +39,7 @@ int LangFromConsole(void)
     case XC_LANGUAGE_FRENCH: return LANG_FR;
     case XC_LANGUAGE_PORTUGUESE: return LANG_PT;
     case XC_LANGUAGE_RUSSIAN: return LANG_RU;
+    case XC_LANGUAGE_ITALIAN: return LANG_IT;
     }
     return LANG_EN;
 }

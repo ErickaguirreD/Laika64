@@ -1177,6 +1177,28 @@ static int is_branch(u32 op)
     return 0;
 }
 
+// Where the branches of a page land in it: a bit per word of the 4 KB page
+// at `paddrPage` (mapped at `vpcPage`). Conditional branches by their offset,
+// J/JAL by their address. Data that looks like a branch only shortens a block.
+static void page_targets(const H64System *sys, u32 paddrPage, u32 vpcPage, u32 *bits)
+{
+    u32 k;
+    memset(bits, 0, 1024 / 8);
+    for (k = 0; k < 1024; k++)
+    {
+        u32 op = h64_load_be32(sys->rdram + paddrPage + k * 4), opc = op >> 26, rt = (op >> 16) & 31, rs = (op >> 21) & 31;
+        s32 t = -1;
+        if ((opc >= 4 && opc <= 7) || (opc >= 0x14 && opc <= 0x17) || (opc == 1 && (rt & 0x0C) == 0) || (opc == 0x11 && rs == 0x08))
+            t = (s32)k + 1 + (s16)(op & 0xFFFF);
+        else if (opc == 2 || opc == 3)
+        {
+            u32 target = ((vpcPage + k * 4 + 4) & 0xF0000000u) | ((op & 0x03FFFFFFu) << 2);
+            if ((target & ~0xFFFu) == vpcPage) t = (s32)((target & 0xFFF) >> 2);
+        }
+        if (t >= 0 && t < 1024) bits[t >> 5] |= 1u << (t & 31);
+    }
+}
+
 // COP0 (MTC0, ERET, TLB...), except MFC0/DMFC0, which change nothing.
 static int ends_block(u32 op) { return (op >> 26) == 0x10 && ((op >> 21) & 31) != 0 && ((op >> 21) & 31) != 1; }
 
@@ -2707,7 +2729,7 @@ H64JitBlock *h64_jit_compile(H64System *sys, u32 pc, u32 paddr)
     H64Jit *j = sys->jit;
     H64JitBlock *b;
     Gen g;
-    u32 ops[H64_JIT_MAX_INSNS], n = 0, i, bodyAt, coldWords = 0;
+    u32 ops[H64_JIT_MAX_INSNS], n = 0, i, bodyAt, coldWords = 0, slot;
     int coldOverflow = 0;
     u32 pageEnd = (paddr | 0xFFF) + 1;
     int endsWithBranch = 0;
@@ -2716,11 +2738,17 @@ H64JitBlock *h64_jit_compile(H64System *sys, u32 pc, u32 paddr)
     u8 *start;
 
     // Formation: stop at the page end, after a branch's delay slot (but see
-    // side exits), after a COP0 instruction, or at the size limit.
+    // side exits), after a COP0 instruction, or at the size limit - and, once
+    // the code memory has filled, where a branch of the page lands (splitTargets).
+    u32 targets[1024 / 32];
+    const u32 first = (paddr & 0xFFF) >> 2;
+    if (j->splitTargets) page_targets(sys, paddr & ~0xFFFu, pc & ~0xFFFu, targets);
     memset(side, 0, sizeof(side));
     while (n < H64_JIT_MAX_INSNS && paddr + n * 4 < pageEnd)
     {
-        u32 op = h64_load_be32(sys->rdram + paddr + n * 4);
+        u32 op;
+        if (j->splitTargets && n > 0 && ((targets[(first + n) >> 5] >> ((first + n) & 31)) & 1)) break;   // its own block
+        op = h64_load_be32(sys->rdram + paddr + n * 4);
         if (is_branch(op))
         {
             // The branch and its delay slot stay together: end the block
@@ -2746,12 +2774,14 @@ H64JitBlock *h64_jit_compile(H64System *sys, u32 pc, u32 paddr)
     }
     if (n == 0) return 0;
 
-    if (j->blockCount >= j->blockCap || j->memUsed + MAX_BLOCK_BYTES + 64 > j->coldBase ||
-        j->coldUsed + MAX_COLD_BYTES + 64 > j->memSize)
+    if (!h64_jit_make_room(j, MAX_BLOCK_BYTES + 64 + 16, MAX_COLD_BYTES + 64 + 16))
     {
         u32 hot = j->memUsed, cold = j->coldUsed - j->coldBase;
         H64_INFO("[jit] code cache full (%u blocks, hot %u KB, cold %u KB): flushed", j->blockCount, j->memUsed >> 10,
                  (j->coldUsed - j->coldBase) >> 10);
+        h64_jit_log_footprint(j, "full");
+        if (!j->splitTargets) H64_INFO("[jit] from now on blocks end at the branch targets of their page (each instruction compiled once)");
+        j->splitTargets = 1;
         if (hot + cold > j->memSize / 2)   // a part filled (not the block table): split as this game uses them
         {
             u32 share = (u32)((u64)hot * 1000 / (hot + cold));
@@ -2762,6 +2792,9 @@ H64JitBlock *h64_jit_compile(H64System *sys, u32 pc, u32 paddr)
 
     j->memUsed = (j->memUsed + 15) & ~15u;
     start = j->mem + j->memUsed;
+    // The record this block will take: one an eviction gave back, or the next new one
+    // (generated code may point at it: TLB checks, profiling counters).
+    slot = j->freeSlotCount ? j->freeSlots[j->freeSlotCount - 1] : j->blockCount;
     memset(&g, 0, sizeof(g));
     g.sys = sys;
     g.c.buf = (u32 *)start;
@@ -2799,11 +2832,11 @@ H64JitBlock *h64_jit_compile(H64System *sys, u32 pc, u32 paddr)
         t->slow[0] = ppc_bc_fwd(&g.c, 4, 0, PPC_EQ);   // bne: to rtTlbStale (cold)
         t->nSlow = 1;
         t->pc = pc;
-        t->block = &j->blocks[j->blockCount];
+        t->block = &j->blocks[slot];
     }
     if (j->prof)
     {
-        u32 *cnt = &j->blocks[j->blockCount].execCount;
+        u32 *cnt = &j->blocks[slot].execCount;
 #if defined(H64_JIT_ABI_XBOX)
         ppc_li32u(&g.c, 3, (u32)(uintptr_t)cnt);
 #else
@@ -2934,8 +2967,15 @@ H64JitBlock *h64_jit_compile(H64System *sys, u32 pc, u32 paddr)
         return 0;
     }
 
-    b = &j->blocks[j->blockCount++];
+    if (j->freeSlotCount && slot == j->freeSlots[j->freeSlotCount - 1]) j->freeSlotCount--;
+    else j->blockCount++;
+    b = &j->blocks[slot];
     memset(b, 0, sizeof(*b));
+    b->live = 1;
+    b->hotOff = (u32)(start - j->mem);
+    b->hotEnd = b->hotOff + g.c.pos * 4;
+    b->coldOff = j->coldUsed;
+    b->coldEnd = j->coldUsed + coldWords * 4;
     b->vpc = pc;
     b->paddr = paddr;
     b->insns = n;

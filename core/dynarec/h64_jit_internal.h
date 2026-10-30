@@ -26,6 +26,8 @@ struct H64JitBlock
     u32 *body;           // first instruction after the prologue (linked exits jump here)
     int linkHead;        // first link into this block (-1: none)
     u32 hotWords;        // PowerPC words in the hot region (body, exits, veneers)
+    u32 hotOff, hotEnd, coldOff, coldEnd;   // its code in the memory (byte offsets), for evictions
+    int live;            // the record is in use (an evicted one waits in freeSlots)
     u32 execCount;       // entries (H64Jit.prof only: counted by the block itself)
     H64JitBlock *hashNext, *pageNext;
 };
@@ -34,6 +36,10 @@ H64JitBlock *h64_jit_compile(H64System *sys, u32 pc, u32 paddr);
 // Writes the shared entry/exit/check code at the start of the code memory (after a reset).
 void h64_jit_emit_runtime(H64System *sys);
 void h64_jit_code_map(H64Jit *j, const H64JitBlock *b, int delta);
+// Ring mode: makes room for one more block (evicting the oldest code ahead); 0 when a full reset is needed instead.
+int h64_jit_make_room(H64Jit *j, u32 hotBytes, u32 coldBytes);
+// Logs what fills the code memory (diagnosis).
+void h64_jit_log_footprint(H64Jit *j, const char *why);
 // Kernel mode (Status.KSU = 0, or EXL/ERL set): native code is allowed.
 int h64_jit_kernel_mode(const H64Cpu *cpu);
 // After a helper: leave the block? (invalidated page, event due inside the block, interrupt, stop)

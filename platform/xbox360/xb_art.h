@@ -38,8 +38,10 @@ struct ArtResult
     char key[16];
     int hasInfo;            // `info` read from the cache (else only `key` is known)
     H64GameInfo info;
-    u8 *cover;              // RGBA, coverW x coverH, or NULL
+    u8 *cover;              // RGBA, coverW x coverH, or NULL (when `dxt` holds it)
     int coverW, coverH;
+    u8 *dxt;                // or the same compressed: DXT1 as the Xbox 360's GPU reads it (dxtW x dxtH, whole 4x4 blocks), or NULL
+    int dxtW, dxtH;
     u8 *glow;               // RGBA, ART_GLOW_W x ART_GLOW_H, or NULL
 };
 
@@ -56,6 +58,8 @@ struct ArtStatus
 void ArtStart(const char *drive);
 // Whether the selection's missing files may be downloaded.
 void ArtSetNetwork(int allowed);
+// With downloads on: 0 fetches only the box art (not pictures from the game, title screens, logos).
+void ArtSetExtras(int allowed);
 // While a game runs: the worker finishes what it is doing and waits.
 void ArtPause(int paused);
 // The ROMs the browser shows, the selection first (`count` up to 64: the list

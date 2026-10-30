@@ -10,7 +10,7 @@
 //   cpu=dynarec    (default) or cpu=interp (Xenia cannot run generated code).
 //   hle=1          (default) or hle=0 for the LLE RSP (slow; no video yet:
 //                  the Xenos renderer only draws HLE triangles).
-// The log goes to game:\harissa64v2.log, or cache:\ when game:\ is
+// The log goes to game:\laika64.log, or cache:\ when game:\ is
 // read-only (Xenia). Holding BACK for 3 s returns to the ROM list.
 #include <xtl.h>
 #include <stdio.h>
@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <stdarg.h>
+#include <share.h>
 
 #include <string>
 #include <ppcintrinsics.h>
@@ -670,7 +671,8 @@ static H64System *MakeSystem(const u8 *rom, u32 size, int jit)
     if (sys->jit && s_fullExits) { sys->jit->fullExits = 1; h64_jit_reset(sys); }
     if (sys->jit && !s_statusFast) { sys->jit->noStatusFast = 1; h64_jit_reset(sys); }
     if (sys->jit && s_noSuper) { sys->jit->noSuper = 1; h64_jit_reset(sys); }
-    sys->cpu.cpi = s_cpi;
+    sys->cpu.cpi = h64_game_cpi(sys->rom.gameCode, s_cpi);   // a game's own (profile) when cpi is the default
+    if (sys->cpu.cpi != s_cpi) H64_INFO("[profile] %.4s: cpi %u", sys->rom.gameCode, sys->cpu.cpi);
     return sys;
 }
 
@@ -745,28 +747,41 @@ static void RunDynarecTest(const Config *c, char *report, size_t len)
 static void ApplyGraphics(H64System *sys, H64Renderer *renderer, const Config *c)
 {
     H64XenosOptions o;
-    // The aspect follows the resolution: HD 1280x720 is 16:9 widescreen (the
-    // 3D drawn wider), every other resolution 4:3. Widescreen shows more than
-    // the game's viewport: keep the triangles the microcode would drop outside it.
-    // Stretch (its own setting): the 4:3 picture pulled to 16:9 at any
-    // resolution, for games widescreen does not suit.
-    int aspect = c->stretch ? 2 : c->resScale == 4 ? 1 : 0;
+    u32 resW, resH;
+    int wide;
+    // The software stretch (its switch): the 4:3 picture pulled to 16:9, with
+    // either list - for games the wider 3D does not suit. Without it a 16:9
+    // resolution is widescreen (the 3D drawn wider), a 4:3 one 4:3 with borders.
+    // Widescreen shows more than the game's viewport: keep the triangles the
+    // microcode would drop outside it.
+    ConfigResCurrent(c, &resW, &resH, &wide);
+    int aspect = c->stretch ? 2 : wide ? 1 : 0;
     sys->options.gfxKeepOffscreen = aspect == 1;
     if (!renderer) return;
-    o.scale = c->resScale;
+    o.resW = resW;
+    o.resH = resH;
     o.texFilter = c->texFilter;
     o.hiTex = c->hiTex;
     o.smooth = c->smooth;
-    o.sharpen = c->sharpen;
-    o.blur = c->blur;
+    // The bars: on when above 0 (one shader each way), their strength a constant.
+    o.sharpen = c->sharpLevel > 0 ? 1 : 0;
+    o.blur = c->blurLevel > 0 && !o.sharpen ? 1 : 0;
+    o.sharpAmount = c->sharpLevel / 100.0f;
+    o.blurAmount = c->blurLevel / 100.0f;
     o.screen = c->screen;
     o.brightness = c->brightness;
+    {
+        // The bar: 50 as the console; 100 lifts the dark tones (power 0.6), 0 deepens them (1.6).
+        int lv = c->brightLevel < 0 || c->brightLevel > 100 ? 50 : c->brightLevel;
+        o.brightPower = lv >= 50 ? 1.0f - 0.4f * (lv - 50) / 50.0f : 1.0f + 0.6f * (50 - lv) / 50.0f;
+    }
     o.colorStyle = c->colorStyle;
     o.vsync = c->vsync;
     o.deflicker = c->deflicker;
     o.zoom = c->zoom;
     o.offsetX = c->offsetX;
     o.offsetY = c->offsetY;
+    o.gfxLog = c->devMode && c->gfxLog;
     o.aspect = aspect;
     h64_xenos_set_options(renderer, &o);
 }
@@ -812,7 +827,7 @@ static void PadFromXInput(const XINPUT_GAMEPAD *g, int port, H64Pad *pad)
 // one was last told, so XInputSetState runs only on a change. `stop` (menu,
 // end of the game) or the setting off: every motor stops.
 static u8 s_rumbleOut[4];
-static int s_rumbleOn = 1;   // Settings > Controls > Rumble Pak
+static int s_rumbleOn = 100;   // Settings > Controls > Rumble Pak: its strength in % (0: off)
 
 static void RumbleUpdate(H64System *sys, int stop)
 {
@@ -824,8 +839,8 @@ static void RumbleUpdate(H64System *sys, int stop)
         if (want != s_rumbleOut[i])
         {
             XINPUT_VIBRATION v;
-            v.wLeftMotorSpeed = want ? 0xC000 : 0;   // the N64 pad's one motor: mostly the heavy one
-            v.wRightMotorSpeed = want ? 0x6000 : 0;
+            v.wLeftMotorSpeed = want ? (WORD)(0xC000 * s_rumbleOn / 100) : 0;   // the N64 pad's one motor: mostly the heavy one
+            v.wRightMotorSpeed = want ? (WORD)(0x6000 * s_rumbleOn / 100) : 0;
             XInputSetState((DWORD)i, &v);
             s_rumbleOut[i] = want;
         }
@@ -983,17 +998,21 @@ static int s_stateThumbSlot = -1;   // the slot s_stateThumb is of (-1: load aga
 static int s_showFps;               // what the performance box shows (Config::perfItems, CONFIG_PERF_*; 0: no box)
 static int s_perfF, s_perfTemps;    // temperatures in degrees F; they can be read (not Xenia)
 static char s_fpsText[256];          // its lines: "60.0 FPS", "CPU 42%", ... as chosen
+// The next text, made here while the box goes on showing the last one (s_fpsText): built
+// in place, the box was drawn half made now and then - the temperatures, read last and
+// slowest, came and went (it flickered).
+static char s_fpsBuild[256];
 
 // One more line of the performance box.
 static void PerfAdd(const char *fmt, ...)
 {
-    size_t n = strlen(s_fpsText);
+    size_t n = strlen(s_fpsBuild);
     va_list ap;
-    if (n && n < sizeof(s_fpsText) - 2) { s_fpsText[n++] = '\n'; s_fpsText[n] = 0; }
+    if (n && n < sizeof(s_fpsBuild) - 2) { s_fpsBuild[n++] = '\n'; s_fpsBuild[n] = 0; }
     va_start(ap, fmt);
-    _vsnprintf(s_fpsText + n, sizeof(s_fpsText) - 1 - n, fmt, ap);
+    _vsnprintf(s_fpsBuild + n, sizeof(s_fpsBuild) - 1 - n, fmt, ap);
     va_end(ap);
-    s_fpsText[sizeof(s_fpsText) - 1] = 0;
+    s_fpsBuild[sizeof(s_fpsBuild) - 1] = 0;
 }
 static UiMenu s_menu;
 static int s_menuOpen;              // the in-game menu is drawn over the frozen frame
@@ -1266,12 +1285,13 @@ static int GameMenu(H64System *sys, H64Renderer *renderer, Config *c)
         }
         else if (s_aboutOpen)
         {
-            if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_START | XINPUT_GAMEPAD_X)) s_aboutOpen = 0;
+            if (AboutInput(down)) s_aboutOpen = 0;
         }
         else if (settings)
         {
             int r = SettingsInput(&s_menu, c, s_profilePath[0] != 0, down);
             if (r == SET_PREVIEW) { HiresPreviewOpen(c); s_hiresPreviewOpen = 1; }
+            else if (r == SET_ABOUT) s_aboutOpen = 1;   // Settings > About, over the settings
             else if (r == SET_CHANGED)
             {
                 xb_audio_set_target_ms(c->audioMs);
@@ -1481,12 +1501,12 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
     sys->options.hleAudio = c->hle;
     sys->padHook = PadHook;
     s_padMaps = c->padMap;
-    // Rumble Paks in the controllers of the games that support one (port 1
-    // keeps its Controller Pak when the game uses that; the setting only
-    // mutes the motors, so it can change during the game).
+    // Rumble Paks in the controllers of the games that support one (on port 1
+    // together with its Controller Pak when the game uses that, h64_pif.cpp;
+    // the setting only mutes the motors, so it can change during the game).
     s_rumbleOn = c->rumble;
-    sys->rumblePaks = h64_rom_rumble(&sys->rom) ? (sys->save->pak ? 0xEu : 0xFu) : 0;
-    H64_INFO("[main] rumble pak: %s%s", sys->rumblePaks ? (sys->save->pak ? "ports 2-4 (Controller Pak on port 1)" : "every port") : "not supported by the game",
+    sys->rumblePaks = h64_rom_rumble(&sys->rom) ? 0xFu : 0;
+    H64_INFO("[main] rumble pak: %s%s", sys->rumblePaks ? (sys->save->pak ? "every port (with the Controller Pak on port 1)" : "every port") : "not supported by the game",
              sys->rumblePaks && !c->rumble ? ", motors off (setting)" : "");
     sys->profClock = ProfClock;
     s_script = c->input.count ? &c->input : NULL;
@@ -1573,7 +1593,7 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
     double backHeldMs = 0, backPolledAt = 0;   // time BACK was seen held, poll after poll
     int backHinted = 0;
     WORD prevButtons = 0;
-    u32 prevShotSources = 0;
+    u32 hkPrev = 0xFFFFFFFFu;   // the shortcuts' buttons a frame ago (all: nothing fires until released)
     // Settings > System > a controller unplugged: which ports were plugged at
     // the last poll, and 1 while the autosave waits for a quiet point.
     int padWas[4] = { 0, 0, 0, 0 }, padPolled = 0, padLossSaving = 0;
@@ -1644,7 +1664,6 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
         // Aurora).
         if (s_padValid && (s_pad.Gamepad.wButtons & XINPUT_GAMEPAD_BACK))
         {
-            WORD down = s_pad.Gamepad.wButtons & ~prevButtons;
             double nowMs = QpcMs();
             if (!backSince)
             {
@@ -1658,16 +1677,6 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
             else
                 backHeldMs += nowMs - backPolledAt > 100.0 ? 100.0 : nowMs - backPolledAt;
             backPolledAt = nowMs;
-            if (down & XINPUT_GAMEPAD_RIGHT_SHOULDER) { s_statePending = 1; backUsed = 1; }
-            if (down & XINPUT_GAMEPAD_LEFT_SHOULDER) { LoadStateNow(sys); backUsed = 1; }
-            if (down & (XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT))
-            {
-                s_stateSlot += (down & XINPUT_GAMEPAD_DPAD_RIGHT) ? 1 : -1;
-                if (s_stateSlot < 1) s_stateSlot = 9;
-                if (s_stateSlot > 9) s_stateSlot = 1;
-                OsdT(T_SLOT, s_stateSlot);
-                backUsed = 1;
-            }
             if (!backUsed && backHeldMs >= 1000.0 && !backHinted)
             {
                 OsdT(T_KEEP_HOLDING, 0);
@@ -1691,28 +1700,64 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
             backSince = 0;
         }
         prevButtons = s_padValid ? s_pad.Gamepad.wButtons : 0;
-        if (c->shotBtn1 >= 0 && c->shotBtn2 >= 0)
         {
-            u32 curShotSrc = 0;
+            // The shortcuts (Settings > Controls > Button shortcuts, Config::hotkey): one
+            // fires when the last of its buttons goes down. With BACK in it, that BACK
+            // press is not the pause menu's (backUsed).
+            u32 ext = 0;
+            int k;
             if (s_padValid)
             {
-                H64PadInput in;
-                in.buttons = s_pad.Gamepad.wButtons;
-                in.lt = s_pad.Gamepad.bLeftTrigger;
-                in.rt = s_pad.Gamepad.bRightTrigger;
-                in.lx = s_pad.Gamepad.sThumbLX;
-                in.ly = s_pad.Gamepad.sThumbLY;
-                in.rx = s_pad.Gamepad.sThumbRX;
-                in.ry = s_pad.Gamepad.sThumbRY;
-                curShotSrc = h64_padmap_sources(&in);
+                ext = s_pad.Gamepad.wButtons;
+                if (s_pad.Gamepad.bLeftTrigger > 128) ext |= HK_LT;
+                if (s_pad.Gamepad.bRightTrigger > 128) ext |= HK_RT;
             }
+            for (k = 0; k < HK_COUNT; k++)
             {
-                u32 m1 = 1u << c->shotBtn1, m2 = 1u << c->shotBtn2;
-                int bothNow = (curShotSrc & m1) && (curShotSrc & m2);
-                int bothBefore = (prevShotSources & m1) && (prevShotSources & m2);
-                if (bothNow && !bothBefore) TakeManualScreenshot(sys, renderer);
+                u32 m = c->hotkey[k];
+                if (!m || (ext & m) != m || (hkPrev & m) == m) continue;
+                if (m & XINPUT_GAMEPAD_BACK) backUsed = 1;
+                switch (k)
+                {
+                case HK_SAVE: s_statePending = 1; break;
+                case HK_LOAD: LoadStateNow(sys); break;
+                case HK_SLOT_PREV:
+                case HK_SLOT_NEXT:
+                    s_stateSlot += k == HK_SLOT_NEXT ? 1 : -1;
+                    if (s_stateSlot < 1) s_stateSlot = 9;
+                    if (s_stateSlot > 9) s_stateSlot = 1;
+                    OsdT(T_SLOT, s_stateSlot);
+                    break;
+                case HK_SHOT: TakeManualScreenshot(sys, renderer); break;
+                }
             }
-            prevShotSources = curShotSrc;
+            hkPrev = ext;
+        }
+        if (c->texR3)
+        {
+            // Button shortcuts > HD textures: two clicks of the right stick (R3, without L3: not the
+            // screenshot combo) within 400 ms turn the HD textures on or off, to compare.
+            static DWORD r3At;
+            static int r3Was;
+            WORD b = s_padValid ? s_pad.Gamepad.wButtons : 0;
+            int r3 = (b & XINPUT_GAMEPAD_RIGHT_THUMB) && !(b & XINPUT_GAMEPAD_LEFT_THUMB);
+            if (r3 && !r3Was)
+            {
+                DWORD now = GetTickCount();
+                if (r3At && now - r3At <= 400)
+                {
+                    r3At = 0;
+                    h64_hle_async_wait(sys);
+                    WorkWaitAll(NULL);   // the renderer is this thread's for the change
+                    c->hiTex = !c->hiTex;
+                    ApplyGraphics(sys, renderer, c);
+                    HiresOpen(sys, renderer, c);
+                    OsdT(c->hiTex ? T_TEX_R3_ON : T_TEX_R3_OFF, 0);
+                }
+                else
+                    r3At = now;
+            }
+            r3Was = r3;
         }
         if (c->saveStateAt && presented == c->saveStateAt) s_statePending = 1;
         if (c->menuAt && presented == c->menuAt) menuRequest = 1;
@@ -1732,6 +1777,7 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
             result = RG_DASHBOARD;
             QueryPerformanceCounter(&frameStart);   // no catching up for the paused time
             prevButtons = 0;
+            hkPrev = 0xFFFFFFFFu;   // buttons still held from the menu fire nothing
             padPolled = 0;   // the controllers plugged now are the new reference (one still unplugged does not save again)
             continue;
         }
@@ -1784,28 +1830,19 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
                 u32 rw = 0, rh = 0, vw = sys->vi.regs[2] & 0xFFF, vs = sys->vi.regs[10], ys = sys->vi.regs[13] & 0xFFF;   // width, V_START, Y_SCALE
                 u32 vh = (((vs & 0x3FF) - ((vs >> 16) & 0x3FF)) / 2) * ys / 1024;
                 double load = busyTicks * 100000.0 / (double)freq.QuadPart / (nowMs - fpsStart);
-                s_fpsText[0] = 0;
+                s_fpsBuild[0] = 0;
+                (void)vw; (void)vh;
                 if (s_showFps & CONFIG_PERF_FPS) PerfAdd("\x01" "%.1f FPS", fpsFrames * 1000.0 / (nowMs - fpsStart));
                 if (s_showFps & CONFIG_PERF_CPU) PerfAdd("\x02" "CPU %d%%", (int)(load > 100.0 ? 100.0 : load));
                 if (s_showFps & CONFIG_PERF_RAM)
                 {
                     GlobalMemoryStatus(&ms);
-                    PerfAdd("\x03" "RAM %u / %u MB", (u32)((ms.dwTotalPhys - ms.dwAvailPhys) >> 20), (u32)(ms.dwTotalPhys >> 20));
+                    PerfAdd("\x03" "RAM %uMB", (u32)((ms.dwTotalPhys - ms.dwAvailPhys) >> 20));
                 }
                 if (s_showFps & CONFIG_PERF_RES)
                 {
                     h64_xenos_internal_size(renderer, &rw, &rh);
-                    PerfAdd("\x04" "%ux%u (N64 %ux%u)", rw, rh, vw, vh);
-                }
-                if (s_showFps & CONFIG_PERF_GPU)
-                {
-                    // The graphics worker's own load: not a hardware occupancy
-                    // counter (the XDK exposes none) - the same "busy time /
-                    // elapsed time" the CPU figure above uses, just for
-                    // H64_PROF_GFX_HLE (graphics tasks, rendering included)
-                    // instead of the main thread's run+present time.
-                    double gfxLoad = (double)(sys->prof[H64_PROF_GFX_HLE] - gfxProfAt) * 100000.0 / (double)freq.QuadPart / (nowMs - fpsStart);
-                    PerfAdd("\x05" "GPU %d%%", (int)(gfxLoad > 100.0 ? 100.0 : gfxLoad));
+                    PerfAdd("\x04" "%ux%u", rw, rh);
                 }
                 if (s_showFps & (CONFIG_PERF_TCPU | CONFIG_PERF_TGPU | CONFIG_PERF_TRAM))
                 {
@@ -1823,6 +1860,7 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
                                         s_perfF ? 'F' : 'C');
                             }
                 }
+                memcpy(s_fpsText, s_fpsBuild, sizeof(s_fpsText));   // the whole new text at once
             }
             busyTicks = 0;
             gfxProfAt = sys->prof[H64_PROF_GFX_HLE];
@@ -2043,10 +2081,12 @@ int __cdecl main()
 
     InitializeCriticalSection(&s_logLock);
     InitializeCriticalSection(&s_logFileLock);
-    s_log = fopen("game:\\harissa64v2.log", "w");
+    // Shared for reading: xbdm's getfile (and FTP) can fetch it while a game runs
+    // (with fopen's default sharing it answered "access denied").
+    s_log = _fsopen("game:\\laika64.log", "w", _SH_DENYNO);
     if (!s_log)
     {
-        s_log = fopen("cache:\\harissa64v2.log", "w");
+        s_log = _fsopen("cache:\\laika64.log", "w", _SH_DENYNO);
         s_logDrive = "cache";
     }
     h64_log_set_sink(file_sink);
@@ -2190,6 +2230,8 @@ int __cdecl main()
         }
     }
 
+    // Leaving (from the ROM list or the pause menu): the goodbye animation first.
+    if (dev && !cfg.xenia) OutroScreen(dev);
     if (s_logThread)
     {
         s_logQuit = 1;

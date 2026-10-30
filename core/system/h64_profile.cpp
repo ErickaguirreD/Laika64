@@ -280,6 +280,11 @@ static const IdleYield s_idleYield[] = {
     // ~190 instructions a turn, 2700 turns a frame in its logos and menus
     // (COP0 moves, an ERET, MI_INTR_MASK writes): 34 VI/s on the console.
     { "NIJ", 0x40036DA0u, 0x000479F8u },
+    // Quake 64's for (;;) osYieldThread(): every spare cycle went round
+    // osYieldThread and the dispatcher (60% of the samples), the CPU at 99%
+    // and 46 VI/s. The loop is at the same place in both; the queue is not.
+    { "NQKE", 0x80048FF0u, 0x000706C8u },
+    { "NQKP", 0x80048FF0u, 0x000706E8u },
 };
 
 // Loops that only read Count until enough time has passed (frame limiters)
@@ -296,6 +301,27 @@ static const CountWait s_countWait[] = {
     { "NVR", 0x800062ACu, 0, 0x00271C78u },
 };
 
+// Games that keep the CPU busy every frame (no idle loop to skip): fewer
+// instructions a frame, so the emulator keeps 60 VI/s and the sound its pitch,
+// the game's own frame rate a little lower in its busiest moments.
+struct GameCpi { const char *code; u32 cpi; };
+static const GameCpi s_gameCpi[] = {
+    // Every sample spread over its own code (no loop above 3%), 781k
+    // instructions a frame, 70k triangles a second: 46-48 VI/s at cpi 2.
+    { "NPD", 3 },
+    // Perfect Dark's engine: 620k instructions a frame, 200k triangles a second, 55-58 VI/s at cpi 2.
+    { "NGE", 3 },
+};
+
+u32 h64_game_cpi(const char *gameCode, u32 cpi)
+{
+    u32 i;
+    if (cpi != 2 || !gameCode) return cpi;   // a value of the user's own is kept
+    for (i = 0; i < sizeof(s_gameCpi) / sizeof(s_gameCpi[0]); i++)
+        if (!memcmp(gameCode, s_gameCpi[i].code, 3)) return s_gameCpi[i].cpi;
+    return cpi;
+}
+
 static void apply_idle_yield(H64System *sys)
 {
     u32 i;
@@ -309,7 +335,7 @@ static void apply_idle_yield(H64System *sys)
             sys->options.countWaitQueue = s_countWait[i].queue;
         }
     for (i = 0; i < sizeof(s_idleYield) / sizeof(s_idleYield[0]); i++)
-        if (!memcmp(sys->rom.gameCode, s_idleYield[i].code, 3))
+        if (!memcmp(sys->rom.gameCode, s_idleYield[i].code, strlen(s_idleYield[i].code)))
         {
             sys->options.idleYieldPc = s_idleYield[i].pc;
             sys->options.idleRunQueue = s_idleYield[i].runQueue;

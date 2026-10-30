@@ -2,7 +2,7 @@
 
 LAIKA 64 is a Nintendo 64 emulator for the Xbox 360. It runs on modded consoles (RGH or JTAG) and starts like any other homebrew, from Aurora, FreeStyle Dash or another dashboard. The name comes from Laika, the first animal to orbit Earth.
 
-It's a hobby project, written from scratch. A lot of games already run at full speed, a few are still slow in busy scenes, and most of the library hasn't been tried yet. The [games list](docs/games.md) shows how games run, with the version they were tested on. Add your own results there.
+LAIKA 64 is built on [Harissa64](#credits-and-licence) by kernel64. On top of it, it brings a new interface, HD texture packs, a faster recompiler and many new options. It's a hobby project: a lot of games already run at full speed, a few are still slow in busy scenes, and most of the library hasn't been tried yet. The [games list](docs/games.md) shows how games run, with the version they were tested on. Add your own results there.
 
 Use it only with games you own. No ROMs are included, and none will be.
 
@@ -16,11 +16,60 @@ Use it only with games you own. No ROMs are included, and none will be.
 
 1. Copy the LAIKA 64 folder (with `default.xex` inside) to your console, for example to `Hdd1:\Emulators\LAIKA 64\`.
 2. Make a `roms` folder next to the `.xex` and put your games in it.
-3. Scan the folder in your dashboard, then start LAIKA 64. Pick a game in the list and press A.
+3. Scan the folder in your dashboard, then start LAIKA 64.
 
-The first time, LAIKA 64 asks for your language: English, Spanish, German, French, Arabic, Portuguese (Brazil) or Russian. You can change it later in **Settings > Language**.
+The first time, a welcome assistant (with its own music) sets things up with you: language, controller, picture, colours and background. Eight languages are available: English, Spanish, French, German, Portuguese (Brazil), Italian, Russian and Arabic. You can run the assistant again from **Settings > System**.
 
-The emulator remembers the last game you picked. In Aurora it shows up as "LAIKA 64". A cover and a background are in the `art` folder: in Aurora, open the game's menu, go to the asset manager and load them from there.
+In Aurora LAIKA 64 shows up with its own cover and background: they are in the `art` folder, load them from the game's asset manager.
+
+## The game library
+
+- **Six views**: detailed list, grid, big covers, carousel, mosaic and spotlight. B switches between them.
+- **Pictures for every game**: box art (flat or as a 3D box), a screenshot, the title screen and the logo. The right stick goes through them; stay on a game for a moment and they take turns by themselves, with a soft fade.
+- **Game info**: real title, year, developer, genre, players, region, a description, the ROM size and its save type. Descriptions follow the menus' language when a translation exists.
+- **Favourites and categories**: X marks a favourite; LT/RT go through the tabs. You can make your own categories by genre, region, players, developer, publisher or year.
+- **File explorer** (Settings > System > Tools): two panels, copy, move and delete files on the console.
+- **Screenshots of the menus** with L3 + R3.
+- **About and Credits** pages: X in the game list.
+
+## Box art and game info
+
+When the console is online, LAIKA 64 downloads the pictures and information by itself the first time a game is shown, and keeps them in the `art\games` folder next to the `.xex`. After that they show up straight away, even offline. Box art is kept in a compressed cache so large libraries open quickly.
+
+In **Settings > Interface > Game images** you choose which picture the list shows and what is downloaded: **box art downloads** (box art and game information) and, on their own row, **screenshot and logo downloads** (pictures from the game, title screens and logos). To get everything in one go, pick **Get box art for all games** in Settings.
+
+No internet on the console? Run the script on a PC instead (you need [Python 3](https://www.python.org)):
+
+```
+python tools/fetch_game_art.py "C:\path\to\your\roms"
+```
+
+It fills an `art\games` folder: copy it to the console, into the LAIKA 64 folder. Games it can't find just show their initials.
+
+The pictures and the text come from [libretro-thumbnails](https://github.com/libretro-thumbnails/Nintendo_-_Nintendo_64), [libretro-database](https://github.com/libretro/libretro-database), [GameDB-N64](https://github.com/niemasd/GameDB-N64) and Wikipedia. They are not part of LAIKA 64.
+
+## Make it yours
+
+Everything is in **Settings > Interface**:
+
+- **29 animated backgrounds**: Nebula, Hyperspace, Aurora, XMB wave, Flow, Bokeh, Lava, Fractal, Hologram and more, each with its own colours, opacity and speed.
+- **Your own wallpapers**: JPG or PNG files in the `wallpapers` folder, changing by themselves with fade, slide, zoom, wipe, blinds or random transitions.
+- **Screen saver**: the background effect, your wallpapers, a floating logo or a clock.
+- **Six fonts**: Roboto, Inter, Montserrat, Nunito, Orbitron and Press Start 2P.
+- Selection colour, settings style, text size, borders (colour, width, glow: steady, pulsing, snake, fade, rainbow), panel opacity and corners.
+- **Menu music** (in order, random or one track, from the `music` folder) and interface sounds in four styles.
+
+## HD textures
+
+LAIKA 64 loads HD texture packs in the `.hts` format (the GLideN64 format). Put them in `hires_texture\<GAME NAME>\`, for example `hires_texture\SMASH REMIX\`. The folder is named after the game's internal name (the one in its ROM header). In **Settings > Graphics > HD textures** you turn them on and pick the pack when there are several (Y previews them).
+
+Packs load in the background, so the game doesn't wait for them. **Two clicks of R3** in game turn the HD textures on and off to compare; the shortcut can be switched off in **Settings > Controls > Button shortcuts**.
+
+## Performance
+
+- An optimised JIT recompiler, with per-game profiles for games that need them (GoldenEye, Perfect Dark, Quake and others).
+- ROMs larger than 64 MB, such as Smash Remix.
+- An on-screen performance monitor (**Settings > System > On-screen performance**): frame rate, CPU load, RAM in use, resolution and the CPU, GPU and RAM temperatures, with its position, size and colour. 60 FPS is full speed (50 for European games). It depends on the game: some still slow down in busy scenes.
 
 ## Controls
 
@@ -34,64 +83,51 @@ The emulator remembers the last game you picked. In Aurora it shows up as "LAIKA
 | D-pad | D-pad |
 | START | START |
 
-You can change these in **Settings > Controls**: pick an N64 button, press A, then press the Xbox button or stick direction you want for it. Y adds a second button, X clears it. Each player (1 to 4) has their own controls, and you can save them for all games or for one game. BACK is kept for the emulator's menu. Games made for the Rumble Pak make your controllers vibrate; you can turn it off on the same page.
+You can change these in **Settings > Controls**, where the N64 controller is drawn on screen: pick a button, press A, then press the Xbox button or stick direction you want for it. Y adds a second button, X clears it. **Auto setup** asks for each N64 button in turn. Each player (1 to 4) has their own controls, and you can save them for all games or for one game. The same page has the **stick calibration** (dead zone, sensitivity, response curve, a guided calibration and a test) and the Rumble Pak switch.
 
 While playing:
 
 - **Short press on BACK**: pause and open the menu (save or load a state, settings, reset, back to the game list, quit).
 - **BACK + RB**: save a state. **BACK + LB**: load it.
 - **BACK + D-pad left/right**: change the state slot (1 to 9).
+- **Two clicks of R3**: HD textures on or off.
 - **Hold BACK for 3 seconds**: back to the game list.
 
-In the game list, X shows the About page.
-
-## Box art and game info
-
-When you move through the game list, the right side shows the game's box art, its real title, year, developer, genre, number of players and a few lines about it.
-
-If your console is online, LAIKA 64 downloads these by itself the first time you select a game, and keeps them in the `art\games` folder next to the `.xex`. After that they show up straight away, even offline. To get everything in one go, open **Settings** from the game list (Y) and pick **Get box art for all games**. You can turn the downloads off in the same place.
-
-No internet on the console? Run the script on a PC instead (you need [Python 3](https://www.python.org)):
-
-```
-python tools/fetch_game_art.py "C:\path\to\your\roms"
-```
-
-It fills an `art\games` folder: copy it to the console, into the LAIKA 64 folder. Games it can't find just show their initials.
-
-The pictures and the text come from [libretro-thumbnails](https://github.com/libretro-thumbnails/Nintendo_-_Nintendo_64), [libretro-database](https://github.com/libretro/libretro-database), [GameDB-N64](https://github.com/niemasd/GameDB-N64) and Wikipedia. They are not part of LAIKA 64.
+These shortcuts can be changed in **Settings > Controls > Button shortcuts**. **Settings > System** also sets what happens when a controller is unplugged (pause the game, save and pause, or nothing) and a low battery warning.
 
 ## Saves
 
-Your in-game saves are kept automatically, one folder per game, in `saves\<game name> <code>\` next to the `.xex`. Save states go in the same folder. Copy that folder somewhere if you want a backup.
+Your in-game saves (EEPROM, SRAM, FlashRAM and Controller Pak) are kept automatically, one folder per game, in `saves\<game name> <code>\` next to the `.xex`. Save states go in the same folder: nine slots, each with a picture of the moment, and a confirmation before overwriting. Copy that folder somewhere if you want a backup.
 
 ## Settings
 
-Open the menu in a game, then **Settings**. You can save the settings for all games or just for the game you're playing.
+Open the menu in a game, or press Y in the game list, then **Settings**. You can save the settings for all games or just for the game you're playing.
 
-The **Graphics** page has four presets:
+The **Graphics** page has five presets:
 
+- **Recommended**: 1366x768 widescreen, bilinear filtering, colours as they are.
 - **Original**: the plain N64 picture.
 - **N64 Enhanced**: smoother textures and a little sharpening.
 - **N64 Smooth**: the same with light scanlines.
 - **N64 CRT**: looks like an old TV.
 
-You can also pick the resolution (native, x2 or x3 in 4:3, or HD 1280x720 in 16:9 widescreen, where the 3D view gets wider instead of being stretched; it works better in some games than others), texture filtering, edge smoothing and a few screen effects.
+You can also pick the resolution (4:3, or 16:9 up to 1366x768, where the 3D view gets wider instead of being stretched; it works better in some games than others), texture filtering, FXAA, sharpness, blur, anti-flicker, screen effects (scanlines, CRT, LCD grid and others), brightness and colour styles (vivid, warm, cool, sepia, black and white, retro green...).
 
 Every setting is explained in [docs/settings.md](docs/settings.md).
 
 ## Good to know
 
 - Some games show a black screen for about 4 seconds when they start. That's the cartridge's own boot check, it's normal.
-- The speed shown in the corner (turn it on in the settings) is the N64's frame rate: 60 is full speed, 50 for European games.
-- If a game misbehaves, try the other CPU mode in the settings (the interpreter is much slower but useful to compare), and tell us about it.
+- If a game misbehaves, try the other CPU mode in **Settings > System** (the interpreter is much slower but useful to compare), and tell us about it.
 
 ## Building
 
-You need Visual Studio 2010 and the Xbox 360 SDK. Open `platform/xbox360/harissa64v2.sln` and build the Release configuration for the Xbox 360 platform.
+You need Visual Studio 2010 and the Xbox 360 SDK. Open `platform/xbox360/harissa64v2.sln` and build the Release configuration for the Xbox 360 platform, or run `build_release.ps1`, which also packs the release folder.
 
 ## Credits and licence
 
-LAIKA 64 is free software under the GPL v2, see [LICENSE](LICENSE). Some parts come from or are based on other open-source projects (ares, ParaLLEl-RDP, mupen64plus, libdragon, GLideN64, zlib and others), and the interface uses the Inter and Noto Sans Arabic fonts. [THIRD_PARTY.md](THIRD_PARTY.md) lists them with their licences. Thanks to all of them.
+LAIKA 64 is developed by ErickaguirreD. It is based on **Harissa64**, the original emulator by **Mohamed Aymen (kernel64)**: thanks to him for the work everything here stands on.
+
+LAIKA 64 is free software under the GPL v2, see [LICENSE](LICENSE). Some parts come from or are based on other open-source projects (ares, ParaLLEl-RDP, mupen64plus, libdragon, GLideN64, minimp3, stb, zlib and others), with display filters by Timothy Lottes and AMD. The interface uses the Inter, Roboto, Montserrat, Nunito, Orbitron, Press Start 2P and Noto Sans Arabic fonts. [THIRD_PARTY.md](THIRD_PARTY.md) lists them with their licences. Thanks to all of them, and to the Xbox 360 and N64 community that tests every release.
 
 Nintendo 64 is a trademark of Nintendo. This project is not affiliated with or endorsed by Nintendo.

@@ -1,5 +1,5 @@
 // Harissa64 V2 - menu languages (Xbox 360): English, Spanish, German, French,
-// Arabic, Brazilian Portuguese and Russian.
+// Arabic, Brazilian Portuguese, Russian and Italian.
 //
 // The texts are in platform/xbox360/lang/<code>.txt; tools/gen_lang.py checks
 // them and writes xb_lang_table.h (T_* ids, UTF-8 strings, Arabic already
@@ -12,7 +12,7 @@
 
 #include "xb_lang_table.h"
 
-enum { LANG_EN = 0, LANG_ES, LANG_DE, LANG_FR, LANG_AR, LANG_PT, LANG_RU };
+enum { LANG_EN = 0, LANG_ES, LANG_DE, LANG_FR, LANG_AR, LANG_PT, LANG_RU, LANG_IT };
 
 // A text in the current language.
 const char *Tr(int id);

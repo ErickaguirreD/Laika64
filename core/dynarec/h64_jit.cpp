@@ -30,6 +30,7 @@ void h64_jit_reset(H64System *sys)
     memset(j->indEnt, 0xFF, 1024);
     memset(j->codeMap, 0, (H64_RDRAM_SIZE >> H64_JIT_CHUNK_SHIFT) * sizeof(u16));
     j->blockCount = 0;
+    j->freeSlotCount = 0;
     j->linkCount = 0;
     j->freeLink = -1;
     j->lastExit = 0;
@@ -46,6 +47,10 @@ void h64_jit_reset(H64System *sys)
     j->coldBase = (j->hotPermille ? j->memSize / 1000 * j->hotPermille : j->memSize / 12 * 5) & ~63u;
     j->coldUsed = j->coldBase;
     h64_jit_emit_runtime(sys);   // sets memUsed past the shared code
+    j->rtEnd = j->memUsed;
+    j->hotClear = j->coldBase;
+    j->coldClear = j->memSize;
+    j->evictGen++;
     j->curInvalidated = 1;
     j->stats.flushes++;
 }
@@ -61,15 +66,16 @@ int h64_jit_init(H64System *sys, void *execMem, u32 size, void (*flushIcache)(vo
     j->flushIcache = flushIcache;
     j->blockCap = 32768;
     j->blocks = (H64JitBlock *)calloc(j->blockCap, sizeof(H64JitBlock));
+    j->freeSlots = (u32 *)calloc(j->blockCap, sizeof(u32));
     j->linkCap = 65536;
     j->links = (H64JitLink *)calloc(j->linkCap, sizeof(H64JitLink));
     j->codeMap = (u16 *)calloc(H64_RDRAM_SIZE >> H64_JIT_CHUNK_SHIFT, sizeof(u16));
     j->indPc = (u32 *)calloc(1024, sizeof(u32));
     j->indBody = (u32 **)calloc(1024, sizeof(u32 *));
     j->indEnt = (s8 *)malloc(1024);
-    if (!j->blocks || !j->links || !j->codeMap || !j->indPc || !j->indBody || !j->indEnt)
+    if (!j->blocks || !j->freeSlots || !j->links || !j->codeMap || !j->indPc || !j->indBody || !j->indEnt)
     {
-        free(j->blocks); free(j->links); free(j->codeMap); free(j->indPc); free(j->indBody); free(j->indEnt); free(j);
+        free(j->blocks); free(j->freeSlots); free(j->links); free(j->codeMap); free(j->indPc); free(j->indBody); free(j->indEnt); free(j);
         return -1;
     }
     j->runEnd = ~0ull;
@@ -90,6 +96,7 @@ void h64_jit_free(H64System *sys)
 {
     if (!sys->jit) return;
     free(sys->jit->blocks);
+    free(sys->jit->freeSlots);
     free(sys->jit->links);
     free(sys->jit->codeMap);
     free(sys->jit->indPc);
@@ -158,6 +165,157 @@ static void unlink_block(H64Jit *j, H64JitBlock *b)
         u32 k = (b->vpc >> 2) & 1023;   // its indirect-jump entry
         if (j->indBody[k] == b->body) { j->indBody[k] = 0; j->indPc[k] = 0xFFFFFFFFu; j->indEnt[k] = -1; }
     }
+}
+
+// ---- Ring mode: evictions ----
+// Drops a block for good: its record and its code memory are used again. Exits
+// linked into it are put back (unlink_block); exits linked out of it are freed by
+// the caller (their branch words lie in the code being given back).
+static void evict_block(H64Jit *j, H64JitBlock *b)
+{
+    H64JitBlock **p;
+    if (b->valid)
+    {
+        // Still live: out of its page list and the store map (an invalidated one already is).
+        b->valid = 0;
+        h64_jit_code_map(j, b, -1);
+        for (p = &j->pageHead[b->paddr >> 12]; *p; p = &(*p)->pageNext)
+            if (*p == b) { *p = b->pageNext; break; }
+    }
+    unlink_block(j, b);
+    for (p = &j->hash[hash_of(b->vpc)]; *p; p = &(*p)->hashNext)
+        if (*p == b) { *p = b->hashNext; break; }
+    if (j->staleBlock == b) j->staleBlock = 0;
+    b->live = 0;
+    j->freeSlots[j->freeSlotCount++] = (u32)(b - j->blocks);
+    j->stats.evictedBlocks++;
+}
+
+// The code of the blocks evicted by one evict_range, as sorted [start, end) byte
+// offsets: an exit's branch word is looked up in it by binary search. (Testing each
+// link against each evicted block - ~40000 links by ~1500 blocks - took long enough
+// to drop frames: Smash Remix fell to 40-50 VI/s at every eviction.)
+struct EvictSpan { u32 start, end; };
+static int span_cmp(const void *a, const void *b)
+{
+    u32 x = ((const EvictSpan *)a)->start, y = ((const EvictSpan *)b)->start;
+    return x < y ? -1 : x > y;
+}
+
+static int in_spans(const EvictSpan *s, u32 n, const u8 *mem, const u32 *w)
+{
+    u32 off = (u32)((const u8 *)w - mem), lo = 0, hi = n;
+    while (lo < hi)   // the last span starting at or before off
+    {
+        u32 mid = (lo + hi) / 2;
+        if (s[mid].start <= off) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo > 0 && off < s[lo - 1].end;
+}
+
+// What fills the code memory (diagnosis, logged when it fills and every 100
+// evictions): the live blocks, the MIPS words they cover once and in all
+// (the same code compiled into several blocks), the TLB-mapped ones, and the
+// hot and cold bytes a MIPS instruction takes.
+void h64_jit_log_footprint(H64Jit *j, const char *why)
+{
+    static u8 *seen;   // a bit per RDRAM word
+    u32 i, live = 0, mapped = 0, words = 0, unique = 0, starts = 0;
+    u64 hot = 0, cold = 0;
+    if (!seen) seen = (u8 *)malloc(H64_RDRAM_SIZE / 32);
+    if (seen) memset(seen, 0, H64_RDRAM_SIZE / 32);
+    for (i = 0; i < j->blockCount; i++)
+    {
+        const H64JitBlock *b = &j->blocks[i];
+        u32 k;
+        if (!b->live) continue;
+        live++;
+        if (b->vpc < 0x80000000u || b->vpc >= 0xC0000000u) mapped++;
+        words += b->insns;
+        hot += b->hotEnd > b->hotOff ? b->hotEnd - b->hotOff : 0;
+        cold += b->coldEnd > b->coldOff ? b->coldEnd - b->coldOff : 0;
+        if (!seen || b->paddr + b->insns * 4 > H64_RDRAM_SIZE) continue;
+        if (!(seen[(b->paddr >> 2) >> 3] & (1 << ((b->paddr >> 2) & 7)))) starts++;
+        for (k = 0; k < b->insns; k++)
+        {
+            u32 w = (b->paddr >> 2) + k;
+            if (!(seen[w >> 3] & (1 << (w & 7)))) { seen[w >> 3] |= (u8)(1 << (w & 7)); unique++; }
+        }
+    }
+    H64_INFO("[jit] footprint (%s): %u live blocks (%u TLB-mapped), %u MIPS words compiled, %u distinct (%.2f copies each); "
+             "hot %u KB, cold %u KB: %.0f + %.0f bytes a MIPS word", why, live, mapped, words, unique, unique ? (double)words / unique : 0.0,
+             (u32)(hot >> 10), (u32)(cold >> 10), words ? (double)hot / words : 0.0, words ? (double)cold / words : 0.0);
+    (void)starts;
+}
+
+// Evicts every block with code in [lo, hi) of the hot (cold = 0) or cold part.
+static void evict_range(H64Jit *j, int cold, u32 lo, u32 hi)
+{
+    static EvictSpan *spans;   // the hot and cold code of the blocks evicted here
+    static u32 spanCap;
+    u32 i, n = 0, dropped = 0;
+    if (spanCap < j->blockCap * 2)
+    {
+        free(spans);
+        spans = (EvictSpan *)malloc(j->blockCap * 2 * sizeof(EvictSpan));
+        spanCap = spans ? j->blockCap * 2 : 0;
+    }
+    for (i = 0; i < j->blockCount; i++)
+    {
+        H64JitBlock *b = &j->blocks[i];
+        u32 a = cold ? b->coldOff : b->hotOff, e = cold ? b->coldEnd : b->hotEnd;
+        if (!b->live || a >= hi || e <= lo || a == e) continue;
+        evict_block(j, b);
+        dropped++;
+        if (spans && b->hotEnd > b->hotOff) { spans[n].start = b->hotOff; spans[n].end = b->hotEnd; n++; }
+        if (spans && b->coldEnd > b->coldOff) { spans[n].start = b->coldOff; spans[n].end = b->coldEnd; n++; }
+    }
+    if (n) qsort(spans, n, sizeof(EvictSpan), span_cmp);
+    // Exits linked out of the evicted blocks: their branch words are being given
+    // back, so the records go (taken out of their target's list) without putting
+    // anything back into that memory.
+    for (i = 0; n && i < j->linkCount; i++)
+    {
+        H64JitLink *l = &j->links[i];
+        int *q;
+        if (!l->patch || !in_spans(spans, n, j->mem, l->patch)) continue;
+        for (q = &j->blocks[l->target].linkHead; *q >= 0; q = &j->links[*q].next)
+            if (*q == (int)i) { *q = l->next; break; }
+        free_link(j, (int)i);
+    }
+    if (j->lastExit && n && in_spans(spans, n, j->mem, j->lastExit)) j->lastExit = 0;
+    j->evictGen++;
+    j->stats.evictions++;
+    if (j->stats.evictions <= 10 || j->stats.evictions % 100 == 0)
+        H64_INFO("[jit] code memory ring: %s part %u-%u KB given back, %u blocks dropped (%llu evictions)", cold ? "cold" : "hot",
+                 lo >> 10, hi >> 10, dropped, (unsigned long long)j->stats.evictions);
+    if (j->stats.evictions % 100 == 0) h64_jit_log_footprint(j, "ring");
+}
+
+int h64_jit_make_room(H64Jit *j, u32 hotBytes, u32 coldBytes)
+{
+    // A 64th of each part at a time: the blocks still needed come back a few hundred at
+    // a time (a 16th dropped ~1500 at once).
+    u32 hotChunk = ((j->coldBase - j->rtEnd) / 64 + 15) & ~15u, coldChunk = ((j->memSize - j->coldBase) / 64 + 15) & ~15u;
+    if (!j->hotPermille || !j->freeSlots)   // the first fill: one full flush (it sets the split, h64_jit_reset)
+        return j->blockCount < j->blockCap && j->memUsed + hotBytes <= j->coldBase && j->coldUsed + coldBytes <= j->memSize;
+    if (hotBytes + hotChunk > j->coldBase - j->rtEnd || coldBytes + coldChunk > j->memSize - j->coldBase) return 0;
+    if (j->memUsed + hotBytes > j->coldBase) { j->memUsed = j->rtEnd; j->hotClear = j->rtEnd; }
+    while (j->memUsed + hotBytes > j->hotClear)
+    {
+        u32 e = j->hotClear + hotChunk > j->coldBase ? j->coldBase : j->hotClear + hotChunk;
+        evict_range(j, 0, j->hotClear, e);
+        j->hotClear = e;
+    }
+    if (j->coldUsed + coldBytes > j->memSize) { j->coldUsed = j->coldBase; j->coldClear = j->coldBase; }
+    while (j->coldUsed + coldBytes > j->coldClear)
+    {
+        u32 e = j->coldClear + coldChunk > j->memSize ? j->memSize : j->coldClear + coldChunk;
+        evict_range(j, 1, j->coldClear, e);
+        j->coldClear = e;
+    }
+    return j->freeSlotCount || j->blockCount < j->blockCap;
 }
 
 static u32 s_invalLog;   // h64test --jit-inval N: the first N invalidating writes are logged
@@ -320,11 +478,13 @@ void h64_jit_run_one(H64System *sys)
     u32 *lastExit = j->lastExit, lastTarget = j->lastExitTarget;
     int tlbEntry = -1;   // the TLB entry pc32 goes through (-1: KSEG0/1)
     u64 flushes;
+    u32 evictGen;
 
     // The shared routines (rtLink, rtIndirect) and the blocks were made for
     // one cycles-per-instruction value: the front end sets cpi after init.
     if (cpu->cpi != j->rtCpi) h64_jit_reset(sys);
     flushes = j->stats.flushes;
+    evictGen = j->evictGen;
     lastExit = j->lastExit;
     j->lastExit = 0;
     process_events(sys);
@@ -445,7 +605,8 @@ void h64_jit_run_one(H64System *sys)
     // that next time it jumps here directly. Native blocks only; idle loops
     // stay with the dispatcher (skipping). Links into TLB-mapped code
     // (Perfect Dark, GoldenEye, Conker) are undone whenever the TLB changes.
-    if (lastExit && lastTarget == pc32 && flushes == j->stats.flushes && !j->noLink && b->kernel && b->valid && !b->idle)
+    if (lastExit && lastTarget == pc32 && flushes == j->stats.flushes && evictGen == j->evictGen && !j->noLink && b->kernel && b->valid &&
+        !b->idle)
         link_exit(j, lastExit, b, -1);
     // Known to rtIndirect: native blocks that are not idle loops, in KSEG0/1
     // or TLB-mapped (GoldenEye's code is all at 0x7F...: every jr ra went back
