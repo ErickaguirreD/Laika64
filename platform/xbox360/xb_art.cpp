@@ -1206,7 +1206,16 @@ static int step_bulk(void)
     // (Without `retry`, a ROM whose files are complete or known missing needs no network at all.)
     // The description in the menus' language too (it was only fetched for a
     // game selected online, after its pictures: most had none).
-    if (download_missing(path, retry, (int)s_kind) | download_desc(path))
+    // Every kind of picture at once when the screenshots and logos are wanted too (they used to come
+    // only for a game shown in the list); the box art (or the kind shown) only otherwise.
+    int got = download_missing(path, retry, (int)s_kind);
+    if (s_extrasAllowed)
+    {
+        int k;
+        for (k = 0; k < ART_KIND_COUNT; k++)
+            if (k != (int)s_kind) got |= download_missing(path, retry, k);
+    }
+    if (got | download_desc(path))
     {
         EnterCriticalSection(&s_lock);
         s_delivered.erase(path);   // shown again if the browser still wants it
@@ -1226,22 +1235,31 @@ static int step_bulk(void)
             cover = file_exists(png);
         }
         {
-            // Nothing left to fetch without "download all": the picture is there, or
+            // Nothing left to fetch without "download all": the pictures are there, or
             // known not to be (not in the databases, or looked for and missing).
-            int kind = (int)s_kind, settled = !id->ok;
+            // With the screenshots and logos: all four kinds ("a|"), else the one shown.
+            int kind = (int)s_kind, all = s_extrasAllowed != 0, settled = !id->ok;
             if (id->ok && load_info(id, &info))
             {
-                char p[128];
-                art_path(id->key, s_kindPng[kind], p, sizeof(p));
-                if (!info.found || file_exists(p)) settled = 1;
-                else if (kind == ART_KIND_BOX) settled = info.cover == 0;
-                else { art_path(id->key, s_kindNone[kind], p, sizeof(p)); settled = file_exists(p); }
+                int k;
+                settled = 1;
+                for (k = 0; k < ART_KIND_COUNT; k++)
+                {
+                    char p[128];
+                    if (!all && k != kind) continue;
+                    art_path(id->key, s_kindPng[k], p, sizeof(p));
+                    if (!info.found || file_exists(p)) continue;
+                    if (k == ART_KIND_BOX) { if (info.cover != 0) settled = 0; continue; }
+                    art_path(id->key, s_kindNone[k], p, sizeof(p));
+                    if (!file_exists(p)) settled = 0;
+                }
             }
             if (settled)
             {
                 char line[16];
                 std::string k;
-                sprintf(line, "%d|", kind);
+                if (all) strcpy(line, "a|");
+                else sprintf(line, "%d|", kind);
                 k = line + path;
                 int fresh;
                 EnterCriticalSection(&s_lock);   // ArtBulkStart reads it on the UI thread
@@ -1285,7 +1303,7 @@ static DWORD WINAPI art_thread(LPVOID)
     for (;;)
     {
         WaitForSingleObject(s_event, 100);
-        while (!s_paused && (step_wants() || step_bulk())) ;
+        while (s_paused != 1 && ((!s_paused && step_wants()) || step_bulk())) ;   // 2: the downloads only
     }
 }
 
@@ -1338,8 +1356,8 @@ void ArtSetExtras(int allowed) { InterlockedExchange(&s_extrasAllowed, allowed ?
 
 void ArtPause(int paused)
 {
-    InterlockedExchange(&s_paused, paused ? 1 : 0);
-    if (!paused && s_event) SetEvent(s_event);
+    InterlockedExchange(&s_paused, paused == 2 ? 2 : paused ? 1 : 0);
+    if (paused != 1 && s_event) SetEvent(s_event);
 }
 
 void ArtWant(const char *const *paths, int count)
@@ -1499,7 +1517,8 @@ void ArtBulkStart(const char *const *paths, int count, int retry)
     if (!s_status.bulk && count > 0)
     {
         char pre[16];
-        sprintf(pre, "%d|", (int)s_kind);
+        if (s_extrasAllowed) strcpy(pre, "a|");   // every kind of picture settled (step_bulk)
+        else sprintf(pre, "%d|", (int)s_kind);
         s_bulk.clear();
         // The automatic pass leaves out what is settled (s_complete); "download all" takes everything.
         for (i = 0; i < count; i++)

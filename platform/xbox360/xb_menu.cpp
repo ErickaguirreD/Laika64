@@ -618,6 +618,7 @@ static const struct { int label, desc; } s_rowDesc[] = {
     { T_ANTIFLICKER, T_D_ANTIFLICKER },
     { T_ART_DOWNLOADS, T_D_ART_DOWNLOADS },
     { T_ART_EXTRAS, T_D_ART_EXTRAS },
+    { T_ART_BACKGROUND, T_D_ART_BACKGROUND },
     { T_ABOUT, T_D_ABOUT },
     { T_AUDIO_MARGIN, T_D_AUDIO_MARGIN },
     { T_AUDIO_OUTPUT, T_D_AUDIO_OUTPUT },
@@ -1596,7 +1597,6 @@ static void res_step(Config *c, int wide, int dir)
 }
 
 // V-Sync: off, on (a late frame goes at once), aggressive (every frame waits).
-static const char *vsync_name(int v) { return Tr(v == 2 ? T_VSYNC_AGGR : v ? T_ON : T_OFF); }
 // The value of a 0..100 row drawn as a bar (draw_value), into `out`.
 // The sharpening and blur steps (presets compare them) from the bars.
 static void levels_to_steps(Config *c)
@@ -1703,7 +1703,7 @@ static void settings_values(UiMenu *m, const Config *c)
         bar_value(m->value[SCR_BRIGHT], c->brightLevel);
         (void)br;
         sprintf(m->value[SCR_COLOR], "< %s >", Tr(s_colorStyleLabels[c->colorStyle < 0 || c->colorStyle > 7 ? 0 : c->colorStyle]));
-        sprintf(m->value[SCR_VSYNC], "< %s >", vsync_name(c->vsync));
+        sprintf(m->value[SCR_VSYNC], "%s", toggle(c->vsync == 2));   // a switch: off, or the TV always waited for (the one-time "aggressive")
         (void)scr;
         return;
     }
@@ -1962,7 +1962,7 @@ static int interface_input(UiMenu *m, Config *c, WORD down)
 // here from the flat one), a picture from the game, its title screen, its
 // logo (libretro-thumbnails; the box shows until that one is downloaded, or
 // when there is none) - and whether missing pictures are downloaded.
-enum { IM_KIND = 0, IM_DOWNLOAD, IM_EXTRAS };
+enum { IM_KIND = 0, IM_DOWNLOAD, IM_EXTRAS, IM_BACKGROUND };
 static const int s_artKindLabels[CONFIG_ART_COUNT] = { T_KIND_BOX2D, T_KIND_BOX3D, T_KIND_SNAP, T_KIND_TITLE, T_KIND_LOGO };
 
 // The worker's kind of picture for Config::artKind (the 3D box is the box, drawn otherwise).
@@ -1977,17 +1977,19 @@ static void images_values(UiMenu *m, const Config *c)
     sprintf(m->value[IM_KIND], "< %s >", Tr(s_artKindLabels[c->artKind >= 0 && c->artKind < CONFIG_ART_COUNT ? c->artKind : 0]));
     sprintf(m->value[IM_DOWNLOAD], "%s", toggle(c->artDownload));
     sprintf(m->value[IM_EXTRAS], "%s", toggle(c->artDownload && c->artExtras));
+    sprintf(m->value[IM_BACKGROUND], "%s", toggle(c->artDownload && c->artBackground));
 }
 
 static void settings_images(UiMenu *m, const Config *c)
 {
-    static const unsigned char icons[] = { UI_ICON_FRAME, UI_ICON_LOAD, UI_ICON_LOAD };
+    static const unsigned char icons[] = { UI_ICON_FRAME, UI_ICON_LOAD, UI_ICON_LOAD, UI_ICON_LOAD };
     s_interfacePage = 0;
     s_imagesPage = 1;
     UiMenuClear(m, Tr(T_GAME_IMAGES), Tr(T_FOOT_SELECT));
     UiMenuAdd(m, Tr(T_IMG_KIND), "");
     UiMenuAdd(m, Tr(T_ART_DOWNLOADS), "");
     UiMenuAdd(m, Tr(T_ART_EXTRAS), "");
+    UiMenuAdd(m, Tr(T_ART_BACKGROUND), "");
     UiMenuIcons(m, icons, sizeof(icons));
     images_values(m, c);
 }
@@ -2007,6 +2009,14 @@ static int images_input(UiMenu *m, Config *c, WORD down)
     {
         c->artKind = ((c->artKind >= 0 && c->artKind < CONFIG_ART_COUNT ? c->artKind : 0) + (dir ? dir : 1) + CONFIG_ART_COUNT) % CONFIG_ART_COUNT;
         ui_from_config(c);   // the 3D box at once; another picture when the list is back
+        images_values(m, c);
+        return SET_CHANGED;
+    }
+    if (m->sel == IM_BACKGROUND)
+    {
+        // The downloads of every game going on during a game (with the downloads on).
+        if (!c->artDownload) return SET_ART_ASK;
+        c->artBackground = !c->artBackground;
         images_values(m, c);
         return SET_CHANGED;
     }
@@ -3886,7 +3896,7 @@ static int screen_input(UiMenu *m, Config *c, WORD down)
             if (c->brightLevel > 100) c->brightLevel = 100;
             break;
         case SCR_COLOR: c->colorStyle = ((c->colorStyle < 0 || c->colorStyle > 7 ? 0 : c->colorStyle) + dir + 8) % 8; break;
-        case SCR_VSYNC: c->vsync = ((c->vsync < 0 || c->vsync > 2 ? 0 : c->vsync) + dir + 3) % 3; break;
+        case SCR_VSYNC: c->vsync = c->vsync == 2 ? 0 : 2; break;
         default: return SET_NONE;   // SCR_CAL with a left/right press: no value of its own to cycle
         }
         settings_values(m, c);
@@ -5997,6 +6007,39 @@ static int confirm_ask(IDirect3DDevice9 *dev, int title, int question, int foote
 
 static int confirm_quit(IDirect3DDevice9 *dev) { return confirm_ask(dev, T_QUIT_TITLE, T_QUIT_ASK, T_FOOT_QUIT); }
 
+// The updater's screen: "Downloading LAIKA 64 x.y" with moving dots while xb_update's thread
+// downloads, checks and installs it. 1 installed (start it), 0 failed (the reason logged).
+static int update_run(IDirect3DDevice9 *dev, const char *version)
+{
+    char line[128], why[96];
+    int st;
+    UpdateInstallStart(version);
+    for (;;)
+    {
+        const float w = 640, h = 190, x = (UI_WIDTH - w) * 0.5f, y = (UI_HEIGHT - h) * 0.5f;
+        int k, dots = (int)(UiTime() * 3.0f) % 4;
+        st = UpdateInstallState(why, sizeof(why));
+        if (st == 2 || st < 0) break;
+        _snprintf(line, sizeof(line) - 1, Tr(T_UPDATE_WORKING), version);
+        line[sizeof(line) - 1] = 0;
+        dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
+        UiBegin(dev);
+        UiBackdrop();
+        edge_glow(x, y, w, h, 22);
+        UiPanel(x, y, w, h, 22);
+        UiText(UI_BOLD, 26, x + w * 0.5f, y + 62, UI_COL_TEXT, line, UI_CENTER);
+        for (k = 0; k < 3; k++)
+            UiCircle(x + w * 0.5f - 24 + k * 24, y + 112, 6, k < dots ? UI_COL_ACCENT_HI : UI_COL_LINE);
+        UiText(UI_REGULAR, 17, x + w * 0.5f, y + 152, UI_COL_TEXT3, Tr(T_UPDATE_WAIT), UI_CENTER);
+        UiEnd();
+        dev->Present(NULL, NULL, NULL, NULL);
+        Sleep(16);
+    }
+    if (st == 2) return 1;
+    H64_INFO("[update] %s", why);
+    return 0;
+}
+
 // ---- About ----
 // Settings > About (and X in the ROM browser and the in-game menu): three tabs,
 // the emulator (version, engine, licence), the credits (who made it, what is new
@@ -7983,6 +8026,7 @@ static void settings_loop(IDirect3DDevice9 *dev, Config *c, const char *settings
             {
                 c->artDownload = 1;
                 if (extras) c->artExtras = 1;
+                if (s_imagesPage && m.sel == IM_BACKGROUND) c->artBackground = 1;   // asked from Download while playing
             }
             settings_values(&m, c);
             UiInputInit(&in);
@@ -10143,6 +10187,23 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
             msgAt = GetTickCount();
             xb_audio_ui_sound(XB_SFX_NOTIFY);
             H64_INFO("[update] %s", msg);
+            // The updater: asked first; yes downloads, checks and installs it, then LAIKA 64 starts again.
+            if (confirm_ask(dev, T_UPDATE_TITLE, T_UPDATE_ASK, T_FOOT_UPDATE))
+            {
+                views_clear(dev);   // the memory for the download
+                ArtPause(1);
+                if (update_run(dev, newVersion))
+                {
+                    xb_audio_music_stop();
+                    XLaunchNewImage("game:\\default.xex", 0);   // the new version
+                }
+                ArtPause(0);
+                lastSel = -1;   // the pictures again
+                _snprintf(msg, sizeof(msg) - 1, "%s", Tr(T_UPDATE_FAILED));
+                msg[sizeof(msg) - 1] = 0;
+                msgAt = GetTickCount();
+            }
+            UiInputInit(&in);
         }
         if (ArtTakeNote(msg, sizeof(msg))) { msgAt = GetTickCount(); xb_audio_ui_sound(XB_SFX_NOTIFY); }
         if (BatteryCheck(c, msg, sizeof(msg))) { msgAt = GetTickCount(); xb_audio_ui_sound(XB_SFX_NOTIFY); }
@@ -10202,9 +10263,10 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
                     path[pathSize - 1] = 0;
                     strncpy(c->lastRom, path, sizeof(c->lastRom) - 1);
                     ConfigWriteMenuKeys(c, settingsPath, 1);
-                    // The game needs the memory and the GPU: the pictures go, the worker waits.
+                    // The game needs the memory and the GPU: the pictures go, the worker waits
+                    // (or goes on with the downloads only: Game images > Download while playing).
                     views_clear(dev);
-                    ArtPause(1);
+                    ArtPause(c->artBackground && c->artDownload ? 2 : 1);
                     xb_audio_music_stop();
                     xb_audio_ui_sound_instead(XB_SFX_LAUNCH);
                     return 1;
@@ -10268,7 +10330,7 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
                         strncpy(c->lastRom, path, sizeof(c->lastRom) - 1);
                         ConfigWriteMenuKeys(c, settingsPath, 1);
                         views_clear(dev);
-                        ArtPause(1);
+                        ArtPause(c->artBackground && c->artDownload ? 2 : 1);
                         xb_audio_music_stop();
                         xb_audio_ui_sound(XB_SFX_LAUNCH);
                         return 1;
@@ -10363,7 +10425,7 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
         }
         if (down & XINPUT_GAMEPAD_Y)
         {
-            int artWas = c->artDownload;
+            int artWas = c->artDownload, extrasWas = c->artExtras;
             std::string keep = n ? roms[sel].file : std::string();
             s_browserSel = keep;   // Settings > System > Game at start can pick it
             {
@@ -10388,7 +10450,8 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
             }
             ArtSetNetwork(c->artDownload && art_net_possible(c));
             ArtSetExtras(c->artExtras);
-            if (!artWas && c->artDownload && !allRoms.empty() && art_net_possible(c)) ArtBulkStart(&allPaths[0], (int)allPaths.size(), 0);   // downloads just turned on
+            if (((!artWas && c->artDownload) || (artWas && c->artDownload && !extrasWas && c->artExtras)) && !allRoms.empty() && art_net_possible(c))
+                ArtBulkStart(&allPaths[0], (int)allPaths.size(), 0);   // downloads (or the screenshots and logos) just turned on: every game's
             // The categories may have changed: the tab again (or "every game" if its category went).
             sel = browser_retab(allRoms, &roms, &paths, keep);
             n = (int)roms.size();

@@ -61,6 +61,8 @@ void ArtSetNetwork(int allowed);
 // With downloads on: 0 fetches only the box art (not pictures from the game, title screens, logos).
 void ArtSetExtras(int allowed);
 // While a game runs: the worker finishes what it is doing and waits.
+// 0 runs, 1 waits (a game is running), 2 only the downloads of every game go on (a game is running,
+// Game images > Download while playing): no pictures are read for the list.
 void ArtPause(int paused);
 // The ROMs the browser shows, the selection first (`count` up to 64: the list
 // view wants 5, a covers grid its visible page and then the pages on either

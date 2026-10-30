@@ -38,7 +38,7 @@ In Aurora LAIKA 64 shows up with its own cover and background: they are in the `
 
 When the console is online, LAIKA 64 downloads the pictures and information by itself the first time a game is shown, and keeps them in the `art\games` folder next to the `.xex`. After that they show up straight away, even offline. Box art is kept in a compressed cache so large libraries open quickly.
 
-In **Settings > Interface > Game images** you choose which picture the list shows and what is downloaded: **box art downloads** (box art and game information) and, on their own row, **screenshot and logo downloads** (pictures from the game, title screens and logos). To get everything in one go, pick **Get box art for all games** in Settings.
+In **Settings > Interface > Game images** you choose which picture the list shows and what is downloaded: **box art downloads** (box art and game information) and, on their own row, **screenshot and logo downloads** (pictures from the game, title screens and logos). Every game's pictures are downloaded in one go in the background (all four kinds with screenshot and logo downloads on), and **Get box art for all games** in Settings tries again what was missing. With **Download while playing** on, the downloads go on during a game, with a note when they start and when they end.
 
 No internet on the console? Run the script on a PC instead (you need [Python 3](https://www.python.org)):
 
@@ -128,6 +128,10 @@ The **Graphics** page has five presets:
 You can also pick the resolution (4:3, or 16:9 up to 1366x768, where the 3D view gets wider instead of being stretched; it works better in some games than others), texture filtering, FXAA, sharpness, blur, anti-flicker, screen effects (scanlines, CRT, LCD grid and others), brightness and colour styles (vivid, warm, cool, sepia, black and white, retro green...).
 
 Every setting is explained in [docs/settings.md](docs/settings.md).
+
+## Updates
+
+When a new version is published on [GitHub](https://github.com/ErickaguirreD/Laika64/releases), LAIKA 64 says so in the game list and offers to install it. It downloads the new `default.xex`, checks it (an Xbox 360 executable whose SHA-1 matches the release's `default.xex.sha1`), keeps the version you had as `default.xex.bak` and starts again. To go back, rename `default.xex.bak` to `default.xex`. The check can be turned off with `updatecheck=0` in `config\settings.ini`.
 
 ## Good to know
 

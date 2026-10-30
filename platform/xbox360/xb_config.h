@@ -50,7 +50,7 @@ struct Config
     int blur;           // blur=0|1|2: blur (off, soft, strong)
     int screen;         // screen=0..4: none, scanlines, CRT, curved CRT, LCD grid (crt=1: curved CRT)
     int brightness;     // brightness=0|1|2: as the console, lighter, much lighter
-    int vsync;          // vsync=0|1|2: off (default), frames on time wait for the TV's refresh, all of them wait (aggressive)
+    int vsync;          // vsync=0|2: off (default), or every frame waits for the TV's refresh (V-Sync on; 1, the old "normal", reads as 2)
     int deflicker;      // deflicker=0|1: each picture shown mixed with the previous one (default 0)
     int zoom;           // zoom=N: picture size in percent (default 100)
     int offsetX, offsetY;   // posx=, posy=: picture position in output pixels (default 0)
@@ -80,6 +80,7 @@ struct Config
     int gameFlags;      // gameflags=HEX: the game's profile flags instead of the table's (checks; -1: the table)
     int updateCheck;    // updatecheck=0: do not ask GitHub for a newer release (xb_update.cpp); 2: as if running 0.0.0 (testing)
     int artExtras;      // artextras=1 (default): with artdownload, the pictures from the game, title screens and logos are downloaded too (0: the box art only)
+    int artBackground;  // artbg=1: the downloads of every game go on while a game is played (0, default: they wait for the list)
     int artDownload;    // artdownload=0: the ROM browser uses only the box art and game information already in
                         // <drive>:\art\games\ (xb_art.cpp); 1 (default): it downloads what is missing; 2: also in Xenia
     int browserDemo;    // browserdemo=N: the ROM browser moves its selection down every N ms (captures in Xenia)

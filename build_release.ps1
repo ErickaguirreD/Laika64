@@ -98,7 +98,7 @@ New-Item -ItemType Directory -Force (Join-Path $stage 'art') | Out-Null
 foreach ($f in 'cover.png', 'background.png', 'icon.png') { Copy-Item (Join-Path $art $f) (Join-Path $stage 'art') }
 # The PC script that fills art\games\ (box art, game information) for consoles without internet.
 New-Item -ItemType Directory -Force (Join-Path $stage 'tools') | Out-Null
-Copy-Item (Join-Path $repo 'tools\fetch_game_art.py') (Join-Path $stage 'tools')
+Copy-Item (Join-Path $repo 'tools\fetch_game_art.py'), (Join-Path $repo 'tools\make_hts.py') (Join-Path $stage 'tools')
 
 $install = @"
 LAIKA 64 $version - Nintendo 64 emulator for Xbox 360 (RGH/JTAG)
@@ -146,6 +146,12 @@ try {
     $count = $zipFile.Entries.Count
 }
 finally { $zipFile.Dispose() }
+
+# The updater's files (attached to the GitHub release next to the zip): default.xex and its SHA-1,
+# which the console checks before it puts a downloaded version in place (xb_update.cpp).
+$sha = (Get-FileHash -Algorithm SHA1 -LiteralPath $xex).Hash.ToLower()
+[IO.File]::WriteAllText((Join-Path $releaseDir 'default.xex.sha1'), "$sha  default.xex`n")
+Copy-Item $xex (Join-Path $releaseDir 'default.xex') -Force
 
 $size = [math]::Round((Get-Item $zip).Length / 1MB, 2)
 Step "Done: release\LAIKA 64-$version.zip ($size MB, $count entries)"

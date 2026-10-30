@@ -41,6 +41,7 @@
 #include "xb_ui.h"
 #include "xb_menu.h"
 #include "xb_audio.h"
+#include "xb_art.h"
 
 // ---- Recompiler code memory (M0.3 result: only an image section linked
 // writable + executable runs generated code; /SECTION:.jitc,ERW in the project) ----
@@ -1597,8 +1598,21 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
     // Settings > System > a controller unplugged: which ports were plugged at
     // the last poll, and 1 while the autosave waits for a quiet point.
     int padWas[4] = { 0, 0, 0, 0 }, padPolled = 0, padLossSaving = 0;
+    // Game images > Download while playing: the downloads of every game go on in the
+    // background; a note says so when the game starts, and another when they end.
+    int artBulk = -1;
+    DWORD artAt = GetTickCount() + 1500;   // after the game's first frames
     for (;;)
     {
+        if (c->artBackground && c->artDownload && GetTickCount() >= artAt)
+        {
+            ArtStatus as;
+            ArtGetStatus(&as);
+            if (artBulk < 0 && as.bulk) OsdT(T_ART_BG_RUNNING, as.total - as.done);
+            else if (artBulk > 0 && !as.bulk) OsdT(T_ART_BG_DONE, as.total);
+            artBulk = as.bulk;
+            artAt = GetTickCount() + 1000;
+        }
         int queued;
         if (XInputGetState(0, &s_pad) == ERROR_SUCCESS) s_padValid = 1;
         else s_padValid = 0;

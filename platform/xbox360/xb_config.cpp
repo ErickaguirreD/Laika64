@@ -68,9 +68,10 @@ void ConfigDefaults(Config *c)
     c->uiFont = 1;   // Roboto
     memset(c->path, 0, sizeof(c->path));
     c->colorStyle = 0;
-    c->updateCheck = 0;   // off by default while the GitHub repo's name/URL is still in flux (LAIKA 64 rebrand)
+    c->updateCheck = 1;   // GitHub ErickaguirreD/Laika64: the check, and the updater when there is a newer release
     c->artDownload = 1;
     c->artExtras = 1;
+    c->artBackground = 0;
     c->browserDemo = 0;
     c->browserSel[0] = 0;
     c->artAll = 0;
@@ -207,6 +208,8 @@ int ConfigParseFile(Config *c, const char *path)
         if (!strcmp(line, "devmode")) c->devMode = atoi(eq + 1);
         if (!strcmp(line, "gfxlog")) c->gfxLog = atoi(eq + 1);
         if (!strcmp(line, "texr3")) c->texR3 = atoi(eq + 1);
+        if (!strcmp(line, "artextras")) c->artExtras = atoi(eq + 1);
+        if (!strcmp(line, "artbg")) c->artBackground = atoi(eq + 1);
         if (!strcmp(line, "panelcolor")) c->panelColor = atoi(eq + 1);
         if (!strcmp(line, "intro")) c->intro = atoi(eq + 1);
         if (!strcmp(line, "setview")) c->settingsView = atoi(eq + 1);
@@ -270,7 +273,6 @@ int ConfigParseFile(Config *c, const char *path)
         else if (!strcmp(line, "colorstyle")) c->colorStyle = atoi(eq + 1);
         else if (!strcmp(line, "updatecheck")) c->updateCheck = atoi(eq + 1);
         else if (!strcmp(line, "artdownload")) c->artDownload = atoi(eq + 1);
-        else if (!strcmp(line, "artextras")) c->artExtras = atoi(eq + 1);
         else if (!strcmp(line, "browserdemo")) c->browserDemo = atoi(eq + 1);
         else if (!strcmp(line, "browsersel")) { strncpy(c->browserSel, eq + 1, sizeof(c->browserSel) - 1); c->browserSel[sizeof(c->browserSel) - 1] = 0; }
         else if (!strcmp(line, "artall")) c->artAll = atoi(eq + 1);
@@ -413,6 +415,7 @@ int ConfigParseFile(Config *c, const char *path)
     }
     fclose(f);
     if (vsync >= 0 && !(menuFile && settingsVer < 2 && vsync == 1)) c->vsync = vsync;
+    if (c->vsync == 1) c->vsync = 2;   // the "normal" mode is gone: V-Sync on is the one that always waits
     if (c->brightLevel < 0 || c->brightLevel > 100)
     {
         // The five steps of before (normal, lighter, much lighter, darker, much darker) on the bar.
@@ -468,7 +471,7 @@ int ConfigWriteMenuKeys(const Config *c, const char *path, int withLastRom)
     fprintf(f, "hk_save=%X\nhk_load=%X\nhk_slotprev=%X\nhk_slotnext=%X\nhk_shot=%X\n", c->hotkey[HK_SAVE], c->hotkey[HK_LOAD],
             c->hotkey[HK_SLOT_PREV], c->hotkey[HK_SLOT_NEXT], c->hotkey[HK_SHOT]);
     fprintf(f, "padloss=%d\nautosaveslot=%d\nbatterywarn=%d\nuisounds=%d\n", c->padLoss, c->autoSaveSlot, c->batteryWarn, c->uiSounds);
-    if (withLastRom) fprintf(f, "artdownload=%d\nartextras=%d\nbrowserdesign=%d\nbgeffect=%d\n", c->artDownload, c->artExtras, c->browserDesign, c->bgEffect);
+    if (withLastRom) fprintf(f, "artdownload=%d\nartextras=%d\nartbg=%d\nbrowserdesign=%d\nbgeffect=%d\n", c->artDownload, c->artExtras, c->artBackground, c->browserDesign, c->bgEffect);
     if (withLastRom)
         fprintf(f, "fxcolor1=%d\nfxcolor2=%d\nfxcolor3=%d\nfxopacity=%d\nfxspeed=%d\n", c->fxColor[0], c->fxColor[1], c->fxColor[2],
                 c->fxOpacity, c->fxSpeed);
