@@ -6,6 +6,8 @@ LAIKA 64 is built on [Harissa64](#credits-and-licence) by kernel64. On top of it
 
 Use it only with games you own. No ROMs are included, and none will be.
 
+![The game list in spotlight view](docs/images/library_spotlight.jpg)
+
 ## What you need
 
 - An Xbox 360 with RGH or JTAG and a dashboard such as Aurora.
@@ -34,6 +36,10 @@ In Aurora LAIKA 64 shows up with its own cover and background: they are in the `
 - **Screenshots of the menus** with L3 + R3.
 - **About and Credits** pages: X in the game list.
 
+| | |
+|---|---|
+| ![Mosaic view](docs/images/library_mosaic.jpg) | ![Credits](docs/images/credits.jpg) |
+
 ## Box art and game info
 
 When the console is online, LAIKA 64 downloads the pictures and information by itself the first time a game is shown, and keeps them in the `art\games` folder next to the `.xex`. After that they show up straight away, even offline. Box art is kept in a compressed cache so large libraries open quickly.
@@ -60,6 +66,12 @@ Everything is in **Settings > Interface**, and the welcome assistant goes throug
 - **Six fonts**: Roboto, Inter, Montserrat, Nunito, Orbitron and Press Start 2P.
 - Selection colour, settings style, text size, borders (colour, width, glow: steady, pulsing, snake, fade, rainbow), panel opacity and corners.
 - **Menu music** (in order, random or one track, from the `music` folder) and interface sounds in four styles.
+
+| | | |
+|---|---|---|
+| ![Settings with a wallpaper and red selection](docs/images/skin_red.jpg) | ![Dark wallpaper, violet selection](docs/images/skin_dark.jpg) | ![The moon wallpaper](docs/images/skin_moon.jpg) |
+
+![The background effect page](docs/images/backgrounds.jpg)
 
 ## HD textures
 
@@ -98,6 +110,12 @@ Names look like `SUPER MARIO 64#3C2D8A1F#0#2_all.png` (and a palette checksum af
 | START | START |
 
 You can change these in **Settings > Controls**, where the N64 controller is drawn on screen: pick a button, press A, then press the Xbox button or stick direction you want for it. Y adds a second button, X clears it. **Auto setup** asks for each N64 button in turn. Each player (1 to 4) has their own controls, and you can save them for all games or for one game. The same page has the **stick calibration** (dead zone, sensitivity, response curve, a guided calibration and a test) and the Rumble Pak switch.
+
+![The Controls page with the N64 controller](docs/images/controls.jpg)
+
+| | | |
+|---|---|---|
+| ![Stick calibration](docs/images/calibration.jpg) | ![Calibration wizard](docs/images/calibration_wizard.jpg) | ![Calibration results](docs/images/calibration_results.jpg) |
 
 While playing:
 
