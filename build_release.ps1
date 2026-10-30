@@ -87,7 +87,10 @@ if (Test-Path $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
 New-Item -ItemType Directory -Force $stage | Out-Null
 Copy-Item $xex (Join-Path $stage 'default.xex')
 Copy-Item (Join-Path $repo 'README.md'), (Join-Path $repo 'LICENSE'), (Join-Path $repo 'THIRD_PARTY.md') $stage
-New-Item -ItemType Directory -Force (Join-Path $stage 'roms') | Out-Null
+# The folders the emulator uses (it makes any missing one at each start; here so they can be filled first).
+foreach ($d in 'roms', 'wallpapers', 'sounds', 'saves', 'screenshots', 'hires_texture') {
+    New-Item -ItemType Directory -Force (Join-Path $stage $d) | Out-Null
+}
 # The setup assistant's music (tools/gen_wizard_music.py).
 New-Item -ItemType Directory -Force (Join-Path $stage 'assistant') | Out-Null
 Copy-Item (Join-Path $repo 'assets\assistant\laika_orbit.mp3') (Join-Path $stage 'assistant')
@@ -116,17 +119,30 @@ LAIKA 64 $version - Nintendo 64 emulator for Xbox 360 (RGH/JTAG)
    "LAIKA 64". The art folder has a cover and a background you can load
    from the game's asset menu in Aurora.
 
-Box art: when the console is online, the game list downloads the box art
-and information of the games you select into LAIKA 64\art\games\. Without
-internet, run tools\fetch_game_art.py on a PC (Python 3) and copy the
-art\games folder it makes into LAIKA 64\.
+Folders (LAIKA 64 makes any missing one by itself):
+   roms\           your games
+   wallpapers\     your own JPG or PNG backgrounds for the menus
+   music\          MP3 or WAV music for the menus
+   sounds\         your own interface sounds
+   hires_texture\  HD texture packs (.hts), one folder per game:
+                   hires_texture\<GAME NAME>\pack.hts
+   saves\          in-game saves and save states (back this one up)
+   screenshots\    screenshots taken in game
+
+Box art: when the console is online, the game list downloads the box art,
+screenshots, logos and information of your games into LAIKA 64\art\games\.
+Without internet, run tools\fetch_game_art.py on a PC (Python 3) and copy
+the art\games folder it makes into LAIKA 64\.
+
+Updates: when a new version is out, the game list offers to install it.
 
 In a game: a short press on BACK opens the menu (save and load states,
 settings, back to the game list). BACK + RB saves a state, BACK + LB loads it.
 Your saves go to LAIKA 64\saves\.
 
 Games we tested and their speed: docs/games.md on the project page.
-Source code: https://github.com/kernel64/Harissa64
+LAIKA 64: https://github.com/ErickaguirreD/Laika64
+Based on Harissa64 by kernel64: https://github.com/kernel64/Harissa64
 Licence: GNU GPL v2 (see LICENSE).
 "@
 [IO.File]::WriteAllText((Join-Path $stage 'INSTALL.txt'), $install.Replace("`r`n", "`n").Replace("`n", "`r`n"))
