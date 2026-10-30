@@ -160,6 +160,10 @@ When a new version is published on [GitHub](https://github.com/ErickaguirreD/Lai
 
 You need Visual Studio 2010 and the Xbox 360 SDK. Open `platform/xbox360/harissa64v2.sln` and build the Release configuration for the Xbox 360 platform, or run `build_release.ps1`, which also packs the release folder.
 
+## Support the project
+
+LAIKA 64 is free and always will be. If you enjoy it and want to help its development, you can make a voluntary donation through [PayPal](https://paypal.me/ErickAbrahamA). Thank you!
+
 ## Credits and licence
 
 LAIKA 64 is developed by ErickaguirreD. It is based on **Harissa64**, the original emulator by **Mohamed Aymen (kernel64)**: thanks to him for the work everything here stands on.
