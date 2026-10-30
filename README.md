@@ -26,9 +26,11 @@ In Aurora LAIKA 64 shows up with its own cover and background: they are in the `
 
 - **Six views**: detailed list, grid, big covers, carousel, mosaic and spotlight. B switches between them.
 - **Pictures for every game**: box art (flat or as a 3D box), a screenshot, the title screen and the logo. The right stick goes through them; stay on a game for a moment and they take turns by themselves, with a soft fade.
-- **Game info**: real title, year, developer, genre, players, region, a description, the ROM size and its save type. Descriptions follow the menus' language when a translation exists.
+- **Game info**: real title, year, developer, genre, players, region, a description, the ROM size and its save type.
+- **Translated descriptions**: the games' descriptions show in the menus' language when Wikipedia has the article in it (**Settings > Interface > Translate descriptions**; off, in English).
 - **Favourites and categories**: X marks a favourite; LT/RT go through the tabs. You can make your own categories by genre, region, players, developer, publisher or year.
-- **File explorer** (Settings > System > Tools): two panels, copy, move and delete files on the console.
+- **USB memories**: plug one in while the game list is up and LAIKA 64 offers to add its games (from any folder on it). They get their own **USB** tab, and leave the list when the memory is taken out.
+- **File explorer** (Settings > System > Tools): two panels over the hard drive and USB memories, to copy, move and delete files on the console.
 - **Screenshots of the menus** with L3 + R3.
 - **About and Credits** pages: X in the game list.
 
@@ -50,7 +52,7 @@ The pictures and the text come from [libretro-thumbnails](https://github.com/lib
 
 ## Make it yours
 
-Everything is in **Settings > Interface**:
+Everything is in **Settings > Interface**, and the welcome assistant goes through the main ones:
 
 - **29 animated backgrounds**: Nebula, Hyperspace, Aurora, XMB wave, Flow, Bokeh, Lava, Fractal, Hologram and more, each with its own colours, opacity and speed.
 - **Your own wallpapers**: JPG or PNG files in the `wallpapers` folder, changing by themselves with fade, slide, zoom, wipe, blinds or random transitions.
@@ -65,6 +67,17 @@ LAIKA 64 loads HD texture packs in the `.hts` format (the GLideN64 format). Put 
 
 Packs load in the background, so the game doesn't wait for them. **Two clicks of R3** in game turn the HD textures on and off to compare; the shortcut can be switched off in **Settings > Controls > Button shortcuts**.
 
+### Making a pack
+
+`tools/make_hts.py` builds a `.hts` pack from a folder of PNG files named the usual Rice / GLideN64 way (the names texture packs are shared with, and that GLideN64 or Project64 dump):
+
+```
+pip install pillow
+python tools/make_hts.py "C:\packs\SUPER MARIO 64" "SUPER MARIO 64.hts"
+```
+
+Names look like `SUPER MARIO 64#3C2D8A1F#0#2_all.png` (and a palette checksum after the size for colour-indexed textures). Sub-folders are read too. `--max 2048` scales down very large textures, which then load faster and take less memory on the console. Copy the `.hts` to `hires_texture\<GAME NAME>\`. `tools/hts_dump.py` shows what a pack holds.
+
 ## Performance
 
 - An optimised JIT recompiler, with per-game profiles for games that need them (GoldenEye, Perfect Dark, Quake and others).
@@ -76,8 +89,9 @@ Packs load in the background, so the game doesn't wait for them. **Two clicks of
 | Xbox 360 | N64 |
 |---|---|
 | Left stick | Analog stick |
-| A / B | A / B |
-| X, Y, LT or RT | Z |
+| A | A |
+| X | B (where B sits on the N64 controller, left of A) |
+| LT | Z |
 | LB / RB | L / R |
 | Right stick | C buttons |
 | D-pad | D-pad |
