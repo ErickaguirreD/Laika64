@@ -57,6 +57,7 @@ void ConfigDefaults(Config *c)
     strcpy(c->cpu, "dynarec");
     c->rom[0] = 0;
     c->lastRom[0] = 0;
+    c->lastVersion[0] = 0;
     c->showFps = 0;
     c->perfItems = 0;
     c->perfPos = 2;
@@ -241,6 +242,7 @@ int ConfigParseFile(Config *c, const char *path)
         else if (!strcmp(line, "cpu")) { strncpy(c->cpu, eq + 1, sizeof(c->cpu) - 1); c->cpu[sizeof(c->cpu) - 1] = 0; }
         else if (!strcmp(line, "rom")) { strncpy(c->rom, eq + 1, sizeof(c->rom) - 1); c->rom[sizeof(c->rom) - 1] = 0; }
         else if (!strcmp(line, "lastrom")) { strncpy(c->lastRom, eq + 1, sizeof(c->lastRom) - 1); c->lastRom[sizeof(c->lastRom) - 1] = 0; }
+        else if (!strcmp(line, "lastver")) { strncpy(c->lastVersion, eq + 1, sizeof(c->lastVersion) - 1); c->lastVersion[sizeof(c->lastVersion) - 1] = 0; }
         else if (!strcmp(line, "showfps"))
         {
             // The old levels as items (a perfitems= further on wins).
@@ -529,6 +531,7 @@ int ConfigWriteMenuKeys(const Config *c, const char *path, int withLastRom)
         fprintf(f, "%smap_drift=%d\n", pre, m->drift);
     }
     if (withLastRom && c->lastRom[0]) fprintf(f, "lastrom=%s\n", c->lastRom);
+    if (c->lastVersion[0]) fprintf(f, "lastver=%s\n", c->lastVersion);
     if (withLastRom && c->lang[0]) fprintf(f, "lang=%s\n", c->lang);
     fclose(f);
     return 1;

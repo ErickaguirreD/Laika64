@@ -2215,6 +2215,9 @@ int __cdecl main()
                     xb_audio_init();   // its button sounds
                     SettingsSetLangFile(s_settingsPath);
                     WelcomeScreen(dev, &menu, 1);
+                    // A new install: no "what is new" after the welcome (the ROM list shows it after updates).
+                    strncpy(menu.lastVersion, H64_VERSION_STRING, sizeof(menu.lastVersion) - 1);
+                    menu.lastVersion[sizeof(menu.lastVersion) - 1] = 0;
                     if (!ConfigWriteMenuKeys(&menu, s_settingsPath, 1)) H64_WARN("[main] cannot write %s", s_settingsPath);
                 }
                 else ChooseLanguage(dev, &cfg, s_settingsPath, !checks);

@@ -523,6 +523,42 @@ void UiLine(float x0, float y0, float x1, float y1, float thick, D3DCOLOR color)
     s_quads++;
 }
 
+// A line through n points as one ribbon: each piece's ends share the corners
+// of the next (no overlap: lines of UiLine pieces doubled their alpha at each
+// joint, bright knots every few pixels along the PS3/PS4 effects' curves, a
+// saw-tooth), its edges fading over `soft` pixels.
+void UiPolyline(const float *xy, int n, float thick, float soft, D3DCOLOR color)
+{
+    float ht = thick * 0.5f, e, p[4], nrm[2][2];
+    int i, k;
+    UiVtx *v;
+    if (!s_dev || n < 2 || thick <= 0) return;
+    if (soft < 0.5f) soft = 0.5f;
+    e = ht + soft;
+    p[0] = 1.0e5f; p[1] = ht; p[2] = 0.0f; p[3] = soft;   // no ends: across only
+    for (i = 0; i < n - 1; i++)
+    {
+        for (k = 0; k < 2; k++)
+        {
+            // The normal at point i + k, from its neighbours (its one neighbour at an end).
+            int a = i + k - 1 < 0 ? 0 : i + k - 1, b = i + k + 1 > n - 1 ? n - 1 : i + k + 1;
+            float tx = xy[2 * b] - xy[2 * a], ty = xy[2 * b + 1] - xy[2 * a + 1], l = sqrtf(tx * tx + ty * ty);
+            if (l < 0.001f) { tx = 1; ty = 0; l = 1; }
+            nrm[k][0] = -ty / l;
+            nrm[k][1] = tx / l;
+        }
+        if (s_quads == UI_MAX_QUADS) flush();
+        v = &s_vtx[s_quads * 6];
+        vtx(&v[0], xy[2 * i] - nrm[0][0] * e, xy[2 * i + 1] - nrm[0][1] * e, color, 0.0f, -e, 0.0f, 0.0f, p);
+        vtx(&v[1], xy[2 * i + 2] - nrm[1][0] * e, xy[2 * i + 3] - nrm[1][1] * e, color, 0.0f, -e, 0.0f, 0.0f, p);
+        vtx(&v[2], xy[2 * i] + nrm[0][0] * e, xy[2 * i + 1] + nrm[0][1] * e, color, 0.0f, e, 0.0f, 0.0f, p);
+        v[3] = v[1];
+        vtx(&v[4], xy[2 * i + 2] + nrm[1][0] * e, xy[2 * i + 3] + nrm[1][1] * e, color, 0.0f, e, 0.0f, 0.0f, p);
+        v[5] = v[2];
+        s_quads++;
+    }
+}
+
 // A strip between x0 and x1 whose top and bottom follow the two given heights
 // at each end (a slanted slice of a wave): top colour ct, bottom cb.
 static void strip_quad(float x0, float top0, float bot0, float x1, float top1, float bot1, D3DCOLOR ct, D3DCOLOR cb)

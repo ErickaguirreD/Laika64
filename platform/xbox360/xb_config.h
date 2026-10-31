@@ -20,6 +20,7 @@ struct Config
     char cpu[32];       // cpu=dynarec|interp
     char rom[256];      // rom=PATH: run this ROM directly (no ROM browser)
     char lastRom[256];  // lastrom=PATH: the ROM browser's selection (written by the menu)
+    char lastVersion[16];   // lastver=1.3: the version whose news were shown (a newer one shows its news once)
     int hle;            // hle=0: RSP tasks on the LLE RSP
     int softRenderer;   // renderer=soft: the software RDP draws into RDRAM, Xenos only shows RDRAM (diagnosis)
     int xenosDebug;     // xenosdebug=1..4: renderer debug output (h64_xenos_set_debug)

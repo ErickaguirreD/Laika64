@@ -221,7 +221,8 @@ static int dechunk(u8 *buf, u32 len)
 }
 
 // One GET (no redirects). Returns the status or 0; see NetGet.
-static int request(const char *host, const char *path, u8 **body, u32 *bodyLen, u32 maxLen, char *location, int locSize)
+static int request(const char *host, const char *path, u8 **body, u32 *bodyLen, u32 maxLen, char *location, int locSize,
+                   NetProgress *pr)
 {
     NetTls *t;
     IN_ADDR ip;
@@ -322,6 +323,11 @@ static int request(const char *host, const char *path, u8 **body, u32 *bodyLen, 
         got = (u32)(n - hlen);
         if (got > cap) got = cap;
         memcpy(buf, head + hlen, got);
+        if (pr)
+        {
+            InterlockedExchange(&pr->total, (LONG)want);
+            InterlockedExchange(&pr->got, (LONG)got);
+        }
         for (;;)
         {
             if (want && got >= want) break;
@@ -338,6 +344,7 @@ static int request(const char *host, const char *path, u8 **body, u32 *bodyLen, 
             r = br_sslio_read(&t->ioc, buf + got, cap - got);
             if (r <= 0) break;
             got += (u32)r;
+            if (pr) InterlockedExchange(&pr->got, (LONG)got);
         }
         if (want && got < want) { H64_INFO("[net] %s%s: cut at %u of %u bytes", host, path, got, want); goto done; }
         if (chunked)
@@ -365,6 +372,12 @@ done:
 
 int NetGet(const char *host, const char *path, int follow, u8 **body, u32 *len, u32 maxLen, char *location, int locSize)
 {
+    return NetGetEx(host, path, follow, body, len, maxLen, location, locSize, NULL);
+}
+
+int NetGetEx(const char *host, const char *path, int follow, u8 **body, u32 *len, u32 maxLen, char *location, int locSize,
+             NetProgress *progress)
+{
     char curHost[128], *curPath = (char *)malloc(NET_URL_MAX + 1), *loc = (char *)malloc(NET_URL_MAX + 1);
     int hop, status = 0, done = 0;
     if (body) *body = NULL;
@@ -376,7 +389,7 @@ int NetGet(const char *host, const char *path, int follow, u8 **body, u32 *len, 
     curPath[NET_URL_MAX] = 0;
     for (hop = 0; hop < 5 && !done; hop++)
     {
-        status = request(curHost, curPath, body, len, maxLen, loc, NET_URL_MAX + 1);
+        status = request(curHost, curPath, body, len, maxLen, loc, NET_URL_MAX + 1, progress);
         if (location && locSize > 0)
         {
             strncpy(location, loc, locSize - 1);

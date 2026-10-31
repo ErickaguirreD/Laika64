@@ -31,4 +31,11 @@ int NetStart(int retry);
 // reached (no DNS answer, no connection, TLS failure, time-out).
 int NetGet(const char *host, const char *path, int follow, u8 **body, u32 *len, u32 maxLen, char *location, int locSize);
 
+// How far a download is (NetGetEx), read from another thread: the body's bytes
+// so far and its Content-Length (0 while unknown, or chunked).
+struct NetProgress { volatile long got, total; };
+// NetGet that keeps `progress` up to date as the body arrives (NULL: none).
+int NetGetEx(const char *host, const char *path, int follow, u8 **body, u32 *len, u32 maxLen, char *location, int locSize,
+             NetProgress *progress);
+
 #endif

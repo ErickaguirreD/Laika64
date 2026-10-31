@@ -20,5 +20,9 @@ int UpdateCheckTake(char *version, size_t size);
 // -1 failed (`why`: a short reason for the log and the screen).
 void UpdateInstallStart(const char *version);
 int UpdateInstallState(char *why, size_t size);
+// While it works: what it does (UPDATE_PHASE_*) and, downloading, the bytes of
+// default.xex so far and in all (`total` 0 until the server says).
+enum { UPDATE_PHASE_PREPARE = 0, UPDATE_PHASE_DOWNLOAD, UPDATE_PHASE_INSTALL };
+int UpdateInstallProgress(unsigned *got, unsigned *total);
 
 #endif

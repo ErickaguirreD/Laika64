@@ -6022,20 +6022,28 @@ static int confirm_ask(IDirect3DDevice9 *dev, int title, int question, int foote
 
 static int confirm_quit(IDirect3DDevice9 *dev) { return confirm_ask(dev, T_QUIT_TITLE, T_QUIT_ASK, T_FOOT_QUIT); }
 
-// The updater's screen: "Downloading LAIKA 64 x.y" with moving dots while xb_update's thread
-// downloads, checks and installs it. 1 installed (start it), 0 failed (the reason logged).
+// The updater's screen while xb_update's thread downloads, checks and installs it:
+// "Downloading LAIKA 64 x.y" and a bar filling as default.xex arrives (MB and %), then
+// "Checking and installing"; moving dots while the size is not known yet.
+// 1 installed (start it), 0 failed (the reason logged).
 static int update_run(IDirect3DDevice9 *dev, const char *version)
 {
-    char line[128], why[96];
+    static UiAnim fill;
+    char line[128], why[96], amount[64];
     int st;
+    fill.live = 0;
     UpdateInstallStart(version);
     for (;;)
     {
-        const float w = 640, h = 190, x = (UI_WIDTH - w) * 0.5f, y = (UI_HEIGHT - h) * 0.5f;
-        int k, dots = (int)(UiTime() * 3.0f) % 4;
+        const float w = 640, h = 220, x = (UI_WIDTH - w) * 0.5f, y = (UI_HEIGHT - h) * 0.5f;
+        const float bx = x + 60, bw = w - 120, by = y + 110, bh = 14;
+        unsigned got, total;
+        int phase, k;
         st = UpdateInstallState(why, sizeof(why));
         if (st == 2 || st < 0) break;
-        _snprintf(line, sizeof(line) - 1, Tr(T_UPDATE_WORKING), version);
+        phase = UpdateInstallProgress(&got, &total);
+        if (phase == UPDATE_PHASE_INSTALL) _snprintf(line, sizeof(line) - 1, "%s", Tr(T_UPDATE_INSTALLING));
+        else _snprintf(line, sizeof(line) - 1, Tr(T_UPDATE_WORKING), version);
         line[sizeof(line) - 1] = 0;
         dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
         UiBegin(dev);
@@ -6043,9 +6051,32 @@ static int update_run(IDirect3DDevice9 *dev, const char *version)
         edge_glow(x, y, w, h, 22);
         UiPanel(x, y, w, h, 22);
         UiText(UI_BOLD, 26, x + w * 0.5f, y + 62, UI_COL_TEXT, line, UI_CENTER);
-        for (k = 0; k < 3; k++)
-            UiCircle(x + w * 0.5f - 24 + k * 24, y + 112, 6, k < dots ? UI_COL_ACCENT_HI : UI_COL_LINE);
-        UiText(UI_REGULAR, 17, x + w * 0.5f, y + 152, UI_COL_TEXT3, Tr(T_UPDATE_WAIT), UI_CENTER);
+        if (phase == UPDATE_PHASE_PREPARE || (phase == UPDATE_PHASE_DOWNLOAD && !total))
+        {
+            int dots = (int)(UiTime() * 3.0f) % 4;
+            for (k = 0; k < 3; k++)
+                UiCircle(x + w * 0.5f - 24 + k * 24, by + bh * 0.5f, 6, k < dots ? UI_COL_ACCENT_HI : UI_COL_LINE);
+        }
+        else
+        {
+            // The bar: its track, then the part done (gliding to it), full while it installs.
+            float done = phase == UPDATE_PHASE_INSTALL ? 1.0f : (float)got / (float)total, shown;
+            if (done > 1.0f) done = 1.0f;
+            shown = anim_step_rate(&fill, done, !fill.live, 8.0f, 0.001f);
+            UiRoundRect(bx, by, bw, bh, bh * 0.5f, D3DCOLOR_ARGB(50, 255, 255, 255), D3DCOLOR_ARGB(35, 255, 255, 255));
+            if (shown > 0.0f)
+            {
+                selection_glow(bx, by, bw * shown, bh, bh * 0.5f, 0.5f);
+                UiRoundRect(bx, by, bw * shown < bh ? bh : bw * shown, bh, bh * 0.5f, SEL_HI(255), SEL_LO(255));
+            }
+            if (phase == UPDATE_PHASE_DOWNLOAD)
+            {
+                _snprintf(amount, sizeof(amount) - 1, "%.1f / %.1f MB  -  %d%%", got / 1048576.0f, total / 1048576.0f, (int)(done * 100.0f));
+                amount[sizeof(amount) - 1] = 0;
+                UiText(UI_REGULAR, 17, x + w * 0.5f, by + bh + 22, UI_COL_TEXT2, amount, UI_CENTER);
+            }
+        }
+        UiText(UI_REGULAR, 17, x + w * 0.5f, y + h - 34, UI_COL_TEXT3, Tr(T_UPDATE_WAIT), UI_CENTER);
         UiEnd();
         dev->Present(NULL, NULL, NULL, NULL);
         Sleep(16);
@@ -6053,6 +6084,51 @@ static int update_run(IDirect3DDevice9 *dev, const char *version)
     if (st == 2) return 1;
     H64_INFO("[update] %s", why);
     return 0;
+}
+
+// What is new in this version (NEWS_1..NEWS_COUNT, the menus' language), once
+// after an update: the first start of a version newer than lastver= (the
+// first start of all goes through the welcome and its set-up instead). A, B or
+// START go on. Each release changes the NEWS_* texts (and NEWS_COUNT).
+#define NEWS_COUNT 4
+static void news_screen(IDirect3DDevice9 *dev)
+{
+    UiInput in;
+    char title[96];
+    const float openAt = UiTime();
+    UiInputInit(&in);
+    _snprintf(title, sizeof(title) - 1, Tr(T_NEWS_TITLE), H64_VERSION_STRING);
+    title[sizeof(title) - 1] = 0;
+    xb_audio_ui_sound(XB_SFX_NOTIFY);
+    for (;;)
+    {
+        const float w = 820, h = 170 + NEWS_COUNT * 44, x = (UI_WIDTH - w) * 0.5f;
+        const float e = ease_out((UiTime() - openAt) / 0.25f), y = (UI_HEIGHT - h) * 0.5f + (1.0f - e) * 30.0f;
+        WORD down = UiInputPoll(&in);
+        int i;
+        if (down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_START)) return;
+        dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
+        UiBegin(dev);
+        UiBackdrop();
+        browser_effect();
+        UiRect(0, 0, UI_WIDTH, UI_HEIGHT, UiAlpha(UI_COL_DIM, e));
+        edge_glow(x, y, w, h, 22);
+        UiPanel(x, y, w, h, 22);
+        UiBrand(x + 40, y + 48, 26);
+        UiText(UI_BOLD, 28, x + w - 40, y + 48, UI_COL_TEXT, title, UI_RIGHT);
+        UiRect(x + 24, y + 86, w - 48, 1, UI_COL_LINE);
+        for (i = 0; i < NEWS_COUNT; i++)
+        {
+            const float ly = y + 120 + i * 44;
+            UiCircle(x + 52, ly, 5, UI_COL_ACCENT_HI);
+            UiText(UI_REGULAR, 20, x + 72, ly, UI_COL_TEXT, Tr(T_NEWS_1 + i), UI_LEFT);
+        }
+        UiRect(x + 24, y + h - 56, w - 48, 1, UI_COL_LINE);
+        UiFooter(x + 40, y + h - 28, Tr(T_FOOT_NEWS));
+        UiEnd();
+        dev->Present(NULL, NULL, NULL, NULL);
+        Sleep(16);
+    }
 }
 
 // ---- About ----
@@ -8908,15 +8984,16 @@ static void fx_xmb(float t)
     }
     for (i = 0; i < lines; i++)
     {
-        float f = (float)i / (lines - 1), px = 0, py = 0;
+        // Each line one smooth ribbon (UiPolyline): drawn piece by piece, its joints showed as a saw-tooth.
+        float f = (float)i / (lines - 1), pts[XMB_PTS * 2];
         int edge = i == 0 || i == lines - 1;
-        D3DCOLOR c = fx_palw(f, 0.25f, edge ? 110 : 34);
         for (j = 0; j < XMB_PTS; j++)
         {
-            float x = (float)(j * XMB_STEP), y = mid[j] + spread[j] * (f - 0.5f) + 6 * sinf(x * 0.012f + t * 0.6f + i * 0.4f);
-            if (j) UiLine(px, py, x, y, edge ? 1.6f : 1.1f, c);
-            px = x; py = y;
+            float x = (float)(j * XMB_STEP);
+            pts[2 * j] = x;
+            pts[2 * j + 1] = mid[j] + spread[j] * (f - 0.5f) + 6 * sinf(x * 0.012f + t * 0.6f + i * 0.4f);
         }
+        UiPolyline(pts, XMB_PTS, edge ? 1.6f : 1.1f, 1.2f, fx_palw(f, 0.25f, edge ? 110 : 34));
     }
     for (i = 0; i < 60; i++)
     {
@@ -8935,20 +9012,19 @@ static void fx_ps4_flow(float t)
     int b, i;
     for (b = 0; b < 3; b++)
     {
-        int rgb[3], hi[3];
-        float px = 0, py = 0;
+        // The band, then its bright edge as one smooth ribbon (UiPolyline: piece by piece, a saw-tooth).
+        int rgb[3], hi[3], np = 0;
+        float px = 0, py = 0, pts[2 * ((int)(UI_WIDTH / WAVE_SLICE) + 3)];
         fx_rgb(b * 0.5f, 0, rgb);
         fx_rgb(b * 0.5f, 0.5f, hi);
         for (x = 0; x <= UI_WIDTH + WAVE_SLICE; x += WAVE_SLICE)
         {
             float y = 620 - x * (0.22f + b * 0.06f) + b * 90 + 55 * sinf(x * (0.0035f + b * 0.0011f) + t * (0.25f + b * 0.07f) + b * 2.1f);
-            if (x > 0)
-            {
-                UiStrip(px, py, py + 240, x, y, y + 240, fx_col(22, rgb[0], rgb[1], rgb[2]), fx_col(0, rgb[0], rgb[1], rgb[2]));
-                UiLine(px, py, x, y, 1.5f, fx_col(90, hi[0], hi[1], hi[2]));
-            }
+            if (x > 0) UiStrip(px, py, py + 240, x, y, y + 240, fx_col(22, rgb[0], rgb[1], rgb[2]), fx_col(0, rgb[0], rgb[1], rgb[2]));
+            if (np < (int)(sizeof(pts) / sizeof(pts[0])) / 2) { pts[2 * np] = x; pts[2 * np + 1] = y; np++; }
             px = x; py = y;
         }
+        UiPolyline(pts, np, 1.5f, 1.5f, fx_col(90, hi[0], hi[1], hi[2]));
     }
     for (i = 0; i < 70; i++)
     {
@@ -10481,6 +10557,16 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
     // in the background and may answer later, or never without a network).
     // updatecheck=2 (testing): as if this were version 0.0.0, so any release is newer.
     if (c->updateCheck && !c->xenia && h64_fenv_reliable()) UpdateCheckStart(c->updateCheck == 2 ? "0.0.0" : H64_VERSION_STRING);
+    // The first start of a new version (an update): what is new in it, once - not the
+    // welcome's set-up again (that is for the first start of all, main.cpp).
+    if (strcmp(c->lastVersion, H64_VERSION_STRING) && c->autoStart <= 0 && c->browserDemo <= 0 && settingsPath && settingsPath[0])
+    {
+        news_screen(dev);
+        strncpy(c->lastVersion, H64_VERSION_STRING, sizeof(c->lastVersion) - 1);
+        c->lastVersion[sizeof(c->lastVersion) - 1] = 0;
+        ConfigWriteMenuKeys(c, settingsPath, 1);
+        UiInputInit(&in);
+    }
     for (;;)
     {
         WORD down = UiInputPoll(&in);

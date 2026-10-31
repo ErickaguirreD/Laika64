@@ -104,6 +104,8 @@ void UpdateCheckStart(const char *current)
 // ---- The updater ----
 static volatile LONG s_install;   // UpdateInstallState
 static char s_installVersion[32], s_installWhy[96];
+static volatile LONG s_installPhase;   // UpdateInstallProgress
+static NetProgress s_installProgress;
 
 static void install_fail(const char *why)
 {
@@ -156,8 +158,10 @@ static DWORD WINAPI install_thread(LPVOID)
     _snprintf(path, sizeof(path) - 1, UPDATE_ASSET, s_installVersion, "default.xex");
     path[sizeof(path) - 1] = 0;
     H64_INFO("[update] downloading %s", path);
-    st = NetGet(UPDATE_HOST, path, 1, &xex, &xlen, UPDATE_MAX, NULL, 0);
+    InterlockedExchange(&s_installPhase, UPDATE_PHASE_DOWNLOAD);
+    st = NetGetEx(UPDATE_HOST, path, 1, &xex, &xlen, UPDATE_MAX, NULL, 0, &s_installProgress);
     if (st != 200 || !xex) { free(xex); install_fail("download failed"); return 0; }
+    InterlockedExchange(&s_installPhase, UPDATE_PHASE_INSTALL);
     // An Xbox 360 executable of a sane size whose SHA-1 is the release's.
     if (xlen < (4u << 20) || memcmp(xex, "XEX2", 4)) { free(xex); install_fail("not an XEX file"); return 0; }
     {
@@ -189,12 +193,21 @@ void UpdateInstallStart(const char *version)
     if (s_install == 1 || s_install == 2) return;
     strncpy(s_installVersion, version, sizeof(s_installVersion) - 1);
     s_installWhy[0] = 0;
+    s_installProgress.got = s_installProgress.total = 0;
+    InterlockedExchange(&s_installPhase, UPDATE_PHASE_PREPARE);
     InterlockedExchange(&s_install, 1);
     t = CreateThread(NULL, 256 * 1024, install_thread, NULL, CREATE_SUSPENDED, NULL);
     if (!t) { install_fail("no thread"); return; }
     XSetThreadProcessor(t, 3);
     ResumeThread(t);
     CloseHandle(t);
+}
+
+int UpdateInstallProgress(unsigned *got, unsigned *total)
+{
+    *got = (unsigned)s_installProgress.got;
+    *total = (unsigned)s_installProgress.total;
+    return (int)s_installPhase;
 }
 
 int UpdateInstallState(char *why, size_t size)

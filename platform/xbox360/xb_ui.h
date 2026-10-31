@@ -69,6 +69,8 @@ void UiShadow(float x, float y, float w, float h, float r, float blur, D3DCOLOR 
 void UiCircle(float cx, float cy, float r, D3DCOLOR color);
 // An anti-aliased segment `thick` pixels wide (square ends: polylines join cleanly).
 void UiLine(float x0, float y0, float x1, float y1, float thick, D3DCOLOR color);
+// A smooth line through n points (xy[2n]) as one ribbon, its edges fading over `soft` pixels.
+void UiPolyline(const float *xy, int n, float thick, float soft, D3DCOLOR color);
 // A slanted strip from x0 to x1, its top and bottom at the heights given at
 // each end; top colour ct, bottom cb (a slice of a wave).
 void UiStrip(float x0, float top0, float bot0, float x1, float top1, float bot1, D3DCOLOR ct, D3DCOLOR cb);
