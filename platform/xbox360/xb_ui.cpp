@@ -526,22 +526,26 @@ void UiLine(float x0, float y0, float x1, float y1, float thick, D3DCOLOR color)
 // A line through n points as one ribbon: each piece's ends share the corners
 // of the next (no overlap: lines of UiLine pieces doubled their alpha at each
 // joint, bright knots every few pixels along the PS3/PS4 effects' curves, a
-// saw-tooth), its edges fading over `soft` pixels.
+// saw-tooth), its edges fading over `soft` pixels. A loop (the last point on
+// the first: the topography's contours) closes with no seam.
 void UiPolyline(const float *xy, int n, float thick, float soft, D3DCOLOR color)
 {
     float ht = thick * 0.5f, e, p[4], nrm[2][2];
-    int i, k;
+    int i, k, closed;
     UiVtx *v;
     if (!s_dev || n < 2 || thick <= 0) return;
     if (soft < 0.5f) soft = 0.5f;
     e = ht + soft;
     p[0] = 1.0e5f; p[1] = ht; p[2] = 0.0f; p[3] = soft;   // no ends: across only
+    closed = n > 3 && fabsf(xy[0] - xy[2 * n - 2]) < 0.01f && fabsf(xy[1] - xy[2 * n - 1]) < 0.01f;
     for (i = 0; i < n - 1; i++)
     {
         for (k = 0; k < 2; k++)
         {
-            // The normal at point i + k, from its neighbours (its one neighbour at an end).
-            int a = i + k - 1 < 0 ? 0 : i + k - 1, b = i + k + 1 > n - 1 ? n - 1 : i + k + 1;
+            // The normal at point i + k, from its neighbours (at an end: its one neighbour, or round a loop).
+            int a = i + k - 1, b = i + k + 1;
+            if (a < 0) a = closed ? n - 2 : 0;
+            if (b > n - 1) b = closed ? 1 : n - 1;
             float tx = xy[2 * b] - xy[2 * a], ty = xy[2 * b + 1] - xy[2 * a + 1], l = sqrtf(tx * tx + ty * ty);
             if (l < 0.001f) { tx = 1; ty = 0; l = 1; }
             nrm[k][0] = -ty / l;

@@ -771,9 +771,15 @@ static int kodi_tiles(const UiMenu *m)
 }
 
 // A settings page (not the main one) in the big icons style.
+// A settings page of rows (the usual footer, or the Paths page's with Y to reset one).
+static int footer_rows(const UiMenu *m)
+{
+    return !strcmp(m->footer, Tr(T_FOOT_SELECT)) || !strcmp(m->footer, Tr(T_FOOT_PATHS));
+}
+
 static int kodi_sub(const UiMenu *m)
 {
-    return s_kodi && m->page == UI_PAGE_LIST && !strcmp(m->footer, Tr(T_FOOT_SELECT)) && !kodi_grid(m) && strcmp(m->title, Tr(T_STATES));
+    return s_kodi && m->page == UI_PAGE_LIST && footer_rows(m) && !kodi_grid(m) && strcmp(m->title, Tr(T_STATES));
 }
 
 // The rows in the order the page shows them: part after part (each part's rows in
@@ -1061,7 +1067,7 @@ void UiMenuDraw(const UiMenu *m)
     if (m->page == UI_PAGE_PERF) { perfpage_draw(m); lastTitle[0] = 0; return; }
     if (m->page == UI_PAGE_HOTKEYS) { hkpage_draw(m); lastTitle[0] = 0; return; }
     if (m->page == UI_PAGE_EDGES) { edges_draw(m); lastTitle[0] = 0; return; }
-    if (s_kodi && m->page == UI_PAGE_LIST && !strcmp(m->footer, Tr(T_FOOT_SELECT)) && strcmp(m->title, Tr(T_STATES)))   // big icons style (the States page: a list)
+    if (s_kodi && m->page == UI_PAGE_LIST && footer_rows(m) && strcmp(m->title, Tr(T_STATES)))   // big icons style (the States page: a list)
     {
         kodi_draw(m);
         lastTitle[0] = 0;
@@ -2987,6 +2993,7 @@ static void perfpage_draw(const UiMenu *m)
 enum { PA_ROMS = 0, PA_MUSIC, PA_SOUNDS, PA_WALLS, PA_SAVES, PA_SHOTS, PA_TEXTURES, PA_RESET };
 static const int s_pathLabels[CONFIG_PATH_COUNT] = { T_PATH_ROMS, T_PATH_MUSIC, T_PATH_SOUNDS, T_WALLPAPERS, T_PATH_SAVES, T_PATH_SHOTS, T_PATH_TEXTURES };
 static int s_pickWhich;   // the path the folder picker is choosing (settings_loop)
+static int s_pathReset;   // the path to put back to its usual folder (PA_RESET: all of them), once confirmed (settings_loop)
 
 // A folder and the ones it is in ("Usb0:\a\b": Usb0:\a, then Usb0:\a\b).
 static void mkdir_p(const char *path)
@@ -3028,7 +3035,7 @@ static void settings_paths(UiMenu *m, const Config *c)
                                            UI_ICON_RESET };
     int k;
     s_pathsPage = 1;
-    UiMenuClear(m, Tr(T_PATHS), Tr(T_FOOT_SELECT));
+    UiMenuClear(m, Tr(T_PATHS), Tr(T_FOOT_PATHS));
     for (k = 0; k < CONFIG_PATH_COUNT; k++) UiMenuAdd(m, Tr(s_pathLabels[k]), "");
     UiMenuAdd(m, Tr(T_FX_RESET), "");
     UiMenuIcons(m, icons, sizeof(icons));
@@ -3044,17 +3051,25 @@ static int paths_input(UiMenu *m, Config *c, WORD down)
         m->sel = S_PATHS;
         return SET_NONE;
     }
-    if (!(down & XINPUT_GAMEPAD_A)) return SET_NONE;
-    if (m->sel == PA_RESET)
+    // Y on a path, or A on Reset (all of them): back to the usual folder, once confirmed (settings_loop).
+    if ((down & XINPUT_GAMEPAD_Y) || ((down & XINPUT_GAMEPAD_A) && m->sel == PA_RESET))
     {
-        memset(c->path, 0, sizeof(c->path));   // the usual folders
-        paths_create(c);
-        ui_from_config(c);
-        paths_values(m, c);
-        return SET_CHANGED;
+        s_pathReset = m->sel;
+        return SET_PATH_RESET;
     }
+    if (!(down & XINPUT_GAMEPAD_A)) return SET_NONE;
     s_pickWhich = m->sel;
     return SET_PICK_PATH;
+}
+
+// The confirmed reset (SET_PATH_RESET): one path or all of them, their folders made.
+static void paths_reset(UiMenu *m, Config *c)
+{
+    if (s_pathReset >= 0 && s_pathReset < CONFIG_PATH_COUNT) c->path[s_pathReset][0] = 0;
+    else memset(c->path, 0, sizeof(c->path));   // the usual folders
+    paths_create(c);
+    ui_from_config(c);
+    paths_values(m, c);
 }
 
 // ---- Folder picker ----
@@ -8069,6 +8084,19 @@ static void settings_loop(IDirect3DDevice9 *dev, Config *c, const char *settings
             UiInputInit(&in);
             continue;
         }
+        if (r == SET_PATH_RESET)
+        {
+            // Settings > Paths: Y on a path, or Reset - asked first.
+            int row = m.sel, one = s_pathReset >= 0 && s_pathReset < CONFIG_PATH_COUNT;
+            if (confirm_ask(dev, T_FX_RESET, one ? T_PATH_RESET_ONE : T_PATH_RESET_ALL, T_FOOT_PATH_RESET))
+            {
+                paths_reset(&m, c);
+                xb_audio_ui_sound(XB_SFX_VALUE_UP);
+            }
+            m.sel = row;
+            UiInputInit(&in);
+            continue;
+        }
         if (r == SET_ABOUT)
         {
             int row = m.sel;
@@ -8695,20 +8723,19 @@ static void fx_ribbons(int count, const float *base, const float *amp, const flo
     int w;
     for (w = 0; w < count; w++)
     {
-        int rgb[3];
-        float kk = 6.2831853f / len[w], px = 0, py = 0, ph = 0;
+        // The crest one smooth ribbon (UiPolyline: piece by piece, its joints showed as a saw-tooth).
+        int rgb[3], np = 0;
+        float kk = 6.2831853f / len[w], px = 0, py = 0, ph = 0, pts[2 * ((int)(UI_WIDTH / WAVE_SLICE) + 3)];
         fx_rgb(k[w], 0, rgb);
         for (x = 0; x <= UI_WIDTH + WAVE_SLICE; x += WAVE_SLICE)
         {
             float y = base[w] + amp[w] * sinf(x * kk + t * speed[w] * 2.0f + w * 1.7f) + amp[w] * 0.4f * sinf(x * kk * 2.3f - t * speed[w] * 1.3f);
             float h = thick[w] * (0.75f + 0.25f * sinf(x * kk * 0.7f + t * 0.5f + w));
-            if (x > 0)
-            {
-                UiStrip(px, py, py + ph, x, y, y + h, fx_col(alpha[w], rgb[0], rgb[1], rgb[2]), fx_col(0, rgb[0], rgb[1], rgb[2]));
-                UiLine(px, py, x, y, 2.0f, fx_col(alpha[w] * 3, rgb[0], rgb[1], rgb[2]));
-            }
+            if (x > 0) UiStrip(px, py, py + ph, x, y, y + h, fx_col(alpha[w], rgb[0], rgb[1], rgb[2]), fx_col(0, rgb[0], rgb[1], rgb[2]));
+            if (np < (int)(sizeof(pts) / sizeof(pts[0])) / 2) { pts[2 * np] = x; pts[2 * np + 1] = y; np++; }
             px = x; py = y; ph = h;
         }
+        UiPolyline(pts, np, 2.0f, 1.5f, fx_col(alpha[w] * 3, rgb[0], rgb[1], rgb[2]));
     }
 }
 
@@ -8802,15 +8829,17 @@ static void fx_silk(float t)
         fx_rgb(band * 0.5f, 0, rgb);
         for (line = 0; line < 10; line++)
         {
-            float ph = line * 0.09f, px = 0, py = 0;
-            int a = 26 + (line == 0 || line == 9 ? 50 : 0);
-            for (x = 0; x <= UI_WIDTH + 16; x += 16)
+            // One smooth ribbon each (UiPolyline), every 8 pixels: 16-pixel pieces showed their corners and joints.
+            float ph = line * 0.09f, pts[2 * ((int)(UI_WIDTH / WAVE_SLICE) + 3)];
+            int a = 26 + (line == 0 || line == 9 ? 50 : 0), np = 0;
+            for (x = 0; x <= UI_WIDTH + WAVE_SLICE && np < (int)(sizeof(pts) / sizeof(pts[0])) / 2; x += WAVE_SLICE)
             {
-                float y = 380 + band * 25 + 70 * sinf(x * k + t * (0.5f + band * 0.15f) + ph * 3 + band) + 28 * sinf(x * k * 2.1f - t * 0.7f + ph * 5) +
-                          line * 4.0f;
-                if (x > 0) UiLine(px, py, x, y, 1.6f, fx_col(a, rgb[0], rgb[1], rgb[2]));
-                px = x; py = y;
+                pts[2 * np] = x;
+                pts[2 * np + 1] = 380 + band * 25 + 70 * sinf(x * k + t * (0.5f + band * 0.15f) + ph * 3 + band) +
+                                  28 * sinf(x * k * 2.1f - t * 0.7f + ph * 5) + line * 4.0f;
+                np++;
             }
+            UiPolyline(pts, np, 1.6f, 1.2f, fx_col(a, rgb[0], rgb[1], rgb[2]));
         }
     }
 }
@@ -8920,14 +8949,20 @@ static void fx_liquid(float t)
     int row;
     for (row = 0; row < 10; row++)
     {
-        float k = 6.2831853f / (380 + row * 30), y0 = 330.0f + row * 38, px = 0, py = 0;
-        for (x = 0; x <= UI_WIDTH + 12; x += 12)
+        // Each swell one smooth ribbon (UiPolyline) every 8 pixels, then its glints on top.
+        float k = 6.2831853f / (380 + row * 30), y0 = 330.0f + row * 38, pts[2 * ((int)(UI_WIDTH / WAVE_SLICE) + 3)];
+        int np = 0, i;
+        for (x = 0; x <= UI_WIDTH + WAVE_SLICE && np < (int)(sizeof(pts) / sizeof(pts[0])) / 2; x += WAVE_SLICE)
         {
-            float y = y0 + 22 * sinf(x * k + t * (0.6f + row * 0.05f) + row) + 9 * sinf(x * k * 2.7f - t * 0.9f);
-            float slope = cosf(x * k + t * (0.6f + row * 0.05f) + row), shine = slope > 0.85f ? (slope - 0.85f) / 0.15f : 0.0f;
-            if (x > 0) UiLine(px, py, x, y, 2.0f, fx_pal(0, 30 + row * 4));
-            if (shine > 0) UiCircle(x, y, 2 + shine * 2, fx_pal(0.5f + 0.5f * fx_rand(row * 200 + (int)x), (int)(200 * shine)));
-            px = x; py = y;
+            pts[2 * np] = x;
+            pts[2 * np + 1] = y0 + 22 * sinf(x * k + t * (0.6f + row * 0.05f) + row) + 9 * sinf(x * k * 2.7f - t * 0.9f);
+            np++;
+        }
+        UiPolyline(pts, np, 2.0f, 1.5f, fx_pal(0, 30 + row * 4));
+        for (i = 0; i < np; i += 3)   // the glints where they were (every 12 pixels or so)
+        {
+            float gx = pts[2 * i], slope = cosf(gx * k + t * (0.6f + row * 0.05f) + row), shine = slope > 0.85f ? (slope - 0.85f) / 0.15f : 0.0f;
+            if (shine > 0) UiCircle(gx, pts[2 * i + 1], 2 + shine * 2, fx_pal(0.5f + 0.5f * fx_rand(row * 200 + (int)gx), (int)(200 * shine)));
         }
     }
 }
@@ -9131,21 +9166,28 @@ static void fx_lava(float t)
 // Image 29: a prism - a twisting band of glass, its fine lines splitting the light into colours.
 static void fx_prism(float t)
 {
-    const int lines = 22, step = 12, pts = UI_WIDTH / 12 + 2;
+#define PRISM_STEP 8
+#define PRISM_PTS (UI_WIDTH / PRISM_STEP + 2)
+    const int lines = 22;
+    float mid[PRISM_PTS], spread[PRISM_PTS], xy[PRISM_PTS * 2];
     int i, j;
+    for (j = 0; j < PRISM_PTS; j++)
+    {
+        float u = (float)(j * PRISM_STEP) / UI_WIDTH;
+        mid[j] = 520 - 260 * u + 90 * sinf(u * 5.0f + t * 0.4f);
+        spread[j] = 170 * sinf(u * 3.4f - t * 0.3f + 0.8f);
+    }
     for (i = 0; i < lines; i++)
     {
-        float f = (float)i / (lines - 1), px = 0, py = 0;
+        // One smooth ribbon each (UiPolyline), every 8 pixels: 12-pixel pieces showed their joints as a saw-tooth.
+        float f = (float)i / (lines - 1);
         int edge = i == 0 || i == lines - 1;
-        for (j = 0; j < pts; j++)
+        for (j = 0; j < PRISM_PTS; j++)
         {
-            float x = (float)(j * step), u = x / UI_WIDTH;
-            float mid = 520 - 260 * u + 90 * sinf(u * 5.0f + t * 0.4f);
-            float spread = 170 * sinf(u * 3.4f - t * 0.3f + 0.8f);
-            float y = mid + spread * (f - 0.5f);
-            if (j) UiLine(px, py, x, y, edge ? 2.0f : 1.2f, edge ? fx_palw(f, 0.7f, 150) : fx_palw(f, 0.15f, 46));
-            px = x; py = y;
+            xy[2 * j] = (float)(j * PRISM_STEP);
+            xy[2 * j + 1] = mid[j] + spread[j] * (f - 0.5f);
         }
+        UiPolyline(xy, PRISM_PTS, edge ? 2.0f : 1.2f, 1.2f, edge ? fx_palw(f, 0.7f, 150) : fx_palw(f, 0.15f, 46));
     }
     // The shine running along it.
     {
@@ -9163,16 +9205,18 @@ static void fx_topo(float t)
         float cx = 260 + c * 380 + 90 * sinf(t * 0.07f + c * 2), cy = 420 + 50 * sinf(t * 0.05f + c * 1.4f);
         for (k = 0; k < 10; k++)
         {
-            float r = 24.0f + k * 26, px = 0, py = 0;
-            D3DCOLOR col = fx_pal(k & 1 ? 1.0f : 0.0f, k & 1 ? 70 : 110);
-            for (j = 0; j <= 48; j++)
+            // Each contour a closed smooth ribbon (UiPolyline) of 96 points: 48 pieces showed corners and joints.
+            float r = 24.0f + k * 26, xy[2 * 97];
+            for (j = 0; j <= 96; j++)
             {
-                float a = j * 6.2831853f / 48;
+                float a = j * 6.2831853f / 96;
                 float rr = r * (1 + 0.15f * sinf(3 * a + t * 0.5f + c) + 0.08f * sinf(5 * a - t * 0.3f + k * 0.4f));
-                float x = cx + cosf(a) * rr * 1.7f, y = cy + sinf(a) * rr * 0.45f;
-                if (j) UiLine(px, py, x, y, 1.3f, col);
-                px = x; py = y;
+                xy[2 * j] = cx + cosf(a) * rr * 1.7f;
+                xy[2 * j + 1] = cy + sinf(a) * rr * 0.45f;
             }
+            xy[2 * 96] = xy[0];   // exactly closed: no seam
+            xy[2 * 96 + 1] = xy[1];
+            UiPolyline(xy, 97, 1.3f, 1.2f, fx_pal(k & 1 ? 1.0f : 0.0f, k & 1 ? 70 : 110));
         }
         UiShadow(cx - 120, cy - 40, 240, 80, 40, 60, fx_pal(0.5f, 30));
     }
