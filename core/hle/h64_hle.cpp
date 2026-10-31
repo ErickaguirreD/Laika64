@@ -471,11 +471,12 @@ int h64_hle_async_finish(H64System *sys, int *ran, int *fullSync, u32 *statusBit
 // A streamed task's part parsed on the CPU thread (Gauntlet Legends, profile
 // gfxStream): with the graphics worker its lists and the snapshot their loads
 // read go to a slot rendered there, in order, while the CPU goes on.
-static void stream_submit(H64System *sys)
+static struct hle_t::HleGfxSlot *stream_slot(H64System *sys)
 {
     struct hle_t *hle = sys->hle;
-    struct hle_t::HleGfxSlot *s = &hle->gfxSlot[hle->gfxSlotNext];
-    int mustSync;
+    struct hle_t::HleGfxSlot *s = hle->streamSlot;
+    if (s) return s;
+    s = &hle->gfxSlot[hle->gfxSlotNext];
     hle->gfxSlotNext ^= 1;
     if (!s->out) s->out = h64_gfx_out_create();
     if (s->used)
@@ -487,6 +488,39 @@ static void stream_submit(H64System *sys)
     }
     s->sys = sys;
     s->used = 1;
+    hle->streamSlot = s;
+    return s;
+}
+
+static void stream_submit(H64System *sys);
+
+// A part of a Boss task parsed: what it loads goes into the slot's snapshot
+// now, its lists wait for the end of the task. Submitted part by part (~16 a
+// task in World Driver Championship's races), the CPU waited for the worker
+// at each one: 11 ms a frame, 50-55 VI/s. If the part loads texels the CPU
+// rewrote since a part before it loaded them, the parts before are submitted
+// alone with the snapshot as they loaded it (World Driver Championship's sun
+// flickered, drawn with the later texels) and this part starts a new slot.
+static void stream_part(H64System *sys)
+{
+    struct hle_t *hle = sys->hle;
+    if (h64_gfx_part_conflict(sys, hle->gfx, stream_slot(sys)->out))
+    {
+        if (++hle->streamSplits <= 4 || hle->streamSplits % 500 == 0)
+            H64_INFO("[hle] Boss task submitted in parts: the CPU rewrote texels it loads (frame %u, %u so far)", sys->vi.frames, hle->streamSplits);
+        h64_gfx_part_hold(hle->gfx);
+        stream_submit(sys);
+        h64_gfx_part_restore(hle->gfx);
+    }
+    h64_gfx_snapshot_part(sys, hle->gfx, stream_slot(sys)->out);
+}
+
+static void stream_submit(H64System *sys)
+{
+    struct hle_t *hle = sys->hle;
+    struct hle_t::HleGfxSlot *s = stream_slot(sys);
+    int mustSync;
+    hle->streamSlot = 0;
     s->ran = 1;
     s->fullSync = s->mustSync = 0;
     s->parseOnSecond = 0;
@@ -540,11 +574,24 @@ int h64_hle_gfx_measure(H64System *sys, u32 *verts, u32 *tris, u32 *commands)
 int h64_hle_resume(H64System *sys, int *dpInterrupt)
 {
     struct hle_t *hle = sys->hle;
-    int fullSync = 0;
+    int fullSync = 0, deferred = sys->asyncStart != NULL, ok;
     u64 t0 = h64_prof_now(sys);
     *dpInterrupt = 0;
-    if (!hle || !hle->gfx) return 1;
-    h64_gfx_resume(sys, hle->gfx, &fullSync);
+    if (!hle || !hle->gfx || !h64_gfx_waiting(hle->gfx)) return 1;
+    // The next part of a Boss task: drawn on the graphics worker with the
+    // task's other parts once it ends (h64_hle_try_task).
+    if (deferred) h64_gfx_set_no_flush(hle->gfx, 1);
+    ok = h64_gfx_resume(sys, hle->gfx, &fullSync);
+    if (deferred)
+    {
+        h64_gfx_set_no_flush(hle->gfx, 0);
+        if (ok)
+        {
+            stream_part(sys);
+            if (!h64_gfx_waiting(hle->gfx)) stream_submit(sys);
+        }
+        else hle->streamSlot = 0;   // nothing more of this task to draw
+    }
     sys->prof[H64_PROF_GFX_HLE] += h64_prof_now(sys) - t0;
     if (h64_gfx_waiting(hle->gfx))
     {
@@ -592,13 +639,29 @@ int h64_hle_try_task(H64System *sys, u32 *statusBits, u32 *busyCycles, int *dpIn
         if (!hle->gfx) hle->gfx = h64_gfx_create(sys);
         if (h64_gfx_task_sync(sys, hle->gfx))
         {
-            // Boss's ZSort waits for the CPU inside its tasks: run here, on the
-            // CPU thread (after the workers), in parts.
+            // Boss's ZSort waits for the CPU inside its tasks: parsed here, on
+            // the CPU thread, in parts. With the graphics worker the whole
+            // task is drawn there once it ends, in order (stream_part,
+            // stream_submit), while the CPU goes on. Drawn here, each part
+            // first waited for the worker's queue (World Driver
+            // Championship's races: 22 ms a frame, 40-55 VI/s).
             u64 t0;
-            h64_hle_async_wait(sys);
+            int deferred = sys->asyncStart != NULL, ran;
+            if (!deferred || hle->gfxLate) h64_hle_async_wait(sys);   // a late parse uses hle->gfx
             t0 = h64_prof_now(sys);
-            if (!h64_gfx_run_task(sys, hle->gfx, &fullSync)) return 0;
+            if (deferred) h64_gfx_set_no_flush(hle->gfx, 1);
+            ran = h64_gfx_run_task(sys, hle->gfx, &fullSync);
+            if (deferred)
+            {
+                h64_gfx_set_no_flush(hle->gfx, 0);
+                if (ran)
+                {
+                    stream_part(sys);
+                    if (!h64_gfx_waiting(hle->gfx)) stream_submit(sys);
+                }
+            }
             sys->prof[H64_PROF_GFX_HLE] += h64_prof_now(sys) - t0;
+            if (!ran) return 0;
             *statusBits = SP_STATUS_TASKDONE | SP_STATUS_BROKE | SP_STATUS_HALT;
             *busyCycles = H64_HLE_GFX_CYCLES;
             if (h64_gfx_waiting(hle->gfx))

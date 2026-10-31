@@ -60,6 +60,18 @@ int h64_gfx_parse_task(H64System *sys, H64Gfx *gfx, H64GfxOut *out, int *fullSyn
 // loads read, for h64_gfx_render on the worker; 1 when the task must be
 // rendered before it ends (profile gfxFrameToRdram, or no snapshot memory).
 int h64_gfx_package(H64System *sys, H64Gfx *gfx, H64GfxOut *out);
+// A Boss task stopped to wait for the CPU: the RDRAM its part's loads read,
+// as it is now, into out's snapshot. The lists stay and grow with the next
+// parts (h64_gfx_resume with h64_gfx_set_no_flush on) until h64_gfx_package.
+void h64_gfx_snapshot_part(H64System *sys, H64Gfx *gfx, H64GfxOut *out);
+// Whether the part just parsed loads RDRAM that out's parts before it loaded
+// too and that the CPU changed since: those parts must be drawn with the
+// snapshot as they loaded it. h64_gfx_part_hold sets the part aside (its
+// lists and loads) for them to be packaged alone; h64_gfx_part_restore puts
+// it back after.
+int h64_gfx_part_conflict(H64System *sys, H64Gfx *gfx, const H64GfxOut *out);
+void h64_gfx_part_hold(H64Gfx *gfx);
+void h64_gfx_part_restore(H64Gfx *gfx);
 void h64_gfx_set_no_flush(H64Gfx *gfx, int on);
 void h64_gfx_render(H64System *sys, H64Gfx *gfx, H64GfxOut *out);
 

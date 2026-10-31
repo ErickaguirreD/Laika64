@@ -2390,12 +2390,13 @@ static void set_scissor(Xenos *x, float sx, float sy)
     RECT r;
     float xlo = (float)(x->st->scissorXlo >> 2), xhi = (float)(x->st->scissorXhi >> 2);
     float fbw = (float)(x->st->colorWidth ? x->st->colorWidth : 320);
-    if (x->sys->options.gfxTallFrame && x->st->colorWidth > 320)
+    if ((x->sys->options.gfxTallFrame && x->st->colorWidth > 320) || (x->sys->options.gfxTallScissor && x->st->colorWidth))
     {
-        // A scissor taller than the 4:3 guess (up to 1.25 times the width):
-        // the image's real height, kept for that width.
+        // A scissor taller than the 4:3 guess (up to 1.25 times the width;
+        // gfxTallScissor: 1.5 times at 320 or less, World Driver Championship's
+        // 320 x 480): the image's real height, kept for that width.
         u32 w = x->st->colorWidth, h = (x->st->scissorYhi + 3) >> 2;
-        if (h > fb_height(x, w) && h <= w * 5 / 4)
+        if (h > fb_height(x, w) && h <= (w > 320 ? w * 5 / 4 : w * 3 / 2))
         {
             x->tallW = w;
             x->tallH = h;

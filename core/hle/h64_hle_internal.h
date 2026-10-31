@@ -146,6 +146,8 @@ struct hle_t
     } gfxSlot[2];
     int gfxSlotNext;
     struct HleGfxSlot *gfxCur;   // the pending task's
+    struct HleGfxSlot *streamSlot;   // a Boss task's slot while its parts add up (stream_part)
+    u32 streamSplits;                // Boss tasks submitted in two (logged)
     // Late parse (options.gfxLateParse): the task that ended before its parse
     // did, and the flags the next tasks are assumed to end with.
     struct HleGfxSlot *gfxLate;

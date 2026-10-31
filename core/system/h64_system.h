@@ -132,6 +132,7 @@ struct H64Options
     u32 countWaitStep;      // at most this many CPU cycles at a time (0: up to the next event)
     u32 countWaitQueue;     // physical address of the OSMesgQueue polled (0: none), skipped only while empty
     int gfxTallFrame;       // GPU renderer (game profile): colour images as tall as the game's scissor, not 4:3
+    int gfxTallScissor;     // GPU renderer (game profile): also images 320 wide or less, up to 1.5 times their width
     int gfxMaskToTile;      // GPU renderer (game profile): a wrapped axis with a mask wider than the tile repeats the tile
     int gfxKeepShown;       // GPU renderer (game profile): a VI origin in no frame slot keeps the frame on screen
     int gfxRectPoint;       // GPU renderer (game profile): filtered rectangles drawn 1:1 sample whole texels, as the N64 does

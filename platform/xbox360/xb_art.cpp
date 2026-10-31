@@ -1496,6 +1496,36 @@ int ArtReadCover(const char *romPath, int kind, u8 **rgba, int *w, int *h, int *
     }
 }
 
+int ArtReadPicture(const char *romPath, int kind, int maxW, int maxH, u8 **rgba, int *w, int *h)
+{
+    H64Rom rom;
+    char key[16], png[128];
+    u8 *data, *px;
+    u32 len;
+    int pw, ph;
+    *rgba = NULL;
+    // As ArtReadCover, but the PNG itself (its alpha kept: a logo) and up to maxW x maxH.
+    if (!s_started || kind < 0 || kind >= ART_KIND_COUNT || !RomReadHeader(romPath, &rom)) return 0;
+    h64_gameinfo_key(rom.gameCode, rom.crc1, key);
+    h64_rom_free(&rom);
+    art_path(key, s_kindPng[kind], png, sizeof(png));
+    if (!file_read(png, &data, &len, ART_MAX_PNG)) return 0;
+    px = h64_png_decode(data, len, &pw, &ph, ART_MAX_PIXELS);
+    free(data);
+    if (!px) return 0;
+    if (pw <= maxW && ph <= maxH)
+    {
+        *rgba = px;
+        *w = pw;
+        *h = ph;
+        return 1;
+    }
+    h64_image_fit(pw, ph, maxW, maxH, w, h);
+    *rgba = h64_image_scale(px, pw, ph, *w, *h);
+    free(px);
+    return *rgba != NULL;
+}
+
 void ArtForgetAll(void)
 {
     if (!s_started) return;

@@ -215,6 +215,14 @@ struct H64Gfx
     u32 timgAddr, timgWidth, timgSize;
     std::vector<u32> loadRanges;   // start, end pairs
     std::vector<u64> rangeSort;    // the same as start << 32 | end, sorted (h64_gfx_parse_task)
+    // A Boss task drawn on the worker (h64_gfx_snapshot_part): where the lists
+    // stood when the current part started, and that part set aside while the
+    // parts before it are submitted (h64_gfx_part_hold).
+    u32 partWords, partTris, partOps;
+    PodVec<u64> holdWords;
+    PodVec<GfxTri> holdTris;
+    PodVec<GfxOp> holdOps;
+    std::vector<u32> holdRanges, capMerge;
     u32 cimg[8][2];                // recent colour images: start, end
     u32 cimgNext;
     int texFromCimg;
@@ -277,6 +285,8 @@ struct H64GfxOut
     PodVec<GfxOp> ops;
     u8 *snapshot;                  // RDRAM-sized; only the task's load ranges are valid
     std::vector<u32> cpuRanges;    // start, end pairs: loaded colour image lines the CPU wrote since they were drawn
+    u32 parts;                     // parts of the task snapshotted so far (h64_gfx_snapshot_part)
+    std::vector<u32> captured;     // start, end pairs: the snapshot's valid ranges, since the first part
 };
 
 // ---------------------------------------------------------------- memory
@@ -3696,12 +3706,19 @@ int h64_gfx_resume(H64System *sys, H64Gfx *g, int *fullSync)
     if (!g->bossWait) return 1;
     g->bossWait = 0;
     g->halt = 0;
-    g->words.clear();
-    g->tris.clear();
-    g->ops.clear();
+    if (!g->noFlush)
+    {
+        g->words.clear();
+        g->tris.clear();
+        g->ops.clear();
+    }
+    // else drawn later: the parts add up until the task ends (h64_gfx_snapshot_part).
+    g->partWords = g->words.size();
+    g->partTris = g->tris.size();
+    g->partOps = g->ops.size();
     if (!gfx_loop(sys, g, fullSync)) return 0;
     if (g->bossWait) g->fullSync = 0;
-    flush_output(g);
+    if (!g->noFlush) flush_output(g);
     return 1;
 }
 
@@ -3790,6 +3807,7 @@ H64GfxOut *h64_gfx_out_create(void)
 {
     H64GfxOut *o = new H64GfxOut;
     o->snapshot = 0;
+    o->parts = 0;
     return o;
 }
 
@@ -3916,43 +3934,158 @@ int h64_gfx_parse_task(H64System *sys, H64Gfx *g, H64GfxOut *out, int *fullSync,
     return 1;
 }
 
+// g->rangeSort: g->loadRanges sorted and merged, as start << 32 | end. A
+// display list loads the same texels many times (Conker's cutscenes:
+// thousands of loads a frame).
+static void merge_load_ranges(H64Gfx *g)
+{
+    std::vector<u64> &r = g->rangeSort;
+    size_t k, n, m = 0;
+    r.clear();
+    for (k = 0; k + 1 < g->loadRanges.size(); k += 2) r.push_back((u64)g->loadRanges[k] << 32 | g->loadRanges[k + 1]);
+    std::sort(r.begin(), r.end());
+    for (n = 0; n < r.size(); )
+    {
+        u32 lo = (u32)(r[n] >> 32), hi = (u32)r[n];
+        for (n++; n < r.size() && (u32)(r[n] >> 32) <= hi; n++)
+            if ((u32)r[n] > hi) hi = (u32)r[n];
+        r[m++] = (u64)lo << 32 | hi;
+    }
+    r.resize(m);
+}
+
+// The RDRAM the loads parsed since the last call read, as it is now, into
+// out's snapshot; 0 when there is no snapshot.
+static int snapshot_ranges(H64System *sys, H64Gfx *g, H64GfxOut *out)
+{
+    size_t k, c = 0;
+    std::vector<u32> &m = g->capMerge;
+    if (!out->parts) { out->cpuRanges.clear(); out->captured.clear(); }
+    if (!out->snapshot) out->snapshot = (u8 *)h64_big_alloc(H64_RDRAM_SIZE);
+    if (!out->snapshot) { g->loadRanges.clear(); return 0; }
+    u64 t0 = h64_prof_now(sys);
+    merge_load_ranges(g);
+    // Copied, and merged into out->captured (sorted, merged) on the way.
+    m.clear();
+    for (k = 0; k <= g->rangeSort.size(); k++)
+    {
+        u32 lo = 0xFFFFFFFFu, hi = 0;
+        if (k < g->rangeSort.size())
+        {
+            lo = (u32)(g->rangeSort[k] >> 32);
+            hi = (u32)g->rangeSort[k];
+            memcpy(out->snapshot + lo, sys->rdram + lo, hi - lo);
+            cimg_check(g, lo, hi, out->cpuRanges);
+            sys->prof[H64_PROF_SNAP_BYTES] += hi - lo;
+        }
+        for (; c + 1 < out->captured.size() && out->captured[c] <= lo; c += 2)
+        {
+            if (!m.empty() && out->captured[c] <= m.back()) { if (out->captured[c + 1] > m.back()) m.back() = out->captured[c + 1]; }
+            else { m.push_back(out->captured[c]); m.push_back(out->captured[c + 1]); }
+        }
+        if (k == g->rangeSort.size()) break;
+        if (!m.empty() && lo <= m.back()) { if (hi > m.back()) m.back() = hi; }
+        else { m.push_back(lo); m.push_back(hi); }
+    }
+    out->captured.swap(m);
+    sys->prof[H64_PROF_GFX_SNAPSHOT] += h64_prof_now(sys) - t0;
+    g->loadRanges.clear();   // a streamed task's next part starts its own
+    return 1;
+}
+
+void h64_gfx_snapshot_part(H64System *sys, H64Gfx *g, H64GfxOut *out)
+{
+    snapshot_ranges(sys, g, out);
+    out->parts++;
+}
+
+int h64_gfx_part_conflict(H64System *sys, H64Gfx *g, const H64GfxOut *out)
+{
+    size_t k, c = 0;
+    if (!out->parts || !out->snapshot) return 0;
+    // Only where this part's loads meet the ranges captured before: ~the
+    // texels it loads, compared once (comparing all the ranges before each
+    // part took ~10 ms a frame with ~16 parts a task).
+    merge_load_ranges(g);
+    for (k = 0; k < g->rangeSort.size(); k++)
+    {
+        u32 lo = (u32)(g->rangeSort[k] >> 32), hi = (u32)g->rangeSort[k];
+        while (c + 1 < out->captured.size() && out->captured[c + 1] <= lo) c += 2;
+        for (size_t d = c; d + 1 < out->captured.size() && out->captured[d] < hi; d += 2)
+        {
+            u32 a = lo > out->captured[d] ? lo : out->captured[d];
+            u32 b = hi < out->captured[d + 1] ? hi : out->captured[d + 1];
+            if (a < b && memcmp(out->snapshot + a, sys->rdram + a, b - a)) return 1;
+        }
+    }
+    return 0;
+}
+
+void h64_gfx_part_hold(H64Gfx *g)
+{
+    u32 i, nw = g->words.size() - g->partWords, nt = g->tris.size() - g->partTris, no = g->ops.size() - g->partOps;
+    g->holdWords.clear();
+    g->holdTris.clear();
+    g->holdOps.clear();
+    if (nw) { u64 *p = g->holdWords.add(nw); if (p) memcpy(p, &g->words[g->partWords], nw * sizeof(u64)); }
+    if (nt) { GfxTri *p = g->holdTris.add(nt); if (p) memcpy(p, &g->tris[g->partTris], nt * sizeof(GfxTri)); }
+    if (no)
+    {
+        GfxOp *p = g->holdOps.add(no);
+        if (p)
+            for (i = 0; i < no; i++)
+            {
+                p[i] = g->ops[g->partOps + i];
+                p[i].index -= p[i].kind == 0 ? g->partWords : g->partTris;   // from the part's start
+            }
+    }
+    g->words.n = g->partWords;
+    g->tris.n = g->partTris;
+    g->ops.n = g->partOps;
+    g->holdRanges.swap(g->loadRanges);
+    g->loadRanges.clear();
+}
+
+void h64_gfx_part_restore(H64Gfx *g)
+{
+    u32 i, bw = g->words.size(), bt = g->tris.size(), no = g->holdOps.size();
+    if (g->holdWords.size()) { u64 *p = g->words.add(g->holdWords.size()); if (p) memcpy(p, &g->holdWords[0], g->holdWords.size() * sizeof(u64)); }
+    if (g->holdTris.size()) { GfxTri *p = g->tris.add(g->holdTris.size()); if (p) memcpy(p, &g->holdTris[0], g->holdTris.size() * sizeof(GfxTri)); }
+    if (no)
+    {
+        GfxOp *p = g->ops.add(no);
+        if (p)
+            for (i = 0; i < no; i++)
+            {
+                p[i] = g->holdOps[i];
+                p[i].index += p[i].kind == 0 ? bw : bt;
+            }
+    }
+    g->partWords = bw;
+    g->partTris = bt;
+    g->partOps = g->ops.size() - no;
+    g->loadRanges.swap(g->holdRanges);
+    g->holdRanges.clear();
+}
+
 int h64_gfx_package(H64System *sys, H64Gfx *g, H64GfxOut *out)
 {
-    size_t k;
     int mustSync;
-    // The lists go to `out` (O(1) swaps: g keeps out's old buffers for the next task).
+    // The lists go to `out` (O(1) swaps: g keeps out's old buffers for the next task,
+    // emptied: a Boss task submitted in two goes on adding to them).
     g->words.swap(out->words);
     g->tris.swap(out->tris);
     g->ops.swap(out->ops);
+    g->words.clear();
+    g->tris.clear();
+    g->ops.clear();
     // A task that reads a colour image as a texture renders from the snapshot
     // too: the renderer copies the image back into both (h64_gfx_render).
     // Profile gfxFrameToRdram: the renderer writes the frame into RDRAM at the
     // full sync; the task ends only once that is done.
     mustSync = sys->options.gfxFrameToRdram != 0;
-    out->cpuRanges.clear();
-    if (!out->snapshot) out->snapshot = (u8 *)h64_big_alloc(H64_RDRAM_SIZE);
-    if (!out->snapshot) { g->loadRanges.clear(); return 1; }
-    {
-        // Ranges sorted and merged first: a display list loads the same
-        // texels many times (Conker's cutscenes: thousands of loads a frame).
-        u64 t0 = h64_prof_now(sys);
-        std::vector<u64> &r = g->rangeSort;
-        size_t n = 0;
-        r.clear();
-        for (k = 0; k + 1 < g->loadRanges.size(); k += 2) r.push_back((u64)g->loadRanges[k] << 32 | g->loadRanges[k + 1]);
-        std::sort(r.begin(), r.end());
-        while (n < r.size())
-        {
-            u32 lo = (u32)(r[n] >> 32), hi = (u32)r[n];
-            for (n++; n < r.size() && (u32)(r[n] >> 32) <= hi; n++)
-                if ((u32)r[n] > hi) hi = (u32)r[n];
-            memcpy(out->snapshot + lo, sys->rdram + lo, hi - lo);
-            cimg_check(g, lo, hi, out->cpuRanges);
-            sys->prof[H64_PROF_SNAP_BYTES] += hi - lo;
-        }
-        sys->prof[H64_PROF_GFX_SNAPSHOT] += h64_prof_now(sys) - t0;
-    }
-    g->loadRanges.clear();   // a streamed task's next part starts its own
+    if (!snapshot_ranges(sys, g, out)) mustSync = 1;
+    out->parts = 0;
     return mustSync;
 }
 
@@ -4076,6 +4209,7 @@ static int parse_task_lists(H64System *sys, H64Gfx *g, int *fullSync)
     g->words.clear();
     g->tris.clear();
     g->ops.clear();
+    g->partWords = g->partTris = g->partOps = 0;
     if (u->type == UC_F5ROGUE)
     {
         g->f5ColorBase = g->f5VpAddr = g->f5PerspAddr = 0;

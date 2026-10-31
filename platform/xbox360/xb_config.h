@@ -86,7 +86,8 @@ struct Config
     int browserDemo;    // browserdemo=N: the ROM browser moves its selection down every N ms (captures in Xenia)
     char browserSel[128]; // browsersel=FILE: the ROM browser starts on that file name (console checks), over lastrom=
     int artAll;         // artall=1: the ROM browser starts "Get box art for all games" by itself (checks)
-    int browserDesign;  // browserdesign=0..3: the ROM browser's layout, the list+card of old (0), a covers grid (1), big covers (2), a carousel (3)
+    int browserDesign;  // browserdesign=0..7: the ROM browser's layout, the list+card of old (0), a covers grid (1), big covers (2), a carousel (3),
+                        // mosaic (4), spotlight (5), cartridges (6), cinema (7)
     int bgEffect;       // bgeffect=0..29: the ROM browser's animated background, none (0), the waves (1, default) ... (xb_menu.cpp BGFX_*)
     int fxColor[3];     // fxcolor1..3=0..13: the effect's colours, from xb_menu.cpp's palette; fxcolor1=0: the effect's own, 2 and 3 = 0: unused
     int fxOpacity;      // fxopacity=10..200: how strongly the effect shows, in % (default 100)
@@ -100,6 +101,7 @@ struct Config
     int wallFit;        // wallfit=0..4: fill, fit, stretch, centre, tile (xb_ui.h UI_FIT_*)
     int wallShuffle;    // wallshuffle=1: the wallpapers at random, not in name order
     int descTranslate;  // desctr=0|1: the games' descriptions in the menus' language when there is one (default 1)
+    int gameBackdrop;   // gamebg=0|1: a picture from the selected game behind the game list, in every view (default 0)
     int wallRecommend;  // wallrec=1: the background shows one of your games at a time, its big cover and what it is about
     int borderColor;    // bordercolor=0..13: the menus' edges - the selection's colour (0), or xb_menu.cpp's swatches
     int borderOpacity;  // borderopacity=0..100: how strong the edges are, in % (default 100)

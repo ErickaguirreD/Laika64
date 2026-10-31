@@ -644,6 +644,7 @@ static const struct { int label, desc; } s_rowDesc[] = {
     { T_FXAA, T_D_FXAA },
     { T_FX_RESET, T_D_FX_RESET },
     { T_GAME_IMAGES, T_D_GAME_IMAGES },
+    { T_GAME_BG, T_D_GAME_BG },
     { T_GFX_LOG, T_D_GFX_LOG },
     { T_GRAPHICS, T_D_GRAPHICS },
     { T_HIRESTEX, T_D_HIRESTEX },
@@ -702,7 +703,7 @@ static const char *row_desc(const char *label)
 // The parts of each page (the side bar): by the page's title, each part its rows'
 // labels. A row in none goes with the first part; a part with no row shown (rows
 // of the ROM list only, in game) is left out. A page not here has no parts.
-struct KodiPart { int name; int rows[5]; };
+struct KodiPart { int name; int rows[6]; };
 struct KodiPage { int title; KodiPart parts[4]; };
 static const KodiPage s_kodiPages[] = {
     { T_SYSTEM, { { T_KC_PAD_SAVE, { T_PAD_LOSS, T_AUTOSAVE_SLOT, T_BATTERY_WARN } },
@@ -722,7 +723,7 @@ static const KodiPage s_kodiPages[] = {
     { T_INTERFACE, { { T_KC_LOOK, { T_LANGUAGE, T_SETVIEW, T_FONT, T_INTRO_WELCOME } },
                      { T_KC_COLORS, { T_SEL_COLOR, T_BORDERS } },
                      { T_KC_BACKGROUNDS, { T_WALLPAPERS, T_BG_EFFECT, T_SAVER } },
-                     { T_KC_GAMELIST, { T_DESIGN, T_GAME_IMAGES, T_TRANSLATE_DESC, T_CATEGORIES, T_START_ROM } } } },
+                     { T_KC_GAMELIST, { T_DESIGN, T_GAME_IMAGES, T_TRANSLATE_DESC, T_CATEGORIES, T_START_ROM, T_GAME_BG } } } },
 };
 
 // The page's parts as shown: names (T_*), and each row's part (index into names); 0 parts: none.
@@ -740,7 +741,7 @@ static void kodi_parts(const UiMenu *m, KodiParts *kp)
     {
         int part = 0;
         for (k = 0; k < 4 && pg->parts[k].name; k++)
-            for (r = 0; r < 5 && pg->parts[k].rows[r]; r++)
+            for (r = 0; r < 6 && pg->parts[k].rows[r]; r++)
                 if (!strcmp(m->label[i], Tr(pg->parts[k].rows[r]))) part = k;
         kp->rowPart[i] = part;
         used[part] = 1;
@@ -1198,6 +1199,8 @@ static int paths_input(UiMenu *m, Config *c, WORD down);
 #define I_CATS (I_DESIGN + 3)      // "Categories": the ROM list's tabs, made and changed on their own pages (ROM list only)
 #define I_TRANSDESC (I_DESIGN + 2)
 #define I_STARTROM (I_DESIGN + 4)   // "Game at start" (ROM list only; was in System) // "Translate descriptions" (ROM list only)
+#define I_GAMEBG (I_DESIGN + 5)     // "Background images": a picture from the selected game behind every view (ROM list only)
+static int s_gameBg;                 // Config::gameBackdrop (ui_from_config)
 // The language the games' descriptions are asked in (Interface > Translate descriptions).
 static const char *art_lang(const Config *c) { return c->descTranslate ? LangCode(LangGet()) : "en"; }
 static int s_catsPage, s_catEditPage;   // Interface > Categories, and one category being made or changed
@@ -1207,10 +1210,12 @@ static int catedit_input(UiMenu *m, Config *c, WORD down);
 // The ROM browser's layouts (Config::browserDesign; Interface > Design, X in the browser):
 // the list and its card, the covers grid, the big covers grid, the carousel.
 // Mosaic: a dense grid (7 x 4). Spotlight: the selection big with its information, the others in a row under it.
-enum { BD_LIST = 0, BD_COVERS, BD_BIG, BD_CAROUSEL, BD_MOSAIC, BD_SPOTLIGHT, BD_COUNT };
-static const int s_designLabels[BD_COUNT] = { T_DESIGN_DETAILED, T_DESIGN_COVERS, T_DESIGN_BIG, T_DESIGN_CAROUSEL, T_DESIGN_MOSAIC, T_DESIGN_SPOTLIGHT };
+// Cartridges: N64 cartridges on a shelf, the box art as labels. Cinema: the picture from the game over the screen, the logo big.
+enum { BD_LIST = 0, BD_COVERS, BD_BIG, BD_CAROUSEL, BD_MOSAIC, BD_SPOTLIGHT, BD_CARTRIDGE, BD_CINEMA, BD_COUNT };
+static const int s_designLabels[BD_COUNT] = { T_DESIGN_DETAILED, T_DESIGN_COVERS, T_DESIGN_BIG, T_DESIGN_CAROUSEL, T_DESIGN_MOSAIC, T_DESIGN_SPOTLIGHT,
+                                              T_DESIGN_CARTRIDGE, T_DESIGN_CINEMA };
 // The views that move one game at a time, left and right (the others are grids, or the list).
-static int design_row(int d) { return d == BD_CAROUSEL || d == BD_SPOTLIGHT; }
+static int design_row(int d) { return d == BD_CAROUSEL || d == BD_SPOTLIGHT || d == BD_CARTRIDGE || d == BD_CINEMA; }
 // The ROM list's animated background (Config::bgEffect; drawn by browser_effect).
 enum { BGFX_OFF = 0, BGFX_WAVES, BGFX_PULSE, BGFX_RAIN, BGFX_VORTEX, BGFX_RIPPLES, BGFX_SILK, BGFX_EMBERS, BGFX_GRID,
        BGFX_UNDERWATER, BGFX_ENERGY, BGFX_AURORA, BGFX_LIQUID, BGFX_PARTICLES, BGFX_SMOKE, BGFX_XMB, BGFX_PS4_FLOW,
@@ -1439,6 +1444,7 @@ static void ui_from_config(const Config *c)
     int i;
     s_sel = c->selColor >= 0 && c->selColor < SEL_COLORS ? c->selColor : 0;
     s_cover3d = c->artKind == CONFIG_ART_BOX3D;
+    s_gameBg = c->gameBackdrop;
     UiSetFont(c->uiFont);
     paths_apply(c);
     UiSetWallpapers(ConfigPath(c, CONFIG_PATH_WALLS, "game"), c->wallCustom, c->wallFile, c->wallInterval, c->wallTransition >= 0 && c->wallTransition < UI_TRANS_COUNT ? c->wallTransition : 0,
@@ -1646,6 +1652,7 @@ static void settings_values(UiMenu *m, const Config *c)
                                                 c->saverMode == SAVER_LOGO ? T_SAVER_LOGO : c->saverMode == SAVER_CLOCK ? T_SAVER_CLOCK : T_OFF));
         sprintf(m->value[I_LANGUAGE], "%s", Tr(T_LANG_NAME));   // A: the list of languages
         if (s_browser) sprintf(m->value[I_TRANSDESC], "%s", toggle(c->descTranslate));
+        if (s_browser) sprintf(m->value[I_GAMEBG], "%s", toggle(c->gameBackdrop));
         if (s_browser) start_rom_text(c, m->value[I_STARTROM], sizeof(m->value[I_STARTROM]));
         return;
     }
@@ -1825,11 +1832,12 @@ static void settings_interface(UiMenu *m, const Config *c)
         UiMenuAdd(m, Tr(T_TRANSLATE_DESC), "");
         UiMenuAdd(m, Tr(T_CATEGORIES), "");
         UiMenuAdd(m, Tr(T_START_ROM), "");
+        UiMenuAdd(m, Tr(T_GAME_BG), "");
     }
     {
         static const unsigned char icons[] = { UI_ICON_GLOBE, UI_ICON_LIST, UI_ICON_SLIDERS, UI_ICON_PALETTE, UI_ICON_EYE, UI_ICON_INTERFACE,
                                                UI_ICON_FRAME, UI_ICON_SUN, UI_ICON_CLOCK, UI_ICON_LAYOUT, UI_ICON_LOAD, UI_ICON_GLOBE, UI_ICON_LIST,
-                                               UI_ICON_PLAY };
+                                               UI_ICON_PLAY, UI_ICON_FRAME };
         UiMenuIcons(m, icons, sizeof(icons));
     }
     SkinScan();   // keeps the inline Skins picker below matching the game:\skins folder
@@ -1946,6 +1954,13 @@ static int interface_input(UiMenu *m, Config *c, WORD down)
     {
         c->descTranslate = !c->descTranslate;
         if (!s_kodiSim) ArtSetLang(art_lang(c));   // the descriptions shown again in it
+        settings_values(m, c);
+        return SET_CHANGED;
+    }
+    if (s_browser && m->sel == I_GAMEBG && (dir || (down & XINPUT_GAMEPAD_A)))
+    {
+        c->gameBackdrop = !c->gameBackdrop;
+        s_gameBg = c->gameBackdrop;   // the list behind shows it at once
         settings_values(m, c);
         return SET_CHANGED;
     }
@@ -8128,6 +8143,10 @@ static ArtView *view_find(const char *path)
     return NULL;
 }
 
+static void cine_take(IDirect3DDevice9 *dev);    // the selected game's bigger pictures (below)
+static void cine_clear(IDirect3DDevice9 *dev);
+static void game_backdrop(const std::string &file, int flags);
+
 // Turns the worker's results into textures.
 static void views_take(IDirect3DDevice9 *dev)
 {
@@ -8217,6 +8236,7 @@ static void views_take(IDirect3DDevice9 *dev)
         v->lastUse = ++s_viewClock;
         ArtResultFree(&r);
     }
+    cine_take(dev);
 }
 
 // The menus' music volume, changed with RS up/down in the ROM list: a small bar at the
@@ -8333,6 +8353,7 @@ static void views_clear(IDirect3DDevice9 *dev)
     int i;
     for (i = 0; i < ART_VIEWS; i++)
         if (s_views[i].used) view_free(dev, &s_views[i]);
+    cine_clear(dev);
     rec_free(&s_rec[0]);   // the wallpapers' recommendation: picked again in the list
     rec_free(&s_rec[1]);
     UiImageFlush(dev);   // freed now, not when the GPU is next looked at: a game may follow
@@ -9449,6 +9470,7 @@ static void browser_draw(const std::vector<RomEntry> &roms, int sel, int top, in
     char buf[160];
     UiBackdrop();
     browser_effect();
+    if (!roms.empty()) game_backdrop(roms[sel].file, 0);   // Interface > Background images
     // The logo as large as the room over the list allows, centred on it, just above its edge (the
     // tab - LT/RT - shows in a note as it changes; the version is on the About page).
     UiBrand(listX + (listW - UiBrandWidth(BRAND_SIZE)) * 0.5f, listY - 6 - BRAND_SIZE * 1.9f * 0.5f, BRAND_SIZE);
@@ -9550,6 +9572,7 @@ static void browser_draw_covers(const std::vector<RomEntry> &roms, int sel, int 
     char buf[160];
     UiBackdrop();
     browser_effect();
+    if (!roms.empty()) game_backdrop(roms[sel].file, 0);   // Interface > Background images
     UiBrand(UI_SAFE_X, 72, BRAND_SIZE);   // the logo alone (the version is on the About page)
     browser_tabs(UI_WIDTH * 0.5f, 72, 1, 520);
     // n == 0 never reaches here - the caller (RomBrowser) falls back to browser_draw
@@ -9633,6 +9656,7 @@ static void browser_draw_carousel(const std::vector<RomEntry> &roms, int sel)
     char buf[160];
     UiBackdrop();
     browser_effect();
+    if (!roms.empty()) game_backdrop(roms[sel].file, 0);   // Interface > Background images
     UiBrand(UI_SAFE_X, 72, BRAND_SIZE);
     browser_tabs(UI_WIDTH * 0.5f, 72, 1, 520);
     sprintf(buf, "%d / %d", sel + 1, n);
@@ -9741,6 +9765,7 @@ static void browser_draw_spotlight(const std::vector<RomEntry> &roms, int sel)
     int i;
     UiBackdrop();
     browser_effect();
+    if (!roms.empty()) game_backdrop(roms[sel].file, 0);   // Interface > Background images
     UiBrand(UI_SAFE_X, 72, BRAND_SIZE);
     browser_tabs(UI_WIDTH * 0.5f, 72, 1, 520);
     sprintf(buf, "%d / %d", sel + 1, n);
@@ -9785,6 +9810,375 @@ static void browser_draw_spotlight(const std::vector<RomEntry> &roms, int sel)
         UiRoundRect(x, y, SPOT_TW, SPOT_TH, 10, UiAlpha(D3DCOLOR_ARGB(255, 22, 23, 31), al), UiAlpha(D3DCOLOR_ARGB(255, 16, 17, 23), al));
         if (rv && rv->cover) view_cover(rv, x, y, SPOT_TW, SPOT_TH, 10, D3DCOLOR_ARGB((int)(255 * al), s ? 255 : 200, s ? 255 : 200, s ? 255 : 200));
         else stage_placeholder(x, y, SPOT_TW, SPOT_TH, roms[i].shown.c_str(), al);
+    }
+    UiScreenFooter(Tr(T_FOOT_BROWSER));
+}
+
+// ---- Cartridges: the games as N64 cartridges standing in a row on a shelf,
+// each one's box art as its label; the selection lifted up out of the row,
+// its name and facts under the shelf. The row glides as the carousel's does.
+// Drawn, not a picture: the grey shell lit from above, the label's recess,
+// the notches on its sides and the grip ridges under the label.
+#define CART_W 300.0f        // the middle cartridge
+#define CART_H 214.0f
+#define CART_SHELF 470.0f    // they stand on this line
+#define CART_SPREAD 4        // shown on each side
+#define CART_LIFT 46.0f      // how far the selection comes up
+
+// One cartridge at (x, y, w, h): `light` darkens the ones farther from the middle.
+static void cartridge(float x, float y, float w, float h, const ArtView *v, float alpha, float light)
+{
+    const float k = w / CART_W, r = 16 * k;
+    const float lw = w - 64 * k, lh = lw * 232.0f / 400.0f, lx = x + (w - lw) * 0.5f, ly = y + 18 * k;
+    const int A = (int)(255 * alpha), L = (int)(255 * light);
+    int i;
+#define CART_RGB(rr, gg, bb) D3DCOLOR_ARGB(A, (int)((rr) * light), (int)((gg) * light), (int)((bb) * light))
+    UiShadow(x + 8 * k, y + 14 * k, w - 16 * k, h - 6 * k, r, 24 * k, D3DCOLOR_ARGB(A * 120 / 255, 0, 0, 0));
+    // The shell, its top edge catching the light.
+    UiRoundRect(x, y, w, h, r, CART_RGB(132, 134, 142), CART_RGB(84, 86, 94));
+    UiRect(x + r, y + 2 * k, w - 2 * r, 2 * k, CART_RGB(190, 192, 200));
+    // The notches on its sides, low down.
+    for (i = 0; i < 2; i++)
+        UiRoundRect(i ? x + w - 7 * k : x - 1 * k, y + h * 0.66f, 8 * k, 18 * k, 3 * k, CART_RGB(46, 47, 54), CART_RGB(40, 41, 48));
+    // The label's recess, then the label: the game's picture.
+    UiRoundRect(lx - 6 * k, ly - 6 * k, lw + 12 * k, lh + 12 * k, 10 * k, CART_RGB(70, 72, 80), CART_RGB(98, 100, 108));
+    if (v && v->cover) UiImage(v->cover, lx, ly, lw, lh, 6 * k, D3DCOLOR_ARGB(A, L, L, L));
+    else UiRoundRect(lx, ly, lw, lh, 6 * k, CART_RGB(56, 58, 70), CART_RGB(44, 46, 56));
+    // The grip ridges under it: a groove and the light on its lower edge.
+    for (i = 0; i < 5; i++)
+    {
+        float gy = ly + lh + 16 * k + i * 7 * k;
+        if (gy > y + h - 10 * k) break;
+        UiRect(x + w * 0.2f, gy, w * 0.6f, 2 * k, CART_RGB(66, 68, 76));
+        UiRect(x + w * 0.2f, gy + 2 * k, w * 0.6f, 1 * k, CART_RGB(150, 152, 160));
+    }
+#undef CART_RGB
+}
+
+static void browser_draw_cartridges(const std::vector<RomEntry> &roms, int sel)
+{
+    static UiAnim pos;
+    int n = (int)roms.size(), order[2 * CART_SPREAD + 3], cnt = 0, i, j;
+    float p, a = selection_pulse();
+    char buf[200];
+    UiBackdrop();
+    browser_effect();
+    if (!roms.empty()) game_backdrop(roms[sel].file, 0);   // Interface > Background images
+    UiBrand(UI_SAFE_X, 72, BRAND_SIZE);
+    browser_tabs(UI_WIDTH * 0.5f, 72, 1, 520);
+    sprintf(buf, "%d / %d", sel + 1, n);
+    UiText(UI_REGULAR, 19, UI_WIDTH - UI_SAFE_X, 64, UI_COL_TEXT2, buf, UI_RIGHT);
+    if (!n) { UiScreenFooter(Tr(T_FOOT_BROWSER)); return; }
+    p = anim_step_rate(&pos, (float)sel, !pos.live || fabsf(pos.value - sel) > 3 * CART_SPREAD, 7.0f, 0.002f);
+    // The shelf: a lit edge, its shadow below.
+    UiRoundRect(0, CART_SHELF - 10, UI_WIDTH, 10, 0, D3DCOLOR_ARGB(0, 255, 255, 255), D3DCOLOR_ARGB(26, 255, 255, 255));
+    UiRect(0, CART_SHELF, UI_WIDTH, 2, D3DCOLOR_ARGB(70, 255, 255, 255));
+    UiRoundRect(0, CART_SHELF + 2, UI_WIDTH, 60, 0, D3DCOLOR_ARGB(120, 0, 0, 0), D3DCOLOR_ARGB(0, 0, 0, 0));
+    for (i = (int)floorf(p) - CART_SPREAD; i <= (int)ceilf(p) + CART_SPREAD && cnt < (int)(sizeof(order) / sizeof(order[0])); i++)
+        if (i >= 0 && i < n) order[cnt++] = i;
+    // The farthest first, so the middle one is drawn on top.
+    for (i = 1; i < cnt; i++)
+        for (j = i; j > 0 && fabsf(order[j] - p) > fabsf(order[j - 1] - p); j--)
+        {
+            int t = order[j];
+            order[j] = order[j - 1];
+            order[j - 1] = t;
+        }
+    for (i = 0; i < cnt; i++)
+    {
+        int idx = order[i];
+        float d = idx - p, ad = fabsf(d), near1 = ad < 1 ? ad : 1;
+        float s = ad < 1 ? 1.0f - 0.3f * ad : 0.7f - 0.06f * (ad - 1);
+        float off = ad < 1 ? ad * 270.0f : 270.0f + (ad - 1) * 205.0f;
+        float alpha = ad < 1 ? 1.0f - 0.15f * ad : 0.85f - 0.2f * (ad - 1);
+        float light = 1.0f - 0.35f * near1;
+        float w = CART_W * s, h = CART_H * s, x = UI_WIDTH * 0.5f + (d < 0 ? -off : off) - w * 0.5f;
+        float y = CART_SHELF - h - CART_LIFT * (1.0f - near1);
+        if (alpha <= 0.02f || x > UI_WIDTH || x + w < 0) continue;
+        if (ad < 0.5f)
+        {
+            float ga = a * (1.0f - 2.0f * ad);
+            selection_glow(x - 6, y - 6, w + 12, h + 12, 20, ga);
+            UiRoundRing(x - 5, y - 5, w + 10, h + 10, 20, 3.0f, SEL_RING(ga));
+        }
+        cartridge(x, y, w, h, view_find(roms[idx].file.c_str()), alpha, light);
+        if (fav_is(roms[idx].file))
+        {
+            // A favourite: its badge on the shell's top left corner.
+            UiCircle(x + 20 * s, y + 20 * s, 13, UiAlpha(D3DCOLOR_ARGB(200, 16, 18, 26), alpha));
+            fav_star(x + 20 * s, y + 20 * s, 15, alpha);
+        }
+    }
+    {
+        // Its name under the shelf, and the year, genre and developer.
+        const ArtView *v = view_find(roms[sel].file.c_str());
+        const H64GameInfo *gi = v && v->hasInfo && v->info.found ? &v->info : NULL;
+        char fit[160];
+        UiTextFit(UI_BOLD, 34, UI_WIDTH - 2 * UI_SAFE_X - 60, gi && gi->title[0] ? gi->title : roms[sel].shown.c_str(), fit, sizeof(fit));
+        UiTextShadowed(UI_BOLD, 34, UI_WIDTH * 0.5f, CART_SHELF + 58, UI_COL_TEXT, fit, UI_CENTER);
+        if (gi)
+        {
+            _snprintf(buf, sizeof(buf) - 1, "%s%s%s%s%s", gi->year, gi->year[0] && gi->genre[0] ? "  -  " : "", gi->genre,
+                      (gi->year[0] || gi->genre[0]) && gi->developer[0] ? "  -  " : "", gi->developer);
+            buf[sizeof(buf) - 1] = 0;
+            UiTextFit(UI_REGULAR, 19, UI_WIDTH - 2 * UI_SAFE_X, buf, fit, sizeof(fit));
+            UiText(UI_REGULAR, 19, UI_WIDTH * 0.5f, CART_SHELF + 100, UI_COL_TEXT2, fit, UI_CENTER);
+        }
+    }
+    UiScreenFooter(Tr(T_FOOT_BROWSER));
+}
+
+// ---- Cinema: the selected game's logo big at the bottom left, with its
+// facts and a few words about it; a row of the games around it along the
+// bottom. The logo is read larger than the covers (game_pics); until it
+// comes, or without one, the game's name.
+#define CINE_LOGO_W 560
+#define CINE_LOGO_H 220
+#define CINE_FADE 0.6f       // the bigger pictures fading in (game_pics)
+#define CINE_REST 0.15f      // the selection still this long before they are asked for
+#define CINE_TW 120.0f       // the row along the bottom
+#define CINE_TH 70.0f
+#define CINE_GAP 12.0f
+#define CINE_ROW_Y 548.0f
+
+// The selected game's bigger pictures, read on a thread of their own once the
+// selection rests (the browser's pictures hold one kind of each game at a
+// time, at the covers' size): its picture from the game behind every view
+// (Interface > Background images, s_gameBg) and its logo (the cinema view).
+#define GPIC_SNAP 1          // what is asked for: the picture from the game (up to 640 x 480)
+#define GPIC_LOGO 2          // the logo (up to CINE_LOGO_W x CINE_LOGO_H, its alpha kept)
+#define GPIC_SNAP_W 640
+#define GPIC_SNAP_H 480
+struct CinePic { char path[256]; int flags; u8 *snap, *logo; int sw, sh, lw, lh; };
+struct CineShow { char path[256]; int flags; IDirect3DTexture9 *snap, *logo; int sw, sh, lw, lh; float at; };
+static CRITICAL_SECTION s_cineLock;
+static HANDLE s_cineEvt;
+static int s_cineStarted;      // 1 running, -1 could not start
+static char s_cineWant[256];   // the game asked for and what of it (under s_cineLock)
+static int s_cineWantFlags;
+static CinePic s_cineDone;     // read, not taken yet (under s_cineLock)
+static int s_cineReady;
+static CineShow s_cine;        // the textures shown
+static int s_cineGen;          // counts cine_clear: asked again after it
+
+static void cine_pic_free(CinePic *p)
+{
+    free(p->snap);
+    free(p->logo);
+    memset(p, 0, sizeof(*p));
+}
+
+static DWORD WINAPI cine_thread(LPVOID)
+{
+    for (;;)
+    {
+        CinePic p;
+        WaitForSingleObject(s_cineEvt, INFINITE);
+        memset(&p, 0, sizeof(p));
+        EnterCriticalSection(&s_cineLock);
+        strcpy(p.path, s_cineWant);
+        p.flags = s_cineWantFlags;
+        LeaveCriticalSection(&s_cineLock);
+        if (!p.path[0]) continue;
+        if (p.flags & GPIC_SNAP) ArtReadPicture(p.path, ART_KIND_SNAP, GPIC_SNAP_W, GPIC_SNAP_H, &p.snap, &p.sw, &p.sh);
+        if (p.flags & GPIC_LOGO) ArtReadPicture(p.path, ART_KIND_LOGO, CINE_LOGO_W, CINE_LOGO_H, &p.logo, &p.lw, &p.lh);
+        EnterCriticalSection(&s_cineLock);
+        cine_pic_free(&s_cineDone);   // one not taken yet: this newer one instead
+        s_cineDone = p;
+        s_cineReady = 1;
+        LeaveCriticalSection(&s_cineLock);
+    }
+}
+
+static void cine_want(const char *path, int flags)
+{
+    if (!s_cineStarted)
+    {
+        HANDLE h;
+        s_cineStarted = -1;
+        InitializeCriticalSection(&s_cineLock);
+        s_cineEvt = CreateEvent(NULL, FALSE, FALSE, NULL);
+        if (!s_cineEvt) return;
+        h = CreateThread(NULL, 256 * 1024, cine_thread, NULL, CREATE_SUSPENDED, NULL);
+        if (!h) return;
+        XSetThreadProcessor(h, 4);
+        ResumeThread(h);
+        CloseHandle(h);
+        s_cineStarted = 1;
+    }
+    if (s_cineStarted < 0) return;
+    EnterCriticalSection(&s_cineLock);
+    strncpy(s_cineWant, path, sizeof(s_cineWant) - 1);
+    s_cineWant[sizeof(s_cineWant) - 1] = 0;
+    s_cineWantFlags = flags;
+    LeaveCriticalSection(&s_cineLock);
+    SetEvent(s_cineEvt);
+}
+
+static void cine_show_free(IDirect3DDevice9 *dev, CineShow *s)
+{
+    if (s->snap) UiImageRelease(dev, s->snap);
+    if (s->logo) UiImageRelease(dev, s->logo);
+    memset(s, 0, sizeof(*s));
+}
+
+// The thread's result into textures (views_take, outside UiBegin/UiEnd); one
+// for a game left since, or asked for otherwise since, is dropped.
+static void cine_take(IDirect3DDevice9 *dev)
+{
+    CinePic p;
+    int got = 0;
+    if (s_cineStarted <= 0) return;
+    EnterCriticalSection(&s_cineLock);
+    if (s_cineReady)
+    {
+        p = s_cineDone;
+        memset(&s_cineDone, 0, sizeof(s_cineDone));
+        s_cineReady = 0;
+        got = !_stricmp(p.path, s_cineWant) && p.flags == s_cineWantFlags;
+        if (!got) cine_pic_free(&p);
+    }
+    LeaveCriticalSection(&s_cineLock);
+    if (!got) return;
+    cine_show_free(dev, &s_cine);
+    strcpy(s_cine.path, p.path);
+    s_cine.flags = p.flags;
+    if (p.snap && (s_cine.snap = UiImageCreate(dev, p.snap, p.sw, p.sh)) != NULL) { s_cine.sw = p.sw; s_cine.sh = p.sh; }
+    if (p.logo && (s_cine.logo = UiImageCreate(dev, p.logo, p.lw, p.lh)) != NULL) { s_cine.lw = p.lw; s_cine.lh = p.lh; }
+    s_cine.at = UiTime();
+    cine_pic_free(&p);
+}
+
+static void cine_clear(IDirect3DDevice9 *dev)
+{
+    cine_show_free(dev, &s_cine);
+    s_cineGen++;
+    if (s_cineStarted > 0)
+    {
+        EnterCriticalSection(&s_cineLock);
+        s_cineWant[0] = 0;
+        LeaveCriticalSection(&s_cineLock);
+    }
+}
+
+// The selected game's pictures (`flags`, and its picture from the game when
+// Background images is on): asked for once the selection rests; 1 when
+// s_cine holds them for it.
+static int game_pics(const std::string &file, int flags)
+{
+    static std::string at, asked;
+    static int askedFlags, askedGen = -1;
+    static float since;
+    const float now = UiTime();
+    if (s_gameBg) flags |= GPIC_SNAP;
+    if (file != at) { at = file; since = now; }
+    if (!flags || file.empty()) return 0;
+    if (now - since >= CINE_REST && (asked != file || askedFlags != flags || askedGen != s_cineGen))
+    {
+        asked = file;
+        askedFlags = flags;
+        askedGen = s_cineGen;
+        cine_want(file.c_str(), flags);
+    }
+    return s_cine.path[0] && !_stricmp(s_cine.path, file.c_str()) && (s_cine.flags & flags) == flags;
+}
+
+// Background images: the selected game's picture from the game over the whole
+// screen (cut to its shape, zooming in by 6 % over 14 s), fading in, dimmed so
+// the view on top reads well. Every view draws it after its background.
+static void game_backdrop(const std::string &file, int flags)
+{
+    float f, sa, ua, u0 = 0, u1 = 1, v0 = 0, v1 = 1, age, z, cu, cv, hu, hv;
+    if (!game_pics(file, flags) || !s_gameBg || !s_cine.snap) return;
+    age = UiTime() - s_cine.at;
+    f = smooth01(age / CINE_FADE);
+    sa = (float)s_cine.sw / s_cine.sh;
+    ua = (float)UI_WIDTH / UI_HEIGHT;
+    if (sa > ua) { u0 = (1 - ua / sa) * 0.5f; u1 = 1 - u0; }
+    else { v0 = (1 - sa / ua) * 0.5f; v1 = 1 - v0; }
+    z = 1.0f + 0.06f * (age < 14.0f ? age / 14.0f : 1.0f);
+    cu = (u0 + u1) * 0.5f; cv = (v0 + v1) * 0.5f; hu = (u1 - u0) * 0.5f / z; hv = (v1 - v0) * 0.5f / z;
+    UiImagePart(s_cine.snap, 0, 0, UI_WIDTH, UI_HEIGHT, cu - hu, cv - hv, cu + hu, cv + hv, D3DCOLOR_ARGB((int)(255 * f), 255, 255, 255));
+    UiRect(0, 0, UI_WIDTH, UI_HEIGHT, D3DCOLOR_ARGB((int)(120 * f), 8, 9, 14));
+    UiRoundRect(0, 0, UI_WIDTH, 150, 0, D3DCOLOR_ARGB((int)(120 * f), 0, 0, 0), D3DCOLOR_ARGB(0, 0, 0, 0));
+    UiRoundRect(0, 330, UI_WIDTH, UI_HEIGHT - 330, 0, D3DCOLOR_ARGB(0, 8, 9, 14), D3DCOLOR_ARGB((int)(200 * f), 8, 9, 14));
+}
+
+static void browser_draw_cinema(const std::vector<RomEntry> &roms, int sel)
+{
+    static UiAnim pos;
+    static int lastSel = -1;
+    static float changedAt = -10.0f;
+    const int n = (int)roms.size();
+    const ArtView *v = n ? view_find(roms[sel].file.c_str()) : NULL;
+    const H64GameInfo *gi = v && v->hasInfo && v->info.found ? &v->info : NULL;
+    const float tx = UI_SAFE_X + 6, now = UiTime();
+    float p, a = selection_pulse(), fade, f = 0, ty;
+    int mine, i;
+    char buf[200];
+    UiBackdrop();
+    browser_effect();
+    if (n) game_backdrop(roms[sel].file, GPIC_LOGO);
+    UiBrand(UI_SAFE_X, 72, BRAND_SIZE);
+    if (!n) { UiScreenFooter(Tr(T_FOOT_BROWSER)); return; }
+    if (sel != lastSel) { lastSel = sel; changedAt = now; }
+    fade = smooth01((now - changedAt) / 0.25f);
+    mine = game_pics(roms[sel].file, GPIC_LOGO);
+    if (mine) f = smooth01((now - s_cine.at) / CINE_FADE);
+    browser_tabs(UI_WIDTH * 0.5f, 72, 1, 520);
+    sprintf(buf, "%d / %d", sel + 1, n);
+    UiText(UI_REGULAR, 19, UI_WIDTH - UI_SAFE_X, 64, UI_COL_TEXT2, buf, UI_RIGHT);
+    // The logo big at the bottom left (its own proportions, up to 460 x 150), or the name.
+    if (mine && s_cine.logo)
+    {
+        float k = 460.0f / s_cine.lw, lw, lh;
+        if (150.0f / s_cine.lh < k) k = 150.0f / s_cine.lh;
+        if (k > 1.6f) k = 1.6f;
+        lw = s_cine.lw * k;
+        lh = s_cine.lh * k;
+        UiShadow(tx - 20, 430 - lh - 10, lw + 40, lh + 20, 30, 40, D3DCOLOR_ARGB((int)(90 * f), 0, 0, 0));
+        UiImage(s_cine.logo, tx, 430 - lh, lw, lh, 0, D3DCOLOR_ARGB((int)(255 * f), 255, 255, 255));
+    }
+    if (!(mine && s_cine.logo) || f < 1.0f)
+    {
+        char fit[160];
+        float na = mine && s_cine.logo ? fade * (1.0f - f) : fade;
+        UiTextFit(UI_BOLD, 46, UI_WIDTH - 2 * UI_SAFE_X, gi && gi->title[0] ? gi->title : roms[sel].shown.c_str(), fit, sizeof(fit));
+        UiTextShadowed(UI_BOLD, 46, tx, 400, UiAlpha(UI_COL_TEXT, na), fit, UI_LEFT);
+    }
+    // The year, genre and developer, a favourite's star before them; a few words about it.
+    ty = 462;
+    {
+        float sx = tx;
+        if (fav_is(roms[sel].file)) { fav_star(tx + 10, ty, 18, fade); sx += 30; }
+        if (gi)
+        {
+            _snprintf(buf, sizeof(buf) - 1, "%s%s%s%s%s", gi->year, gi->year[0] && gi->genre[0] ? "  -  " : "", gi->genre,
+                      (gi->year[0] || gi->genre[0]) && gi->developer[0] ? "  -  " : "", gi->developer);
+            buf[sizeof(buf) - 1] = 0;
+            UiText(UI_REGULAR, 20, sx, ty, UiAlpha(UI_COL_TEXT2, fade), buf, UI_LEFT);
+            if (gi->description[0]) paragraph(UI_REGULAR, 18, tx, ty + 18, 760, 2, UiAlpha(UI_COL_TEXT2, fade), gi->description);
+        }
+    }
+    // The row: the games around the selection, gliding (a long jump cuts straight there).
+    p = anim_step_rate(&pos, (float)sel, !pos.live || fabsf(pos.value - sel) > 8, 9.0f, 0.002f);
+    for (i = (int)floorf(p) - 6; i <= (int)ceilf(p) + 6; i++)
+    {
+        float d = i - p, x = UI_WIDTH * 0.5f - CINE_TW * 0.5f + d * (CINE_TW + CINE_GAP), y = CINE_ROW_Y, al;
+        const ArtView *rv;
+        int s = i == sel;
+        if (i < 0 || i >= n || x + CINE_TW < 0 || x > UI_WIDTH) continue;
+        al = 1.0f - fabsf(d) * 0.12f;
+        if (al <= 0.05f) continue;
+        rv = view_find(roms[i].file.c_str());
+        if (s)
+        {
+            selection_glow(x - 5, y - 5, CINE_TW + 10, CINE_TH + 10, 12, a);
+            UiRoundRing(x - 5, y - 5, CINE_TW + 10, CINE_TH + 10, 12, 3.0f, SEL_RING(a));
+        }
+        UiRoundRect(x, y, CINE_TW, CINE_TH, 10, UiAlpha(D3DCOLOR_ARGB(255, 22, 23, 31), al), UiAlpha(D3DCOLOR_ARGB(255, 16, 17, 23), al));
+        if (rv && rv->cover) view_cover(rv, x, y, CINE_TW, CINE_TH, 10, D3DCOLOR_ARGB((int)(255 * al), s ? 255 : 190, s ? 255 : 190, s ? 255 : 190));
+        else stage_placeholder(x, y, CINE_TW, CINE_TH, roms[i].shown.c_str(), al);
     }
     UiScreenFooter(Tr(T_FOOT_BROWSER));
 }
@@ -9940,6 +10334,8 @@ static int cover_detail_screen(IDirect3DDevice9 *dev, const std::vector<RomEntry
         UiBegin(dev);
         if (design == BD_CAROUSEL) browser_draw_carousel(roms, sel);
         else if (design == BD_SPOTLIGHT) browser_draw_spotlight(roms, sel);
+        else if (design == BD_CARTRIDGE) browser_draw_cartridges(roms, sel);
+        else if (design == BD_CINEMA) browser_draw_cinema(roms, sel);
         else browser_draw_covers(roms, sel, page, grid_layout(design));
         cover_detail_draw(rom, &ri, view_find(rom->file.c_str()), (UiTime() - openAt) / DETAIL_OPEN_S);
         UiEnd();
@@ -10347,8 +10743,10 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
                     int k, base = page * perPage;
                     if (carousel)
                     {
+                        // Cinema's row shows more of them, smaller.
+                        const int spread = c->browserDesign == BD_CINEMA ? 6 : CAR_SPREAD;
                         want.push_back(paths[sel]);
-                        for (k = 1; k <= CAR_SPREAD; k++)
+                        for (k = 1; k <= spread; k++)
                         {
                             if (sel + k < n) want.push_back(paths[sel + k]);
                             if (sel - k >= 0) want.push_back(paths[sel - k]);
@@ -10503,6 +10901,10 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
             browser_draw_carousel(roms, sel);
         else if (c->browserDesign == BD_SPOTLIGHT)
             browser_draw_spotlight(roms, sel);
+        else if (c->browserDesign == BD_CARTRIDGE)
+            browser_draw_cartridges(roms, sel);
+        else if (c->browserDesign == BD_CINEMA)
+            browser_draw_cinema(roms, sel);
         else
             browser_draw_covers(roms, sel, page, grid_layout(c->browserDesign));
         {

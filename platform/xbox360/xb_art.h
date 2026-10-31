@@ -100,6 +100,10 @@ int ArtKindFor(const char *romPath);
 // scaled (ART_COVER_W x ART_COVER_H at most, RGBA, free() it), read now on the
 // calling thread - the pause menu's "Now playing". 0 when there is none. After ArtStart.
 int ArtReadCover(const char *romPath, int kind, u8 **rgba, int *w, int *h, int *gotKind);   // gotKind: the one read (the box as a fallback)
+// One kind of a game's pictures exactly (no box instead), with its alpha, as
+// large as maxW x maxH (smaller ones as they are): the cinema view's picture
+// from the game and logo. Read on the calling thread; 0 when there is none.
+int ArtReadPicture(const char *romPath, int kind, int maxW, int maxH, u8 **rgba, int *w, int *h);
 // A message for the user once ("No network connection", the bulk summary).
 int ArtTakeNote(char *text, int size);
 

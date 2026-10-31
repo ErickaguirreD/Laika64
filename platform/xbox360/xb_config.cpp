@@ -153,6 +153,7 @@ void ConfigDefaults(Config *c)
     c->resWide = 1;
     c->wallRecommend = 0;
     c->descTranslate = 1;
+    c->gameBackdrop = 0;
     c->texFilter = 1;
     c->hiTex = 1;
     c->hiTexFile[0] = 0;
@@ -218,6 +219,7 @@ int ConfigParseFile(Config *c, const char *path)
         if (!strcmp(line, "blurlevel")) c->blurLevel = atoi(eq + 1);
         if (!strcmp(line, "res43")) c->res43 = atoi(eq + 1);
         if (!strcmp(line, "desctr")) c->descTranslate = atoi(eq + 1) != 0;
+        if (!strcmp(line, "gamebg")) c->gameBackdrop = atoi(eq + 1) != 0;
         if (!strcmp(line, "wallrec")) c->wallRecommend = atoi(eq + 1) != 0;
         if (!strcmp(line, "res169")) c->res169 = atoi(eq + 1);
         if (!strcmp(line, "reswide")) c->resWide = atoi(eq + 1) != 0;
@@ -456,7 +458,8 @@ int ConfigWriteMenuKeys(const Config *c, const char *path, int withLastRom)
             c->smooth, c->perfItems ? 1 : 0);
     fprintf(f, "perfitems=%d\nperfpos=%d\nperfsize=%d\nperfcolor=%d\nperfbox=%d\nperffahrenheit=%d\n", c->perfItems, c->perfPos, c->perfSize,
             c->perfColor, c->perfBox, c->perfFahrenheit);
-    fprintf(f, "res43=%d\nres169=%d\nreswide=%d\nwallrec=%d\ndesctr=%d\n", c->res43, c->res169, c->resWide, c->wallRecommend, c->descTranslate);
+    fprintf(f, "res43=%d\nres169=%d\nreswide=%d\nwallrec=%d\ndesctr=%d\ngamebg=%d\n", c->res43, c->res169, c->resWide, c->wallRecommend,
+            c->descTranslate, c->gameBackdrop);
     fprintf(f, "texfilter=%d\nsharpen=%d\nblur=%d\nscreen=%d\nbrightness=%d\nvsync=%d\nstretch=%d\ndeflicker=%d\n",
             c->texFilter, c->sharpen, c->blur, c->screen, c->brightness, c->vsync, c->stretch, c->deflicker);
     fprintf(f, "hirestex=%d\n", c->hiTex);

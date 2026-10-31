@@ -196,6 +196,12 @@ static const GameProfile s_profiles[] = {
     // cuts); after a state load (slots dropped) it was right. It never
     // samples its frames: no copy backs, 60 VI/s.
     { "NRI", "The New Tetris", H64_GP_RECT_POINT | H64_GP_NO_COPY_BACK },
+    // Its scene data goes where its 640x480 logo frames were: a texture load
+    // from that data copied the old black frame back over it, a null object
+    // list took the main thread down (address error at 80025984) and the RSP
+    // waited for it for good: stuck after the logos. Its frames are 320 x 480
+    // (scissor), shown through the VI's Y scale: see H64_GX_TALL_SCISSOR.
+    { "NWO", "World Driver Championship", H64_GP_NO_COPY_BACK },
     // Fast3D with no name string (now drawn here, ~20 ms a frame on the LLE
     // RSP before): its tasks rely on the default other modes (texture
     // conversion), else its panels' texel alpha came out as YUV.
@@ -234,7 +240,7 @@ static const GameProfile s_profiles[] = {
 };
 
 // Options with no bit left in the flags above, set by h64_apply_game_profile.
-enum { H64_GX_SOFT_TINY = 1 };   // options.gfxSoftTiny
+enum { H64_GX_SOFT_TINY = 1, H64_GX_TALL_SCISSOR = 2 };   // options.gfxSoftTiny, gfxTallScissor
 struct GameExtra { const char *code; u32 extra; };
 static const GameExtra s_extras[] = {
     // Each character's shaded palette is drawn into a 16x1 image, then loaded
@@ -242,6 +248,9 @@ static const GameExtra s_extras[] = {
     // it back (~10 a frame; Peach's castle in the prologue ran at ~20 VI/s).
     // The software RDP draws them in memory instead: nothing to copy back.
     { "NMQ", H64_GX_SOFT_TINY },
+    // Draws 480 lines into its 320-wide frames and the VI shows them at half
+    // scale: as 320 x 240 images, the bottom half of the screen was black.
+    { "NWO", H64_GX_TALL_SCISSOR },
 };
 
 static void apply_idle_yield(H64System *sys);
@@ -269,6 +278,7 @@ void h64_apply_game_profile(H64System *sys)
     for (i = 0; i < sizeof(s_extras) / sizeof(s_extras[0]); i++)
         if (!memcmp(sys->rom.gameCode, s_extras[i].code, 3)) extra = s_extras[i].extra;
     sys->options.gfxSoftTiny = (extra & H64_GX_SOFT_TINY) != 0;
+    sys->options.gfxTallScissor = (extra & H64_GX_TALL_SCISSOR) != 0;
     if (name) H64_INFO("[profile] %s: flags %X%s", name, f, extra ? " (+ extra options)" : "");
 }
 
