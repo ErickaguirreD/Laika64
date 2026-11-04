@@ -52,7 +52,7 @@ void UiConfirmDraw(int title, int question, int footer);
 
 // ---- Settings (cpu, hle, audio margin, FPS display, the Graphics and Controls pages) ----
 enum { SET_NONE = 0, SET_CHANGED, SET_BACK, SET_SAVE_ALL, SET_SAVE_GAME, SET_ART_ASK, SET_LANGUAGE, SET_PREVIEW, SET_SAVER, SET_WIZARD, SET_PICK_PATH, SET_EXPLORER, SET_ABOUT,
-       SET_PATH_RESET };
+       SET_PATH_RESET, SET_HIRES_DL, SET_HIRES_PNG, SET_HIRES_HUB };
 // Fills the menu from *c; `perGame` adds "Save for this game".
 void SettingsBuild(UiMenu *m, const Config *c, int perGame);
 // Applies one input to *c and the menu; returns SET_*. The Language row

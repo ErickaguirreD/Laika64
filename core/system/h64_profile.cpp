@@ -130,6 +130,12 @@ static const GameProfile s_profiles[] = {
     // bars) until a state load dropped the frames. The original game made
     // no copy back from its character select to a match.
     { "NAL", "Super Smash Bros.", H64_GP_COPY_BACK_SAME_WIDTH },
+    // HAL's too, the same way: its battles' Pokemon textures lie where its
+    // 640x480 menu frames were, and their loads copied those old frames back
+    // over them (white models, 20-27 copy backs a frame: 30-48 VI/s). Its
+    // small pictures are drawn by the software RDP (H64_GX_SOFT_SMALL), with
+    // depth: the depth clears go to RDRAM too, where that RDP reads them.
+    { "NPO", "Pokemon Stadium", H64_GP_COPY_BACK_SAME_WIDTH | H64_GP_DEPTH_FILL_RDRAM },
     // Calls osContInit before its timers exist: a cold boot with Count near
     // 0 armed a timer there and read a null pointer (nothing on screen).
     { "NBX", "BattleTanx", H64_GP_BOOT_TIME },
@@ -240,7 +246,7 @@ static const GameProfile s_profiles[] = {
 };
 
 // Options with no bit left in the flags above, set by h64_apply_game_profile.
-enum { H64_GX_SOFT_TINY = 1, H64_GX_TALL_SCISSOR = 2 };   // options.gfxSoftTiny, gfxTallScissor
+enum { H64_GX_SOFT_TINY = 1, H64_GX_TALL_SCISSOR = 2, H64_GX_SOFT_SMALL = 4 };   // options.gfxSoftTiny, gfxTallScissor, gfxSoftSmall
 struct GameExtra { const char *code; u32 extra; };
 static const GameExtra s_extras[] = {
     // Each character's shaded palette is drawn into a 16x1 image, then loaded
@@ -251,6 +257,12 @@ static const GameExtra s_extras[] = {
     // Draws 480 lines into its 320-wide frames and the VI shows them at half
     // scale: as 320 x 240 images, the bottom half of the screen was black.
     { "NWO", H64_GX_TALL_SCISSOR },
+    // Draws its Pokemon's portraits (the boxes beside the HP), the Game Pak
+    // Check's slots and the menu's pictures into small images (128 and 172
+    // pixels wide) the CPU then reads: from the GPU, never copied for it, they
+    // were noise; copied back each time it left them, 30 VI/s in battles.
+    // The software RDP draws them in RDRAM, as the console.
+    { "NPO", H64_GX_SOFT_SMALL },
 };
 
 static void apply_idle_yield(H64System *sys);
@@ -279,6 +291,7 @@ void h64_apply_game_profile(H64System *sys)
         if (!memcmp(sys->rom.gameCode, s_extras[i].code, 3)) extra = s_extras[i].extra;
     sys->options.gfxSoftTiny = (extra & H64_GX_SOFT_TINY) != 0;
     sys->options.gfxTallScissor = (extra & H64_GX_TALL_SCISSOR) != 0;
+    sys->options.gfxSoftSmall = (extra & H64_GX_SOFT_SMALL) != 0;
     if (name) H64_INFO("[profile] %s: flags %X%s", name, f, extra ? " (+ extra options)" : "");
 }
 

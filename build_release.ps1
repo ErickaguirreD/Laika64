@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Builds LAIKA 64 and packages a release zip ready for an RGH/JTAG Xbox 360.
 
@@ -97,6 +97,9 @@ Copy-Item (Join-Path $repo 'assets\assistant\laika_orbit.mp3') (Join-Path $stage
 # ... and the menus' default music (Config::musicTrack).
 New-Item -ItemType Directory -Force (Join-Path $stage 'music') | Out-Null
 Copy-Item (Join-Path $repo 'assets\assistant\laika_orbit.mp3') (Join-Path $stage 'music')
+# The cheats: the mupen64plus database (the pause menu's Cheats page finds a game's by its CRC).
+New-Item -ItemType Directory -Force (Join-Path $stage 'cheats') | Out-Null
+Copy-Item (Join-Path $repo 'assets\cheats\mupencheat.txt') (Join-Path $stage 'cheats')
 New-Item -ItemType Directory -Force (Join-Path $stage 'art') | Out-Null
 foreach ($f in 'cover.png', 'background.png', 'icon.png') { Copy-Item (Join-Path $art $f) (Join-Path $stage 'art') }
 # The PC script that fills art\games\ (box art, game information) for consoles without internet.
@@ -126,6 +129,9 @@ Folders (LAIKA 64 makes any missing one by itself):
    sounds\         your own interface sounds
    hires_texture\  HD texture packs (.hts), one folder per game:
                    hires_texture\<GAME NAME>\pack.hts
+   cheats\         GameShark codes: mupencheat.txt (every game's, chosen in
+                   the pause menu > Cheats) and your own, one file per game:
+                   cheats\<GAME NAME>.txt, in the same format
    saves\          in-game saves and save states (back this one up)
    screenshots\    screenshots taken in game
 

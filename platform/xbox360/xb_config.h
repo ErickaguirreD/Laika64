@@ -89,7 +89,7 @@ struct Config
     int artAll;         // artall=1: the ROM browser starts "Get box art for all games" by itself (checks)
     int browserDesign;  // browserdesign=0..7: the ROM browser's layout, the list+card of old (0), a covers grid (1), big covers (2), a carousel (3),
                         // mosaic (4), spotlight (5), cartridges (6), cinema (7)
-    int bgEffect;       // bgeffect=0..29: the ROM browser's animated background, none (0), the waves (1, default) ... (xb_menu.cpp BGFX_*)
+    int bgEffect;       // bgeffect=0..30: the ROM browser's animated background, none (0), the waves (1, default) ... (xb_menu.cpp BGFX_*)
     int fxColor[3];     // fxcolor1..3=0..13: the effect's colours, from xb_menu.cpp's palette; fxcolor1=0: the effect's own, 2 and 3 = 0: unused
     int fxOpacity;      // fxopacity=10..200: how strongly the effect shows, in % (default 100)
     int fxSpeed;        // fxspeed=25..300: how fast it moves, in % (default 100)

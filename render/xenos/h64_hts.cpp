@@ -46,7 +46,9 @@ struct HtsCached { std::vector<u8> rec; std::list<u64>::iterator pos; };
 #define HTS_READY_BYTES (48u * 1024 * 1024)
 #endif
 #define HTS_WORKERS 2
-struct HtsReady { std::vector<u32> px; u32 w, h; int used; std::list<u64>::iterator pos; };
+// dxt: the record's own DXT blocks when it is DXT1/3/5 (dxtKind 1/3/5; the renderer uploads them as they
+// are, h64_hts_take_dxt), beside the unpacked pixels for the cases it reshapes.
+struct HtsReady { std::vector<u32> px; std::vector<u8> dxt; int dxtKind; u32 w, h; int used; std::list<u64>::iterator pos; };
 
 struct H64Hts
 {
@@ -390,7 +392,8 @@ static int hts_read_record(H64Hts *h, u64 checksum, std::vector<u8> &out)
 
 // A record unpacked into A8R8G8B8 words (px), tmp for the inflate. No lock: the
 // buffers are the caller's.
-static int hts_decode_record(u64 checksum, const std::vector<u8> &recv, std::vector<u8> &tmp, std::vector<u32> &px, u32 *w, u32 *hgt)
+static int hts_decode_record(u64 checksum, const std::vector<u8> &recv, std::vector<u8> &tmp, std::vector<u32> &px, u32 *w, u32 *hgt,
+                             std::vector<u8> *dxt, int *dxtKind)
 {
     u32 width, height, format, dataSize, i, count;
     u16 texFmt, pixType;
@@ -420,9 +423,15 @@ static int hts_decode_record(u64 checksum, const std::vector<u8> &recv, std::vec
         format &= ~GLF_GZ;
     }
     px.resize(count);
-    if (format == GLF_DXT1) { if (dataSize < ((width + 3) / 4) * ((height + 3) / 4) * 8) return 0; dxt_decode(data, width, height, 1, &px[0]); }
-    else if (format == GLF_DXT3) { if (dataSize < ((width + 3) / 4) * ((height + 3) / 4) * 16) return 0; dxt_decode(data, width, height, 3, &px[0]); }
-    else if (format == GLF_DXT5) { if (dataSize < ((width + 3) / 4) * ((height + 3) / 4) * 16) return 0; dxt_decode(data, width, height, 5, &px[0]); }
+    if (dxt) { dxt->clear(); *dxtKind = 0; }
+    if (format == GLF_DXT1 || format == GLF_DXT3 || format == GLF_DXT5)
+    {
+        int kind = format == GLF_DXT1 ? 1 : format == GLF_DXT3 ? 3 : 5;
+        u32 need = ((width + 3) / 4) * ((height + 3) / 4) * (kind == 1 ? 8 : 16);
+        if (dataSize < need) return 0;
+        dxt_decode(data, width, height, kind, &px[0]);
+        if (dxt) { dxt->assign(data, data + need); *dxtKind = kind; }
+    }
     else if (pixType == GLT_5551 || format == GLF_RGB5_A1)
     {
         if (dataSize < count * 2) return 0;
@@ -456,7 +465,7 @@ int h64_hts_find(H64Hts *h, u64 checksum, const u32 **out, u32 *w, u32 *hgt)
     int r;
     if (!h) return 0;
     EnterCriticalSection(&h->findLock);
-    r = hts_read_record(h, checksum, h->raw) && hts_decode_record(checksum, h->raw, h->tmp, h->pixels, w, hgt);
+    r = hts_read_record(h, checksum, h->raw) && hts_decode_record(checksum, h->raw, h->tmp, h->pixels, w, hgt, NULL, NULL);
     if (r) *out = &h->pixels[0];
     LeaveCriticalSection(&h->findLock);
     return r;
@@ -482,10 +491,11 @@ static DWORD WINAPI hts_worker(LPVOID arg)
         r = new HtsReady;
         r->w = r->h = 0;
         r->used = 0;
+        r->dxtKind = 0;
         EnterCriticalSection(&h->findLock);   // the file and the record cache only: unpacking runs beside the other worker
         ok = hts_read_record(h, key, rec);
         LeaveCriticalSection(&h->findLock);
-        if (ok) ok = hts_decode_record(key, rec, tmp, r->px, &r->w, &r->h);
+        if (ok) ok = hts_decode_record(key, rec, tmp, r->px, &r->w, &r->h, &r->dxt, &r->dxtKind);
         EnterCriticalSection(&h->qLock);
         h->queued.erase(key);
         if (!ok) { h->failed[key] = 1; delete r; }
@@ -494,7 +504,7 @@ static DWORD WINAPI hts_worker(LPVOID arg)
             h->ready[key] = r;
             h->readyOrder.push_back(key);
             r->pos = --h->readyOrder.end();
-            h->readyBytes += r->px.size() * 4;
+            h->readyBytes += r->px.size() * 4 + r->dxt.size();
         }
         LeaveCriticalSection(&h->qLock);
     }
@@ -559,7 +569,7 @@ int h64_hts_take(H64Hts *h, u64 checksum, int firstOk, const u32 **out, u32 *w, 
         {
             std::map<u64, HtsReady *>::iterator o = h->ready.find(h->readyOrder.front());
             h->readyOrder.pop_front();
-            if (o != h->ready.end()) { h->readyBytes -= o->second->px.size() * 4; delete o->second; h->ready.erase(o); }
+            if (o != h->ready.end()) { h->readyBytes -= o->second->px.size() * 4 + o->second->dxt.size(); delete o->second; h->ready.erase(o); }
         }
         *out = &e->px[0]; *w = e->w; *hgt = e->h;
         if (checksum >> 32) h->lastByTexture[(u32)checksum] = checksum;
@@ -567,6 +577,23 @@ int h64_hts_take(H64Hts *h, u64 checksum, int firstOk, const u32 **out, u32 *w, 
     else if (it == h->ready.end() && h->failed.count(checksum)) r = -1;
     LeaveCriticalSection(&h->qLock);
     return r;
+}
+
+int h64_hts_take_dxt(H64Hts *h, u64 checksum, const u8 **blocks, u32 *bytes)
+{
+    std::map<u64, HtsReady *>::iterator it;
+    int kind = 0;
+    if (!h) return 0;
+    EnterCriticalSection(&h->qLock);
+    it = h->ready.find(checksum);
+    if (it != h->ready.end() && it->second->used && it->second->dxtKind && !it->second->dxt.empty())
+    {
+        kind = it->second->dxtKind;
+        *blocks = &it->second->dxt[0];
+        *bytes = (u32)it->second->dxt.size();
+    }
+    LeaveCriticalSection(&h->qLock);
+    return kind;
 }
 
 int h64_hts_take_alike(H64Hts *h, u32 texelChecksum, u64 exclude, const u32 **out, u32 *w, u32 *hgt)

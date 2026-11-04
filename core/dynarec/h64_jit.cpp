@@ -64,10 +64,10 @@ int h64_jit_init(H64System *sys, void *execMem, u32 size, void (*flushIcache)(vo
     j->mem = (u8 *)execMem;
     j->memSize = size;
     j->flushIcache = flushIcache;
-    j->blockCap = 32768;
+    j->blockCap = 65536;   // Smash Remix filled 32768 with code memory three quarters used
     j->blocks = (H64JitBlock *)calloc(j->blockCap, sizeof(H64JitBlock));
     j->freeSlots = (u32 *)calloc(j->blockCap, sizeof(u32));
-    j->linkCap = 65536;
+    j->linkCap = 131072;
     j->links = (H64JitLink *)calloc(j->linkCap, sizeof(H64JitLink));
     j->codeMap = (u16 *)calloc(H64_RDRAM_SIZE >> H64_JIT_CHUNK_SHIFT, sizeof(u16));
     j->indPc = (u32 *)calloc(1024, sizeof(u32));

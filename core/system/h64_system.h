@@ -122,6 +122,8 @@ struct H64Options
     int gfxShortTask;       // graphics worker (game profile): a task keeps the RSP busy H64_HLE_GFX_CYCLES at most
     int gfxNoOldFrame;      // GPU renderer (game profile): never show a frame older than the one on screen
     int gfxSoft8bit;        // GPU renderer (game profile): drawing into 8-bit colour images done by the software RDP
+    int gfxSoftSmall;       // GPU renderer (game profile): drawing into 16-bit colour images narrower than 320 done by the
+                            // software RDP, in RDRAM (the CPU reads them)
     int gfxSoftTiny;        // GPU renderer (game profile): drawing into colour images at most 16 pixels wide done by the
                             // software RDP
     int gfxDepthFillToRdram; // GPU renderer (game profile): depth clears also fill the depth image in RDRAM

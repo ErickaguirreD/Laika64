@@ -48,6 +48,9 @@ static u32 edram_tiles(u32 w, u32 h) { return ((w + 79) / 80) * ((h + 15) / 16);
 #define FB_SLOTS 8
 #define MAX_TEXTURES 8000   // arena textures (4 KB each at least) are bounded by the arena
 #define MAX_TEXTURE_BYTES (40u * 1024u * 1024u)
+#define HTS_MAX_SIDE 1024u   // a pack replacement's texture, at most (4 MB; see lookup_texture)
+#define HTS_MAX_SIDE_REPEAT 512u   // ... and one repeating its image (a floor drawn several times over)
+#define HTS_TEXTURE_BYTES (64u * 1024u * 1024u)   // MAX_TEXTURE_BYTES while a pack is in use (its textures are larger)
 // Texture arena: small textures get their D3D header (XGSetTextureHeader) over
 // this physical memory instead of CreateTexture (~400 us each on the console:
 // GoldenEye's gun-barrel intro made ~300 new small textures a frame, 110 ms).
@@ -105,6 +108,8 @@ struct TexEntry
     IDirect3DTexture9 *tex;
     u32 w, h;
     int chunk;         // arena chunk (-1: a CreateTexture texture)
+    int dxt;           // a pack's DXT1/3/5 blocks uploaded as they are (1, 3, 5), 0: A8R8G8B8
+    int hires;         // an HD pack's texture (TexBinding::hires)
     int htsDeferred;   // the N64 picture, shown while its pack replacement loads or waits for a frame with room (see hts_budget_ok)
     u64 htsKey;        // that replacement's pack key
 };
@@ -114,6 +119,7 @@ struct TexBinding
     u32 w, h;          // decoded size (texels)
     s32 ox, oy;        // tile texel (before masking) at the decoded texture's origin (a window)
     int clampS, clampT, mirrorS, mirrorT, wrapS, wrapT;
+    int hires;         // the texture is an HD pack's (its alpha test: set_alpha_test)
 };
 
 struct Xenos
@@ -255,6 +261,7 @@ struct Xenos
     u32 htsHits, htsMisses, htsLookups, htsLogged, htsDetail, htsDeferredCount, htsBudgetFrame;
     s32 htsBudget;           // pixels of pack textures that may still be loaded this frame
     std::map<u64, int> htsMissLog;   // pack misses already logged (each checksum once)
+    std::map<u64, int> htsHitLog;    // pack replacements already logged (graphics log: each once)
     std::map<u64, int> modeLog;   // xenosdebug=4
     int deferNotify;              // running on the graphics worker (h64_xenos_set_worker)
     u32 pendingLo, pendingHi;     // RDRAM written meanwhile (copy-backs), for the recompiler
@@ -552,6 +559,10 @@ static IDirect3DPixelShader9 *combiner_shader(Xenos *x, u32 flags)
 }
 
 // ---------------------------------------------------------------- textures
+// A texture's memory and its pool slot: A8R8G8B8, or a pack's DXT blocks (TexEntry::dxt).
+static u32 tex_bytes(u32 w, u32 h, int dxt) { return dxt ? ((w + 3) / 4) * ((h + 3) / 4) * (dxt == 1 ? 8 : 16) : w * h * 4; }
+static u32 tex_pool_key(u32 w, u32 h, int dxt) { return (w << 16) | h | (u32)dxt << 29; }
+
 static void retire_all_textures(Xenos *x)
 {
     std::map<u64, TexEntry>::iterator it;
@@ -563,10 +574,10 @@ static void retire_all_textures(Xenos *x)
     {
         TexEntry *e = &it->second;
         if (!e->tex || e->chunk >= 0) continue;   // arena headers: freed below
-        if (x->poolBytes + e->w * e->h * 4 <= MAX_POOL_BYTES)
+        if (x->poolBytes + tex_bytes(e->w, e->h, e->dxt) <= MAX_POOL_BYTES)
         {
-            x->pool[(e->w << 16) | e->h].push_back(e->tex);
-            x->poolBytes += e->w * e->h * 4;
+            x->pool[tex_pool_key(e->w, e->h, e->dxt)].push_back(e->tex);
+            x->poolBytes += tex_bytes(e->w, e->h, e->dxt);
         }
         else
             e->tex->Release();
@@ -865,6 +876,12 @@ static const u32 *hts_replacement(Xenos *x, const H64RdpTile *t, const TexBindin
         ci = t->size == 0 ? 4 : 8;
         pal = st->tlutEntries + (t->size == 0 ? (t->palette & 15) * 16 : 0);
     }
+    // A wrapped axis whose tile is narrower than its mask (a background scrolled through a tile
+    // one row high, the mask repeating it - Smash Remix's Raid Blue: 64x1 with mask 64x64):
+    // the checksum - and so the pack's picture - is the mask's whole area, and the picture is
+    // mapped on that, not on the tile's one row (each row of it was the picture's first: streaks).
+    if (ms && tw < ms && cw == ms) tw = ms;
+    if (mt && th < mt && chh == mt) th = mt;
     crc = h64_hts_checksum(ram + ls->addr, cw, chh, t->size, rowBytes, pal, ci);
     px = NULL;
     {
@@ -895,6 +912,7 @@ static const u32 *hts_replacement(Xenos *x, const H64RdpTile *t, const TexBindin
             }
             else if (got == 1) x->htsBudget -= (s32)(pw * ph);
             else if (got < 0) px = NULL;
+            if (got > 0) *pendingKey = use;   // the key taken: its DXT blocks (lookup_texture), not a put-off one (*deferred is 0)
         }
     }
     if (!px)
@@ -914,13 +932,44 @@ static const u32 *hts_replacement(Xenos *x, const H64RdpTile *t, const TexBindin
         }
         return NULL;
     }
-    if (pw > 2048 || ph > 2048)   // packs may use any size (they need not be a multiple of the N64 texture's)
+    if (pw > 4096 || ph > 4096)   // packs may use any size (not a multiple of the N64 texture's); past HTS_MAX_SIDE scaled down
     {
         H64_INFO("[hts] %016llX: replacement %ux%u is too large, ignored", (unsigned long long)crc, pw, ph);
         return NULL;
     }
+    if ((u64)pw * ph < (u64)tw * th)
+    {
+        // Fewer texels than the N64's own picture (a pack's low-resolution variant: Smash Remix
+        // Ultimate 480p gives Raid Blue's 300x6 sky strips 204x1, the sky drawn as streaks):
+        // the N64's is the better one. Not when it is wholly transparent: that one is the
+        // pack hiding the part on purpose (its menus' strips, drawn by other pictures).
+        u32 k, n = pw * ph;
+        int seen = 0;
+        for (k = 0; k < n && !seen; k++) seen = (px[k] >> 24) != 0;
+        if (seen)
+        {
+            if (x->htsLogged < 40)
+            {
+                x->htsLogged++;
+                H64_INFO("[hts] %016llX: replacement %ux%u smaller than the N64's %ux%u, the N64's kept", (unsigned long long)crc, pw, ph, tw, th);
+            }
+            return NULL;
+        }
+    }
     x->htsHits++;
     if (x->htsHits <= 10) H64_INFO("[hts] hit %016llX: %ux%u -> %ux%u", (unsigned long long)crc, tw, th, pw, ph);
+    else if (x->gfxLog && x->htsHitLog.size() < 3000 && x->htsHitLog.insert(std::make_pair(crc, 1)).second)
+    {
+        // Graphics log: every replacement once - the N64 texture, how it is drawn, how much of
+        // the pack's picture is opaque (a part of a scene missing with packs on: its texture).
+        u32 k, opaque = 0, n = pw * ph;
+        for (k = 0; k < n; k++) opaque += (px[k] >> 24) >= 0x80;
+        H64_INFO("[hts] used %016llX: N64 %ux%u fmt %u size %u%s, pack %ux%u, %u%% opaque, %s%s%s, blend alpha %u",
+                 (unsigned long long)crc, tw, th, t->fmt, t->size, pal ? " (palette)" : "", pw, ph, n ? opaque * 100 / n : 0,
+                 (st->rasterFlags & RS_COPY) ? "copy" : x->win.active ? "rectangle" : "triangles",
+                 (st->rasterFlags & RS_ALPHA_TEST) ? ", alpha test" : "", (st->rasterFlags & RS_CVG_TIMES_ALPHA) ? ", cvg x alpha" : "",
+                 st->blendColor & 0xFF);
+    }
     *hw = pw; *hh = ph; *realW = tw; *realH = th;
     (void)b;
     return px;
@@ -1016,6 +1065,7 @@ static IDirect3DTexture9 *lookup_texture(Xenos *x, u32 tileIndex, TexBinding *b)
     TexEntry e;
     D3DLOCKED_RECT lr;
     tile_layout(t, b, (st->rasterFlags & RS_COPY) != 0, x->sys->options.gfxMaskToTile);
+    b->hires = 0;
     if (x->win.active && x->win.tile == (tileIndex & 7))
     {
         // Per axis, decode only the texels sampled, when that is at most half
@@ -1112,7 +1162,10 @@ static IDirect3DTexture9 *lookup_texture(Xenos *x, u32 tileIndex, TexBinding *b)
     if (it != x->textures.end() && it->second.htsDeferred && x->hts && x->hiTex) h64_hts_request(x->hts, it->second.htsKey);
     if (it != x->textures.end() && x->debug != 12 &&   // xenosdebug=12: every texture decoded again (diagnosis)
         !(it->second.htsDeferred && x->hts && x->hiTex && hts_retry_ok(x, it->second.htsKey)))   // a put-off replacement that can come now
+    {
+        b->hires = it->second.hires;
         return it->second.tex;
+    }
     if (it != x->textures.end()) x->textures.erase(it);
     if (x->debug == 8 && x->presentCount >= x->debugFrom && x->presentCount < x->debugFrom + 2)
     {
@@ -1141,6 +1194,19 @@ static IDirect3DTexture9 *lookup_texture(Xenos *x, u32 tileIndex, TexBinding *b)
         if (hires)
         {
             uw = (b->w * hrW + hrRealW / 2) / hrRealW; uh = (b->h * hrH + hrRealH / 2) / hrRealH;
+            // A tile repeating its image (a mask, a wide extent) repeats the pack's too: at
+            // the pack's scale a 32x32 floor drawn 10 times over came to 2560x2560, and a
+            // few of those filled the texture memory every frame (Smash Bros.' stages,
+            // 1 fps; at 1024 still 3). Past the side allowed the scale comes down, never
+            // under the N64's: a repeated image has its detail spread over the repeats.
+            u32 side = b->w > hrRealW || b->h > hrRealH ? HTS_MAX_SIDE_REPEAT : HTS_MAX_SIDE;
+            if (uw > side || uh > side)
+            {
+                float f = (float)side / (float)(uw > uh ? uw : uh);
+                uw = (u32)(uw * f); uh = (u32)(uh * f);
+                if (uw < b->w) uw = b->w;
+                if (uh < b->h) uh = b->h;
+            }
             if (uw < 1) uw = 1;
             if (uh < 1) uh = 1;
             if (b->wrapS || b->mirrorS) uw = hts_pow2(uw);
@@ -1157,7 +1223,20 @@ static IDirect3DTexture9 *lookup_texture(Xenos *x, u32 tileIndex, TexBinding *b)
             }
         }
     }
-    if (x->textures.size() >= MAX_TEXTURES || x->textureBytes + uw * uh * 4 > MAX_TEXTURE_BYTES)
+    // A replacement used as it is (no window, no repeat, no rescale) whose record is DXT: its
+    // blocks go to the GPU as they are, which reads DXT itself - no unpacking or copying of
+    // A8R8G8B8 here, 4 to 8 times less to upload and to hold (GoldenEye's stutters on new
+    // areas: ~40 ms a frame making textures). xenosdebug=28: never.
+    int dxt = 0;
+    const u8 *dxtBlocks = NULL;
+    u32 dxtSize = 0;
+    if (hires && !hrDeferred && hrKey && x->debug != 28 && !b->ox && !b->oy && uw == hrW && uh == hrH && b->w == hrRealW && b->h == hrRealH &&
+        !(uw & 3) && !(uh & 3))
+    {
+        dxt = h64_hts_take_dxt(x->hts, hrKey, &dxtBlocks, &dxtSize);
+        if (dxt && dxtSize < tex_bytes(uw, uh, dxt)) dxt = 0;
+    }
+    if (x->textures.size() >= MAX_TEXTURES || x->textureBytes + tex_bytes(uw, uh, dxt) > (x->hts && x->hiTex ? HTS_TEXTURE_BYTES : MAX_TEXTURE_BYTES))
     {
         retire_all_textures(x);
         x->stats.retires++;
@@ -1169,6 +1248,54 @@ static IDirect3DTexture9 *lookup_texture(Xenos *x, u32 tileIndex, TexBinding *b)
     e.w = uw;
     e.h = uh;
     e.chunk = -1;
+    e.dxt = dxt;
+    e.hires = hires != NULL;
+    b->hires = e.hires;
+    if (dxt)
+    {
+        // The blocks as they are, each 16-bit word big-endian (the DXT formats read memory 8in16).
+        std::map<u32, std::vector<IDirect3DTexture9 *> >::iterator pit = x->pool.find(tex_pool_key(uw, uh, dxt));
+        u32 rowBytes = (uw / 4) * (dxt == 1 ? 8 : 16), rows = uh / 4, xx;
+        if (pit != x->pool.end() && !pit->second.empty())
+        {
+            e.tex = pit->second.back();
+            pit->second.pop_back();
+            x->poolBytes -= tex_bytes(uw, uh, dxt);
+        }
+        else
+        {
+            u64 c0 = h64_prof_now(x->sys);
+            D3DFORMAT f = dxt == 1 ? D3DFMT_LIN_DXT1 : dxt == 3 ? D3DFMT_LIN_DXT3 : D3DFMT_LIN_DXT5;
+            if (FAILED(x->dev->CreateTexture(uw, uh, 1, 0, f, D3DPOOL_DEFAULT, &e.tex, NULL)) || !e.tex) e.tex = NULL;
+            else x->stats.textureCreates++;
+            x->stats.tCreate += h64_prof_now(x->sys) - c0;
+        }
+        if (e.tex)
+        {
+            u64 l0 = h64_prof_now(x->sys);
+            if (SUCCEEDED(e.tex->LockRect(0, &lr, NULL, 0)))
+            {
+                for (y = 0; y < rows; y++)
+                {
+                    const u8 *src = dxtBlocks + y * rowBytes;
+                    u8 *dst = (u8 *)lr.pBits + y * lr.Pitch;
+                    for (xx = 0; xx < rowBytes; xx += 2) { dst[xx] = src[xx + 1]; dst[xx + 1] = src[xx]; }
+                }
+                e.tex->UnlockRect(0);
+            }
+            x->stats.tLock += h64_prof_now(x->sys) - l0;
+            x->textureBytes += tex_bytes(uw, uh, dxt);
+            x->stats.htsDxt++;
+            e.htsDeferred = 0;
+            e.htsKey = hrKey;
+            x->textures[key] = e;
+            x->stats.tDecode += h64_prof_now(x->sys) - d0;
+            x->stats.textureUploads++;
+            x->stats.texelsDecoded += b->w * b->h;
+            return e.tex;
+        }
+        e.dxt = dxt = 0;   // no texture: the pixels then, as before
+    }
     {
         // Decode into a cached buffer first: texture memory is write-combined.
         u32 count = uw * uh, xx;
@@ -2433,7 +2560,8 @@ static void set_color_const(Xenos *x, u32 reg, u32 rgba)
 }
 
 // Blender: the last cycle's (P * A + M * B) mapped to GPU blending.
-static void set_blend(Xenos *x, int lastCycle)
+// Returns whether it blends (set_alpha_test: an HD texture's cut).
+static int set_blend(Xenos *x, int lastCycle)
 {
     const H64RdpState *st = x->st;
     const u8 *b = st->blend[lastCycle];
@@ -2445,6 +2573,7 @@ static void set_blend(Xenos *x, int lastCycle)
         x->dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
         x->dev->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
         x->dev->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+        return 1;
     }
     else if (force && b[0] == 0 && b[2] == 1 && b[3] == 0 && (b[1] == 1 || b[1] == 3))
     {
@@ -2456,12 +2585,14 @@ static void set_blend(Xenos *x, int lastCycle)
         x->dev->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_BLENDFACTOR);
         x->dev->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVBLENDFACTOR);
         x->dev->SetRenderState(D3DRS_BLENDFACTOR, D3DCOLOR_ARGB(a, a, a, a));
+        return 1;
     }
     else if (force && b[0] == 0 && b[2] == 1 && b[3] == 2)
     {
         x->dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
         x->dev->SetRenderState(D3DRS_SRCBLEND, b[1] == 3 ? D3DBLEND_ZERO : D3DBLEND_SRCALPHA);
         x->dev->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_ONE);
+        return 1;
     }
     else if (force && b[0] == 1 && b[2] == 0 && b[3] == 0)
     {
@@ -2469,9 +2600,10 @@ static void set_blend(Xenos *x, int lastCycle)
         x->dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
         x->dev->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_INVSRCALPHA);
         x->dev->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_SRCALPHA);
+        return 1;
     }
-    else
-        x->dev->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+    x->dev->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+    return 0;
 }
 
 static void set_depth(Xenos *x, int hasDepth)
@@ -2513,10 +2645,23 @@ static void set_depth(Xenos *x, int hasDepth)
     }
 }
 
-static void set_alpha_test(Xenos *x)
+// hires: the texture is an HD pack's, drawn without blending (a cut-out). Its "transparent"
+// texels are seldom 0 - soft edges, upscaling, filtering and DXT leave small alphas - where
+// the N64's own were 0 or 255 (one bit): against 0 they passed, the items of Smash Remix
+// drawn in a square of noise. Cut at half instead, as that one bit did. Not when it blends:
+// a pack's half-transparent pictures are meant so there (the series emblems behind the
+// damage, ~30% alpha, vanished under the half cut).
+#define HD_ALPHA_REF 0x80
+static void set_alpha_test(Xenos *x, int hires)
 {
     const H64RdpState *st = x->st;
-    if (st->rasterFlags & RS_ALPHA_TEST)
+    if ((st->rasterFlags & RS_ALPHA_TEST) && hires && (st->blendColor & 0xFF) < HD_ALPHA_REF)
+    {
+        x->dev->SetRenderState(D3DRS_ALPHATESTENABLE, TRUE);
+        x->dev->SetRenderState(D3DRS_ALPHAFUNC, D3DCMP_GREATEREQUAL);
+        x->dev->SetRenderState(D3DRS_ALPHAREF, HD_ALPHA_REF);
+    }
+    else if (st->rasterFlags & RS_ALPHA_TEST)
     {
         // The RDP drops a pixel whose alpha is below the blend colour's
         // alpha. Against 0 nothing is dropped; dropping alpha 0 there is the
@@ -2534,7 +2679,7 @@ static void set_alpha_test(Xenos *x)
         // depth): alpha below 32 (one half dropped parts of Conker's pub door).
         x->dev->SetRenderState(D3DRS_ALPHATESTENABLE, TRUE);
         x->dev->SetRenderState(D3DRS_ALPHAFUNC, D3DCMP_GREATEREQUAL);
-        x->dev->SetRenderState(D3DRS_ALPHAREF, 0x20);
+        x->dev->SetRenderState(D3DRS_ALPHAREF, hires ? HD_ALPHA_REF : 0x20);   // an HD texture: as above
     }
     else
         x->dev->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
@@ -2567,7 +2712,7 @@ static void setup_combined(Xenos *x, int hasDepth, TexBinding *tb0, TexBinding *
 {
     if (x->debug == 4 || x->gfxLog) log_mode(x, hasDepth, tile);
     const H64RdpState *st = x->st;
-    int two = (st->rasterFlags & RS_MULTI_CYCLE) != 0;
+    int two = (st->rasterFlags & RS_MULTI_CYCLE) != 0, blended;
     u32 flags = two ? KEY_TWO_CYCLE : 0;
     float c[4], fbw = (float)(st->colorWidth ? st->colorWidth : 320), fbh = (float)fb_height(x, st->colorWidth);
     const u8 *b0 = st->blend[0];
@@ -2610,9 +2755,9 @@ static void setup_combined(Xenos *x, int hasDepth, TexBinding *tb0, TexBinding *
         }
         if (x->retires != retires) bind_texture(x, 0, tile, tb0);
     }
-    set_blend(x, two ? 1 : 0);
+    blended = set_blend(x, two ? 1 : 0);
     set_depth(x, hasDepth);
-    set_alpha_test(x);
+    set_alpha_test(x, tb0->hires && !blended);
     set_scissor(x, x->rtW / fbw, x->rtH / fbh);
     x->dev->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
 }
@@ -2630,6 +2775,16 @@ static void flush_batch(Xenos *x)
     x->batchN = 0;
 }
 
+// Profile gfxSoftSmall: the colour image now is one the software RDP draws
+// (16 bits, narrower than 320; xenos_rdp).
+static int soft_small(const Xenos *x)
+{
+    const H64RdpState *st = x->st;
+    return x->sys->options.gfxSoftSmall && st->colorWidth && st->colorWidth < 320 && (st->colorFmt == FB_RGBA5551 || st->colorFmt == FB_IA88);
+}
+
+static void xenos_rdp(void *user, const u64 *words, u32 count);   // below
+
 static void xenos_triangle(void *user, const H64RenderVertex *a, const H64RenderVertex *b, const H64RenderVertex *c,
                            u32 flags, u32 tile, u32 levels)
 {
@@ -2639,6 +2794,14 @@ static void xenos_triangle(void *user, const H64RenderVertex *a, const H64Render
     const H64RdpTile *t0 = &st->tiles[tile & 7], *t1 = &st->tiles[(tile + 1) & 7];
     XVtx *q;
     int i, persp = (st->rasterFlags & RS_PERSPECTIVE) != 0, wsFull;
+    if (soft_small(x))
+    {
+        // An image the software RDP draws (profile gfxSoftSmall): as an RDP triangle command.
+        u64 w[22];
+        u32 n = h64_rdp_build_triangle(a, b, c, flags, tile, levels, w);
+        xenos_rdp(user, w, n);
+        return;
+    }
     (void)levels;
     if (st->rasterFlags & (RS_FILL | RS_COPY)) return;
     if (!st->usePrimDepth)
@@ -3087,8 +3250,8 @@ static void tex_rect(Xenos *x, const u32 *w, int flip)
         if (st->rasterFlags & RS_ALPHA_TEST)
         {
             x->dev->SetRenderState(D3DRS_ALPHATESTENABLE, TRUE);
-            x->dev->SetRenderState(D3DRS_ALPHAFUNC, D3DCMP_GREATER);
-            x->dev->SetRenderState(D3DRS_ALPHAREF, 0);
+            x->dev->SetRenderState(D3DRS_ALPHAFUNC, tb0.hires ? D3DCMP_GREATEREQUAL : D3DCMP_GREATER);
+            x->dev->SetRenderState(D3DRS_ALPHAREF, tb0.hires ? HD_ALPHA_REF : 0);   // an HD texture: see set_alpha_test
         }
         else
             x->dev->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
@@ -3267,12 +3430,14 @@ static void xenos_rdp(void *user, const u64 *words, u32 count)
     }
     int tiny = x->sys->options.gfxSoftTiny && x->st->scissorXhi > x->st->scissorXlo && x->st->scissorXhi - x->st->scissorXlo <= 16 * 4 &&
                x->st->scissorYhi > x->st->scissorYlo && x->st->scissorYhi - x->st->scissorYlo <= 16 * 4;
-    if (((x->sys->options.gfxSoft8bit && x->st->colorFmt == FB_I8) || tiny) &&
+    if (((x->sys->options.gfxSoft8bit && x->st->colorFmt == FB_I8) || tiny || soft_small(x)) &&
         (op == 0x24 || op == 0x25 || op == 0x36 || (op >= 0x08 && op <= 0x0F)))
     {
         // (Profile gfxSoftTiny: the same for drawing within a scissor of at
         // most 16x16 pixels: Paper Mario draws each shaded palette as a 16x1
-        // rectangle into its scratch image, then loads it as a TLUT.)
+        // rectangle into its scratch image, then loads it as a TLUT. Profile
+        // gfxSoftSmall: for 16-bit images narrower than 320, which Pokemon
+        // Stadium's CPU reads - its portraits and menu pictures.)
         // Profile gfxSoft8bit: drawing into an 8-bit colour image is done by
         // the software RDP, in the job's snapshot (where this job's loads
         // read) and in RDRAM (later jobs); the GPU never holds the image, so
@@ -4065,6 +4230,7 @@ int h64_xenos_load_hts(H64Renderer *r, const char *path)
     if (x->hts) { h64_hts_close(x->hts); x->hts = NULL; }
     x->htsHits = x->htsMisses = x->htsLookups = x->htsLogged = x->htsDetail = x->htsDeferredCount = 0;
     x->htsMissLog.clear();
+    x->htsHitLog.clear();
     x->htsBudgetFrame = 0xFFFFFFFFu;
     x->htsBudget = 0;
     if (!path || !path[0]) return 0;

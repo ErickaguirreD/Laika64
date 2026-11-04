@@ -42,6 +42,8 @@
 #include "xb_menu.h"
 #include "xb_audio.h"
 #include "xb_art.h"
+#include "xb_hirespack.h"
+#include "../../core/cheat/h64_cheat.h"
 
 // ---- Recompiler code memory (M0.3 result: only an image section linked
 // writable + executable runs generated code; /SECTION:.jitc,ERW in the project) ----
@@ -912,19 +914,29 @@ static int RunFrame(H64System *sys)
 // one found, same as before this game could have more than one).
 static void HiresOpen(H64System *sys, H64Renderer *renderer, const Config *c)
 {
-    int n = 0, use = 0, i;
+    int n = 0, use = 0, i, act = 0;
+    char active[128];
     HiresScanPacks(sys->rom.name);
-    if (c->hiTex && HiresPackCount() > 0)
+    if (HiresPackCount() > 0)
     {
-        if (c->hiTexFile[0])
-            for (i = 0; i < HiresPackCount(); i++)
-                if (!strcmp(HiresPackName(i), c->hiTexFile)) { use = i; break; }
-        n = h64_xenos_load_hts(renderer, HiresPackPath(use));
+        // The game's folder's active.txt (the Packs screen, START in the ROM list): the pack in
+        // use, or none ("-": HD off for this game); else Settings > Graphics' pick, else the first.
+        char dir[192];
+        const char *path = HiresPackPath(0), *slash = strrchr(path, '\\');
+        size_t dn = slash ? (size_t)(slash - path) : 0;
+        if (dn >= sizeof(dir)) dn = sizeof(dir) - 1;
+        memcpy(dir, path, dn);
+        dir[dn] = 0;
+        act = HiresActiveRead(dir, active, sizeof(active));
+        for (i = 0; i < HiresPackCount(); i++)
+            if (!_stricmp(HiresPackName(i), act == 1 ? active : c->hiTexFile)) { use = i; break; }
     }
+    if (c->hiTex && HiresPackCount() > 0 && act != -1)
+        n = h64_xenos_load_hts(renderer, HiresPackPath(use));
     else
         h64_xenos_load_hts(renderer, NULL);
     H64_INFO("[hts] %s: %d pack(s) found, loaded %s (%d texture(s))", sys->rom.name, HiresPackCount(),
-             HiresPackCount() && c->hiTex ? HiresPackName(use) : "none", n);
+             HiresPackCount() && c->hiTex && act != -1 ? HiresPackName(use) : "none", n);
 }
 
 // ---- Game saves ----
@@ -1054,17 +1066,201 @@ static void StateThumbSync(IDirect3DDevice9 *dev)
     free(data);
 }
 
+// ---- Cheats (the pause menu's Cheats page; core/cheat/h64_cheat.cpp) ----
+// A game's GameShark codes: the mupen64plus database's (<drive>:\cheats\mupencheat.txt,
+// by the ROM's CRC) and the user's own (<drive>:\cheats\<game>.txt, the same format).
+// The ones on are kept per game (<drive>:\config\cheats\<CRC1-CRC2>.txt) and written
+// into RDRAM once a frame.
+static H64Cheats s_cheats;
+static char s_cheatState[192];
+static char s_cheatCustom[192];
+static int s_cheatsOpen, s_cheatSel, s_cheatTop;
+#define CHEAT_ROWS 11
+
+static void CheatsOpen(H64System *sys)
+{
+    char path[192], folder[64];
+    s_cheats = H64Cheats();
+    s_cheats.booted = 0;
+    _snprintf(path, sizeof(path) - 1, "%s:\\cheats\\mupencheat.txt", s_logDrive);
+    path[sizeof(path) - 1] = 0;
+    h64_cheats_load_db(&s_cheats, path, sys->rom.crc1, sys->rom.crc2, (u8)sys->rom.gameCode[3]);
+    HiresFolderName(sys->rom.name, folder, sizeof(folder));
+    _snprintf(s_cheatCustom, sizeof(s_cheatCustom) - 1, "%s:\\cheats\\%s.txt", s_logDrive, folder);
+    s_cheatCustom[sizeof(s_cheatCustom) - 1] = 0;
+    h64_cheats_load_custom(&s_cheats, s_cheatCustom);
+    _snprintf(path, sizeof(path) - 1, "%s:\\config\\cheats", s_logDrive);
+    path[sizeof(path) - 1] = 0;
+    CreateDirectory(path, NULL);
+    _snprintf(s_cheatState, sizeof(s_cheatState) - 1, "%s\\%08X-%08X.txt", path, sys->rom.crc1, sys->rom.crc2);
+    s_cheatState[sizeof(s_cheatState) - 1] = 0;
+    h64_cheats_load_state(&s_cheats, s_cheatState);
+    H64_INFO("[cheat] %s: %u cheats, %d on", sys->rom.name, (unsigned)s_cheats.list.size(), h64_cheats_enabled(&s_cheats));
+}
+
+// The Cheats page over the frozen frame: each cheat, a switch, its choice when it has some,
+// the selected one's description under them.
+static void CheatsDraw(void)
+{
+    const float w = 940, h = 600, x = (UI_WIDTH - w) * 0.5f, y = (UI_HEIGHT - h) * 0.5f, rowH = 38, lx = x + 30, lw = w - 60;
+    const int n = (int)s_cheats.list.size();
+    char line[300], fit[300];
+    int k;
+    UiRect(0, 0, UI_WIDTH, UI_HEIGHT, D3DCOLOR_ARGB(150, 0, 0, 0));
+    UiPanel(x, y, w, h, 22);
+    UiText(UI_BOLD, 28, lx, y + 36, UI_COL_TEXT, Tr(T_CHEATS), UI_LEFT);
+    _snprintf(line, sizeof(line) - 1, Tr(T_CHEATS_COUNT), h64_cheats_enabled(&s_cheats), n);
+    line[sizeof(line) - 1] = 0;
+    UiText(UI_REGULAR, 17, x + w - 30, y + 36, UI_COL_ACCENT_HI, line, UI_RIGHT);
+    if (!s_cheats.game.empty())
+    {
+        UiTextFit(UI_REGULAR, 15, lw, s_cheats.game.c_str(), fit, sizeof(fit));
+        UiText(UI_REGULAR, 15, lx, y + 64, UI_COL_TEXT3, fit, UI_LEFT);
+    }
+    UiRect(lx, y + 84, lw, 1, UI_COL_LINE);
+    if (!n)
+    {
+        UiText(UI_BOLD, 22, x + w * 0.5f, y + 230, UI_COL_TEXT, Tr(T_CHEATS_NONE), UI_CENTER);
+        UiText(UI_REGULAR, 18, x + w * 0.5f, y + 280, UI_COL_TEXT2, Tr(T_CHEATS_HOWTO), UI_CENTER);
+        UiTextFit(UI_BOLD, 18, lw, s_cheatCustom, fit, sizeof(fit));
+        UiText(UI_BOLD, 18, x + w * 0.5f, y + 312, UI_COL_ACCENT_HI, fit, UI_CENTER);
+    }
+    else
+    {
+        for (k = 0; k < CHEAT_ROWS && s_cheatTop + k < n; k++)
+        {
+            const H64Cheat *ch = &s_cheats.list[s_cheatTop + k];
+            const float ry = y + 96 + k * rowH, cy = ry + rowH * 0.5f;
+            const int sel = s_cheatTop + k == s_cheatSel;
+            float right = x + w - 34, textR;
+            size_t j;
+            std::string shown;
+            if (sel) UiRoundRect(x + 14, ry + 2, w - 28, rowH - 4, 10, UiAlpha(UI_COL_ACCENT, 0.35f), UiAlpha(UI_COL_ACCENT, 0.22f));
+            // The switch.
+            UiRoundRect(right - 44, cy - 11, 44, 22, 11, ch->enabled ? UI_COL_ACCENT_HI : D3DCOLOR_ARGB(70, 255, 255, 255),
+                        ch->enabled ? UI_COL_ACCENT : D3DCOLOR_ARGB(55, 255, 255, 255));
+            UiCircle(ch->enabled ? right - 11 : right - 33, cy, 8, UI_COL_TEXT);
+            textR = right - 58;
+            if (!ch->options.empty())
+            {
+                // Its choice: "< 3 Laps >".
+                _snprintf(line, sizeof(line) - 1, "< %s >", ch->options[ch->option].name.c_str());
+                line[sizeof(line) - 1] = 0;
+                UiTextFit(UI_REGULAR, 16, 260, line, fit, sizeof(fit));
+                UiText(UI_REGULAR, 16, textR, cy, sel ? UI_COL_ACCENT_HI : UI_COL_TEXT2, fit, UI_RIGHT);
+                textR -= UiTextWidth(UI_REGULAR, 16, fit) + 18;
+            }
+            // Its name, a group shown "Group · Name".
+            for (j = 0; j < ch->name.size(); j++)
+                if (ch->name[j] == '\\') shown += "  " UI_CH_MIDDOT "  ";
+                else shown += ch->name[j];
+            UiTextFit(sel ? UI_BOLD : UI_REGULAR, 18, textR - lx - 10, shown.c_str(), fit, sizeof(fit));
+            UiText(sel ? UI_BOLD : UI_REGULAR, 18, lx + 6, cy, sel || ch->enabled ? UI_COL_TEXT : UI_COL_TEXT2, fit, UI_LEFT);
+        }
+        if (n > CHEAT_ROWS)
+        {
+            float tx = x + w - 14, ty = y + 98, th = CHEAT_ROWS * rowH - 4, hh = th * CHEAT_ROWS / n;
+            float yy = ty + (th - hh) * s_cheatTop / (float)(n - CHEAT_ROWS);
+            UiRoundRect(tx, yy, 4, hh, 2, D3DCOLOR_ARGB(150, 255, 255, 255), D3DCOLOR_ARGB(110, 255, 255, 255));
+        }
+        // The selected one's description.
+        if (s_cheatSel < n && !s_cheats.list[s_cheatSel].desc.empty())
+        {
+            UiTextWrap(UI_REGULAR, 15, lw, 2, s_cheats.list[s_cheatSel].desc.c_str(), fit, sizeof(fit));
+            UiText(UI_REGULAR, 15, lx, y + h - 94, UI_COL_TEXT3, fit, UI_LEFT);
+        }
+    }
+    UiRect(lx, y + h - 56, lw, 1, UI_COL_LINE);
+    UiFooter(lx, y + h - 28, Tr(n ? T_FOOT_CHEATS : T_FOOT_BACK_ONLY));
+}
+
+// Its input; 1 when it closes (what is on is kept for the game).
+static int CheatsInput(WORD down)
+{
+    const int n = (int)s_cheats.list.size();
+    if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK))
+    {
+        h64_cheats_save_state(&s_cheats, s_cheatState);
+        return 1;
+    }
+    if (!n) return 0;
+    if (down & XINPUT_GAMEPAD_DPAD_UP) { s_cheatSel = (s_cheatSel + n - 1) % n; xb_audio_ui_sound(XB_SFX_MOVE); }
+    if (down & XINPUT_GAMEPAD_DPAD_DOWN) { s_cheatSel = (s_cheatSel + 1) % n; xb_audio_ui_sound(XB_SFX_MOVE); }
+    if (down & XINPUT_GAMEPAD_LEFT_SHOULDER) { s_cheatSel = s_cheatSel > CHEAT_ROWS ? s_cheatSel - CHEAT_ROWS : 0; xb_audio_ui_sound(XB_SFX_PAGE); }
+    if (down & XINPUT_GAMEPAD_RIGHT_SHOULDER) { s_cheatSel = s_cheatSel + CHEAT_ROWS < n ? s_cheatSel + CHEAT_ROWS : n - 1; xb_audio_ui_sound(XB_SFX_PAGE); }
+    {
+        H64Cheat *ch = &s_cheats.list[s_cheatSel];
+        if (down & XINPUT_GAMEPAD_A)
+        {
+            ch->enabled = !ch->enabled;
+            xb_audio_ui_sound(ch->enabled ? XB_SFX_VALUE_UP : XB_SFX_VALUE_DOWN);
+        }
+        if ((down & (XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT)) && !ch->options.empty())
+        {
+            int m = (int)ch->options.size();
+            ch->option = (ch->option + ((down & XINPUT_GAMEPAD_DPAD_RIGHT) ? 1 : m - 1)) % m;
+            ch->enabled = 1;   // a choice made: the cheat on
+            xb_audio_ui_sound((down & XINPUT_GAMEPAD_DPAD_RIGHT) ? XB_SFX_VALUE_UP : XB_SFX_VALUE_DOWN);
+        }
+    }
+    if (s_cheatSel < s_cheatTop) s_cheatTop = s_cheatSel;
+    if (s_cheatSel >= s_cheatTop + CHEAT_ROWS) s_cheatTop = s_cheatSel - CHEAT_ROWS + 1;
+    return 0;
+}
+
+// The pause menu's Cheats row: how many are on.
+static void CheatsRowValue(char *out, size_t size)
+{
+    int on = h64_cheats_enabled(&s_cheats);
+    if (on) _snprintf(out, size - 1, Tr(T_CHEATS_ON_VALUE), on);
+    else out[0] = 0;
+    out[size - 1] = 0;
+}
+
+
+// An HD pack downloading in the background (xb_hirespack.cpp, Y on its screen): a small
+// panel in the top left corner - the pack, what it does, a bar - while it works.
+static void HiresBgDraw(void)
+{
+    const HiresPackEntry *e = HiresPackJob();
+    unsigned done = 0, total = 0;
+    int st = HiresPackStatus(&done, &total, NULL, NULL, 0);
+    const float w = 360, h = 64, x = UI_SAFE_X, y = UI_SAFE_Y + 8, bx = x + 18, bw = w - 36;
+    char line[160], fit[160];
+    float f = total ? (float)done / (float)total : 0.0f;
+    if (!e) return;
+    if (f > 1.0f) f = 1.0f;
+    UiShadow(x, y + 5, w, h, 14, 18, D3DCOLOR_ARGB(130, 0, 0, 0));
+    UiRoundRect(x, y, w, h, 14, D3DCOLOR_ARGB(225, 40, 42, 54), D3DCOLOR_ARGB(225, 30, 32, 42));
+    UiRoundRing(x, y, w, h, 14, 1.0f, UI_COL_LINE);
+    _snprintf(line, sizeof(line) - 1, Tr(T_HIRES_BG_TITLE), e->title);
+    line[sizeof(line) - 1] = 0;
+    UiTextFit(UI_BOLD, 16, bw - 60, line, fit, sizeof(fit));
+    UiText(UI_BOLD, 16, bx, y + 18, UI_COL_TEXT, fit, UI_LEFT);
+    if (total) _snprintf(line, sizeof(line) - 1, "%d%%", (int)(f * 100.0f));
+    else line[0] = 0;
+    line[sizeof(line) - 1] = 0;
+    UiText(UI_BOLD, 16, bx + bw, y + 18, UI_COL_ACCENT_HI, line, UI_RIGHT);
+    UiText(UI_REGULAR, 14, bx, y + 37, UI_COL_TEXT2,
+           Tr(st == HPACK_CONVERT ? T_HIRES_DL_CONVERTING : st == HPACK_UNPACK ? T_HIRES_DL_UNPACKING
+              : st == HPACK_DOWNLOAD ? T_HIRES_DL_DOWNLOADING : T_HIRES_DL_LOOKUP), UI_LEFT);
+    UiRoundRect(bx, y + 50, bw, 5, 2.5f, D3DCOLOR_ARGB(50, 255, 255, 255), D3DCOLOR_ARGB(35, 255, 255, 255));
+    if (f > 0.0f) UiRoundRect(bx, y + 50, bw * f < 5 ? 5 : bw * f, 5, 2.5f, UI_COL_ACCENT_HI, UI_COL_ACCENT);
+}
+
 // Drawn by the renderer just before each present (on the graphics worker when it runs).
 static void OverlayHook(void *, IDirect3DDevice9 *dev)
 {
     // Nothing to show (the usual case in play): no state change at all.
     s32 left = (s32)(s_osdUntil - GetTickCount());
-    int fps = s_showFps && s_fpsText[0], osd = s_osd[0] && left >= 0;
-    if (!fps && !osd && !s_menuOpen) return;
+    int fps = s_showFps && s_fpsText[0], osd = s_osd[0] && left >= 0, hpack = HiresPackBusy() && !s_menuOpen;
+    if (!fps && !osd && !s_menuOpen && !hpack) return;
     UiBegin(dev);
+    if (hpack) HiresBgDraw();
     if (fps) UiPerfPanel(s_fpsText);   // one line: a pill, more: a panel (Settings > System > On-screen performance)
     if (s_menuOpen && s_hiresPreviewOpen) HiresPreviewDraw(dev);
     else if (s_menuOpen && s_aboutOpen) AboutDraw();
+    else if (s_menuOpen && s_cheatsOpen) CheatsDraw();
     else if (s_menuOpen)
     {
         UiMenuDraw(&s_menu);
@@ -1175,22 +1371,25 @@ static void LoadStateNow(H64System *sys)
 // margin, smoothing, FPS) or at the next start (CPU, RSP); they are saved
 // for all games (config\settings.ini) or for this game (config\<game>.ini).
 enum { RG_DASHBOARD = 0, RG_BROWSER, RG_CONTINUE };
-enum { M_RESUME = 0, M_STATES, M_SETTINGS, M_RESET, M_ROMS, M_DASHBOARD };   // X opens About
+enum { M_RESUME = 0, M_STATES, M_CHEATS, M_SETTINGS, M_RESET, M_ROMS, M_DASHBOARD };   // X opens About
 enum { ST_SLOT = 0, ST_LOAD, ST_SAVE };   // the States page, opened from M_STATES; B goes back, no row for it
 static char s_settingsPath[160];    // <drive>:\config\settings.ini ("" when the menu files are not used)
 static char s_profilePath[160];     // <drive>:\config\<game>.ini
 
 static void BuildGameMenu(void)
 {
+    char cheats[64];
     UiMenuClear(&s_menu, Tr(T_PAUSED), Tr(T_FOOT_PAUSED));
     UiMenuAdd(&s_menu, Tr(T_RESUME), "");
     UiMenuAdd(&s_menu, Tr(T_STATES), "");
+    CheatsRowValue(cheats, sizeof(cheats));
+    UiMenuAdd(&s_menu, Tr(T_CHEATS), cheats);
     UiMenuAdd(&s_menu, Tr(T_SETTINGS), "");
     UiMenuAdd(&s_menu, Tr(T_RESET_GAME), "");
     UiMenuAdd(&s_menu, Tr(T_BACK_TO_LIST), "");
     UiMenuAdd(&s_menu, Tr(T_QUIT_DASHBOARD), "");
     {
-        static const unsigned char icons[] = { UI_ICON_PLAY, UI_ICON_STATES, UI_ICON_GEAR, UI_ICON_RESET, UI_ICON_LIST, UI_ICON_POWER };
+        static const unsigned char icons[] = { UI_ICON_PLAY, UI_ICON_STATES, UI_ICON_SLIDERS, UI_ICON_GEAR, UI_ICON_RESET, UI_ICON_LIST, UI_ICON_POWER };
         UiMenuIcons(&s_menu, icons, sizeof(icons));
     }
 }
@@ -1253,7 +1452,7 @@ static int GameMenu(H64System *sys, H64Renderer *renderer, Config *c)
     {
         WORD down = UiInputPoll(&in);
         s_reservedSlot = c->padLoss == PADLOSS_SAVE ? c->autoSaveSlot : 0;   // Settings > System may change it from here
-        if (!settings && !s_aboutOpen && !s_hiresPreviewOpen && !s_confirmOpen && (down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT)))
+        if (!settings && !s_aboutOpen && !s_hiresPreviewOpen && !s_confirmOpen && !s_cheatsOpen && (down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT)))
             UiMenuPress();   // the pause menu's and the States page's rows show the press (Settings does it itself)
         if (s_confirmOpen)
         {
@@ -1283,6 +1482,15 @@ static int GameMenu(H64System *sys, H64Renderer *renderer, Config *c)
         else if (s_hiresPreviewOpen)
         {
             if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_X)) s_hiresPreviewOpen = 0;
+        }
+        else if (s_cheatsOpen)
+        {
+            if (CheatsInput(down))
+            {
+                s_cheatsOpen = 0;
+                BuildGameMenu();   // its row: how many are on now
+                s_menu.sel = M_CHEATS;
+            }
         }
         else if (s_aboutOpen)
         {
@@ -1359,6 +1567,7 @@ static int GameMenu(H64System *sys, H64Renderer *renderer, Config *c)
                 {
                 case M_RESUME: result = RG_CONTINUE; break;
                 case M_STATES: states = 1; BuildStatesMenu(); break;
+                case M_CHEATS: s_cheatsOpen = 1; s_cheatSel = s_cheatTop = 0; break;
                 case M_SETTINGS: settings = 1; SettingsBuild(&s_menu, c, s_profilePath[0] != 0); break;
                 case M_RESET: s_confirmOpen = CONFIRM_RESET; break;      // asked first (above)
                 case M_ROMS: s_confirmOpen = CONFIRM_LIST; break;        // asked first (above)
@@ -1367,10 +1576,12 @@ static int GameMenu(H64System *sys, H64Renderer *renderer, Config *c)
             }
         }
         s_statesOpen = states;   // the overlay shows the slot's picture under the rows
-        s_pauseMain = !states && !settings && !s_aboutOpen && !s_hiresPreviewOpen;   // ... or the game's, on the main page
+        s_pauseMain = !states && !settings && !s_aboutOpen && !s_hiresPreviewOpen && !s_cheatsOpen;   // ... or the game's, on the main page
         h64_xenos_present(renderer);   // the frozen frame, the menu (overlay) on top
         Sleep(16);
     }
+    if (s_cheatsOpen) h64_cheats_save_state(&s_cheats, s_cheatState);
+    s_cheatsOpen = 0;
     s_statesOpen = 0;
     s_pauseMain = 0;
     s_menuOpen = 0;
@@ -1379,6 +1590,7 @@ static int GameMenu(H64System *sys, H64Renderer *renderer, Config *c)
     s_confirmOpen = 0;
     return result;
 }
+
 
 // Real time in ms from QueryPerformanceCounter. While the emulator runs, the
 // console's system clock and GetTickCount fall behind real time (measured
@@ -1572,6 +1784,7 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
     }
     SavesOpen(sys);
     HiresOpen(sys, renderer, c);
+    CheatsOpen(sys);
     s_stateSlot = c->stateSlot >= 1 && c->stateSlot <= 9 ? c->stateSlot : 1;
     s_statePending = 0;
     s_reservedSlot = c->padLoss == PADLOSS_SAVE ? c->autoSaveSlot : 0;
@@ -1602,8 +1815,34 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
     // background; a note says so when the game starts, and another when they end.
     int artBulk = -1;
     DWORD artAt = GetTickCount() + 1500;   // after the game's first frames
+    // An HD pack downloading in the background (its bar: HiresBgDraw): when it ends, a note,
+    // and when it is this game's it is loaded there and then (as R3 does).
+    int hpackWas = HiresPackBusy();
+    DWORD hpackAt = GetTickCount() + 1000;
     for (;;)
     {
+        if (hpackWas && GetTickCount() >= hpackAt)
+        {
+            hpackAt = GetTickCount() + 1000;
+            if (!HiresPackBusy())
+            {
+                unsigned kb[2];
+                int err = HPERR_NONE, st = HiresPackStatus(&kb[0], &kb[1], &err, NULL, 0);
+                const HiresPackEntry *e = HiresPackJob();
+                char folder[64];
+                hpackWas = 0;
+                HiresFolderName(sys->rom.name, folder, sizeof(folder));
+                if (st == HPACK_DONE && e && !strcmp(e->romName, folder) && c->hiTex)
+                {
+                    h64_hle_async_wait(sys);
+                    WorkWaitAll(NULL);   // the renderer is this thread's for the change
+                    HiresOpen(sys, renderer, c);
+                    OsdT(T_HIRES_BG_APPLIED, 0);
+                }
+                else if (st == HPACK_DONE) OsdT(T_HIRES_BG_DONE, 0);
+                else if (st == HPACK_FAILED && err != HPERR_CANCELLED) OsdT(T_HIRES_BG_FAILED, 0);
+            }
+        }
         if (c->artBackground && c->artDownload && GetTickCount() >= artAt)
         {
             ArtStatus as;
@@ -1886,6 +2125,7 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
             SavesTick(sys, presented, 0);
             if (QpcMs() - s0 > s_maxSaves) s_maxSaves = QpcMs() - s0;
         }
+        if (!s_cheats.list.empty()) h64_cheats_apply(&s_cheats, sys);   // the cheats on: written once a frame
         {
             int i;
             for (i = 0; i < c->shotCount; i++)
@@ -2049,9 +2289,9 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
                          pr[H64_PROF_BLOCKS] * k, pr[H64_PROF_HELPER] * k, pr[H64_PROF_EVENTS] * k, pr[H64_PROF_TLB] * k, pr[H64_PROF_ASYNC_WAIT] * k,
                          pr[H64_PROF_WAIT_TASK] * k, pr[H64_PROF_WAIT_DPC] * k, pr[H64_PROF_WAIT_START] * k,
                          s_gfxQ.thread ? " (graphics and audio HLE run on workers, beside cpu)" : "");
-                H64_INFO("[xprof] ms/frame: rdp commands %.1f (state %.1f, textures %.1f: keys %.1f, decode %.1f [create %.1f lock %.1f decode %.1f], %u texels/frame, %u cache resets, arena %u textures %u chunk reuses, %u rectangles from GPU frames) draw calls %.1f (%u a frame), copy-backs %.1f (GPU wait %.1f), TMEM loads %.1f, %u resolves (%u copy backs), %u loads over CPU writes, %u CPU sprite presents",
+                H64_INFO("[xprof] ms/frame: rdp commands %.1f (state %.1f, textures %.1f: keys %.1f, decode %.1f [create %.1f lock %.1f decode %.1f], %u texels/frame, %u cache resets, arena %u textures %u chunk reuses, %u DXT from packs, %u rectangles from GPU frames) draw calls %.1f (%u a frame), copy-backs %.1f (GPU wait %.1f), TMEM loads %.1f, %u resolves (%u copy backs), %u loads over CPU writes, %u CPU sprite presents",
                          xs.tRdp * k, xs.tState * k, xs.tTexture * k, xs.tHash * k, xs.tDecode * k, xs.tCreate * k, xs.tLock * k,
-                         xs.tFill * k, xs.texelsDecoded / framesSincePerf, xs.retires, xs.arenaTextures, xs.arenaEvictions, xs.fbTexRects, xs.tDraw * k, xs.draws / (framesSincePerf ? framesSincePerf : 1), xs.tCopyBack * k, xs.tCopyBackWait * k, xs.tLoads * k, xs.loadResolves, xs.resolveCopyBacks, xs.cpuWrittenLoads, xs.cpuSprites);
+                         xs.tFill * k, xs.texelsDecoded / framesSincePerf, xs.retires, xs.arenaTextures, xs.arenaEvictions, xs.htsDxt, xs.fbTexRects, xs.tDraw * k, xs.draws / (framesSincePerf ? framesSincePerf : 1), xs.tCopyBack * k, xs.tCopyBackWait * k, xs.tLoads * k, xs.loadResolves, xs.resolveCopyBacks, xs.cpuWrittenLoads, xs.cpuSprites);
             }
             memset(sys->prof, 0, sizeof(sys->prof));
             profRun = profPresent = profWait = 0;

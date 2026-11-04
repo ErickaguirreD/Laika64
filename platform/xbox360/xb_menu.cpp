@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include <algorithm>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -29,6 +30,7 @@
 #include "xb_wizref.h"
 #include "xb_ui.h"
 #include "xb_update.h"
+#include "xb_hirespack.h"
 
 // Moves an animated value towards its target (exponential, ~70 ms), or
 // jumps there when the animation restarts.
@@ -648,6 +650,8 @@ static const struct { int label, desc; } s_rowDesc[] = {
     { T_GFX_LOG, T_D_GFX_LOG },
     { T_GRAPHICS, T_D_GRAPHICS },
     { T_HIRESTEX, T_D_HIRESTEX },
+    { T_HIRES_DL, T_D_HIRES_DL },
+    { T_HIRES_PNG, T_D_HIRES_PNG },
     { T_IMG_KIND, T_D_IMG_KIND },
     { T_INTERFACE, T_D_INTERFACE },
     { T_INTRO_WELCOME, T_D_INTRO_WELCOME },
@@ -655,6 +659,7 @@ static const struct { int label, desc; } s_rowDesc[] = {
     { T_MUSIC, T_D_MUSIC },
     { T_PAD_LOSS, T_D_PAD_LOSS },
     { T_PATHS, T_D_PATHS },
+    { T_HIRES_SECTION, T_D_HIRES_SECTION },
     { T_PERF_OVERLAY, T_D_PERF_OVERLAY },
     { T_PIC_CAL, T_D_PIC_CAL },
     { T_PIC_LR, T_D_PIC_LR },
@@ -711,7 +716,7 @@ static const KodiPage s_kodiPages[] = {
                   { T_KC_TOOLS, { T_DEV_MODE, T_WIZARD, T_EXPLORER } } } },
     // The picture's filters and effects all here (the preset sets them together);
     // the Screen page keeps the output: size, colour, sync.
-    { T_GRAPHICS, { { T_KC_QUALITY, { T_PRESET, T_TEXFILTER, T_HIRESTEX } },
+    { T_GRAPHICS, { { T_KC_QUALITY, { T_PRESET, T_TEXFILTER, T_HIRESTEX, T_HIRES_DL, T_HIRES_PNG } },
                     { T_KC_FILTERS, { T_FXAA, T_SHARPEN, T_BLUR, T_ANTIFLICKER } },
                     { T_KC_EFFECTS, { T_SCREEN_EFFECT } } } },
     { T_SCREEN, { { T_KC_IMAGE, { T_RESOLUTION, T_RES_169, T_STRETCH, T_PIC_CAL } },
@@ -1185,6 +1190,7 @@ void UiMenuNavigate(UiMenu *m, WORD down)
 // The most used first: the picture and the controls, then the rest.
 enum { S_GRAPHICS = 0, S_SCREEN, S_CONTROLS, S_SOUND, S_SYSTEM, S_INTERFACE, S_PATHS };   // S_INTERFACE, S_PATHS: ROM list only
 static int s_rowAbout = -1;   // Settings' About row (the last)
+static int s_rowHires = -1;   // Settings' HD textures row (ROM list only: hires_hub)
 static int s_pathsPage;   // Settings > Paths
 static void settings_paths(UiMenu *m, const Config *c);
 // The Volumen page: three bars (game, button sounds, menu music - the last from the ROM list only:
@@ -1198,6 +1204,7 @@ static int s_saverPage;   // Interface > Screen saver
 enum { SAVER_OFF = 0, SAVER_EFFECT, SAVER_WALL, SAVER_LOGO, SAVER_CLOCK, SAVER_COUNT };   // Config::saverMode
 #define I_IMAGES (I_DESIGN + 1)    // "Game images": the pictures shown and their downloads, on their own page (ROM list only)
 static int s_imagesPage;             // Interface > Game images
+static char s_hiresRom[32];          // the ROM HiresScanPacks last looked for (its header's name): Graphics > Download HD pack
 static void settings_images(UiMenu *m, const Config *c);
 static void images_values(UiMenu *m, const Config *c);
 static void paths_values(UiMenu *m, const Config *c);
@@ -1226,12 +1233,12 @@ static int design_row(int d) { return d == BD_CAROUSEL || d == BD_SPOTLIGHT || d
 enum { BGFX_OFF = 0, BGFX_WAVES, BGFX_PULSE, BGFX_RAIN, BGFX_VORTEX, BGFX_RIPPLES, BGFX_SILK, BGFX_EMBERS, BGFX_GRID,
        BGFX_UNDERWATER, BGFX_ENERGY, BGFX_AURORA, BGFX_LIQUID, BGFX_PARTICLES, BGFX_SMOKE, BGFX_XMB, BGFX_PS4_FLOW,
        BGFX_PS4_BOKEH, BGFX_NEBULA, BGFX_FIRE_DUST, BGFX_LAVA, BGFX_PRISM, BGFX_TOPO, BGFX_HEX, BGFX_SPIRAL, BGFX_INK, BGFX_HOLO,
-       BGFX_FRACTAL, BGFX_BURST, BGFX_WARP, BGFX_COUNT };
+       BGFX_FRACTAL, BGFX_BURST, BGFX_WARP, BGFX_PSP, BGFX_COUNT };
 static const int s_fxLabels[BGFX_COUNT] = { T_OFF, T_FX_WAVES, T_FX_PULSE, T_FX_RAIN, T_FX_VORTEX, T_FX_RIPPLES, T_FX_SILK,
                                             T_FX_EMBERS, T_FX_GRID, T_FX_UNDERWATER, T_FX_ENERGY, T_FX_AURORA, T_FX_LIQUID,
                                             T_FX_PARTICLES, T_FX_SMOKE, T_FX_XMB, T_FX_PS4_FLOW, T_FX_PS4_BOKEH,
                                             T_FX_NEBULA, T_FX_FIRE_DUST, T_FX_LAVA, T_FX_PRISM, T_FX_TOPO, T_FX_HEX, T_FX_SPIRAL,
-                                            T_FX_INK, T_FX_HOLO, T_FX_FRACTAL, T_FX_BURST, T_FX_WARP };
+                                            T_FX_INK, T_FX_HOLO, T_FX_FRACTAL, T_FX_BURST, T_FX_WARP, T_FX_PSP };
 static int s_bgEffect = BGFX_WAVES;   // what the ROM list draws (set from Config::bgEffect)
 // The colours the effect page offers (Config::fxColor; 0: none - the effect's own colours for colour 1, unused for 2 and 3).
 #define FX_PALETTE_COUNT 13
@@ -1521,6 +1528,12 @@ enum { SND_VOLUME = 0, SND_AUDIO, SND_MONO, SND_UISOUNDS, SND_SFXSTYLE, SND_MUSI
 static const int s_sfxStyleLabels[XB_SFX_STYLE_COUNT] = { T_STYLE_GLASS, T_STYLE_SOFT, T_STYLE_RETRO, T_STYLE_DIGITAL };
 #define MUSIC_DIR s_musicDir   // the menus' music: every .mp3/.wav in it (Settings > Paths)
 enum { G_PRESET = 0, G_FILTER, G_HIRES, G_SMOOTH, G_SHARPEN, G_BLUR, G_DEFLICKER, G_SCREEN };   // the Graphics page; B goes back, no row for it
+// After them, on the ROM list only (xb_hirespack.cpp): "Download HD pack" when the selected game
+// has one, "Convert PNG textures" when its folder holds a PNG pack (their rows, -1: not there).
+static int s_gRowHiresDl = -1, s_gRowHiresPng = -1;
+static int hires_png_here(void);   // with HiresScanPacks
+static void hires_pack_dir(int k, char *dir, size_t size);   // ... and these two
+static int hires_active_index(const Config *c);
 enum { SCR_RES = 0, SCR_RES169, SCR_STRETCH, SCR_CAL, SCR_BRIGHT, SCR_COLOR, SCR_VSYNC };   // anti-flicker and the screen effect: Graphics
 // Brightness in the order the row steps through it (Config::brightness: 0 normal, 1-2 lighter, 3-4 darker).
 static const int s_brightOrder[5] = { 4, 3, 0, 1, 2 };
@@ -1743,9 +1756,7 @@ static void settings_values(UiMenu *m, const Config *c)
                 char name[128], fit[48], count[16];
                 const char *p;
                 size_t nlen;
-                if (c->hiTexFile[0])
-                    for (k = 0; k < hn; k++)
-                        if (!strcmp(HiresPackName(k), c->hiTexFile)) { hi = k; break; }
+                hi = hires_active_index(c);
                 p = HiresPackName(hi);
                 nlen = strlen(p);
                 if (nlen > 4 && !strcmp(p + nlen - 4, ".hts")) nlen -= 4;
@@ -1795,12 +1806,13 @@ static void settings_main(UiMenu *m, const Config *c)
     UiMenuAdd(m, Tr(T_SOUND), "");
     UiMenuAdd(m, Tr(T_SYSTEM), "");
     UiMenuIcons(m, icons, sizeof(icons));
-    s_rowSaveGame = s_rowSaveAll = s_rowAbout = -1;
+    s_rowSaveGame = s_rowSaveAll = s_rowAbout = s_rowHires = -1;
     if (s_browser)
     {
         // Not in game: the menus' look cannot be seen there, and the folders are the ROM list's.
         m->icon[UiMenuAdd(m, Tr(T_INTERFACE), "")] = UI_ICON_INTERFACE;
         m->icon[UiMenuAdd(m, Tr(T_PATHS), "")] = UI_ICON_LOAD;
+        m->icon[s_rowHires = UiMenuAdd(m, Tr(T_HIRES_SECTION), "")] = UI_ICON_HD;   // its own screen (hires_hub)
         m->icon[s_rowAbout = UiMenuAdd(m, Tr(T_ABOUT), "")] = UI_ICON_INFO;
     }
     else
@@ -3859,6 +3871,9 @@ static void settings_graphics(UiMenu *m, const Config *c)
                                                UI_ICON_SCANLINES };
         UiMenuIcons(m, icons, sizeof(icons));
     }
+    s_gRowHiresDl = s_gRowHiresPng = -1;
+    if (s_browser && HiresPackCountFor(s_hiresRom)) m->icon[s_gRowHiresDl = UiMenuAdd(m, Tr(T_HIRES_DL), "")] = UI_ICON_LOAD;   // opens its screen
+    if (s_browser && hires_png_here()) m->icon[s_gRowHiresPng = UiMenuAdd(m, Tr(T_HIRES_PNG), "")] = UI_ICON_HD;
     settings_values(m, c);
 }
 
@@ -5655,6 +5670,8 @@ static int graphics_input(UiMenu *m, Config *c, WORD down)
         return SET_NONE;
     }
     if (m->sel == G_HIRES && c->hiTex && HiresPackCount() && (down & XINPUT_GAMEPAD_Y)) return SET_PREVIEW;
+    if (s_browser && m->sel == s_gRowHiresDl && (down & XINPUT_GAMEPAD_A)) return SET_HIRES_DL;
+    if (s_browser && m->sel == s_gRowHiresPng && (down & XINPUT_GAMEPAD_A)) return SET_HIRES_PNG;
     if (dir || (down & XINPUT_GAMEPAD_A))
     {
         if (!dir) dir = 1;
@@ -5690,20 +5707,18 @@ static int graphics_input(UiMenu *m, Config *c, WORD down)
                 if (!s_kodiSim) profile_set_hires(c);
                 break;
             }
-            if (c->hiTex && hn)
-            {
-                cur = 1;
-                if (c->hiTexFile[0])
-                    for (k = 0; k < hn; k++)
-                        if (!strcmp(HiresPackName(k), c->hiTexFile)) { cur = k + 1; break; }
-            }
+            (void)k;
+            if (c->hiTex && hn) cur = hires_active_index(c) + 1;
             cur = (cur + dir + states) % states;
             if (cur == 0) c->hiTex = 0;
             else
             {
+                char dirName[192];
                 c->hiTex = 1;
                 strncpy(c->hiTexFile, HiresPackName(cur - 1), sizeof(c->hiTexFile) - 1);
                 c->hiTexFile[sizeof(c->hiTexFile) - 1] = 0;
+                hires_pack_dir(cur - 1, dirName, sizeof(dirName));
+                HiresActiveWrite(dirName, HiresPackName(cur - 1));   // the game's pack in use (HiresOpen)
             }
             if (!s_kodiSim) profile_set_hires(c);
             break;
@@ -5977,6 +5992,7 @@ static int settings_input(UiMenu *m, Config *c, int perGame, WORD down)
         settings_paths(m, c);
         return SET_NONE;
     }
+    if (s_browser && m->sel == s_rowHires && (down & XINPUT_GAMEPAD_A)) return SET_HIRES_HUB;
     if (m->sel == s_rowAbout && (down & XINPUT_GAMEPAD_A)) return SET_ABOUT;
     settings_values(m, c);
     if (down & XINPUT_GAMEPAD_A)
@@ -7648,8 +7664,18 @@ static int s_romsTotal;         // games in game:\roms\ (0: the "copy ROMs" scre
 
 // A USB memory plugged in while the ROM list is up, its games added (RomBrowser): its drive (UsbN), -1 none.
 static int s_usbMerged = -1;
-static int tab_count(void) { cats_load(); return 2 + s_catCount + (s_usbMerged >= 0 ? 1 : 0); }
-static int tab_is_usb(int tab) { return s_usbMerged >= 0 && tab == 2 + s_catCount; }
+// After the categories: the games with HD textures (installed, to download or a PNG pack of
+// their own: hd_of_file), then the USB memory's.
+static int tab_count(void) { cats_load(); return 3 + s_catCount + (s_usbMerged >= 0 ? 1 : 0); }
+static int tab_is_hd(int tab) { return tab == 2 + s_catCount; }
+static int tab_is_usb(int tab) { return s_usbMerged >= 0 && tab == 3 + s_catCount; }
+
+// Each ROM's HD textures (RomInfo::hd: 2 installed, 3 a PNG pack to convert, 1 one to download,
+// 0 none), from its header's name, kept once known: the list's rows and the HD tab ask for it.
+// Forgotten when a pack comes or goes (hd_forget).
+static std::map<std::string, int> s_hdOf;
+static int hd_of_file(const std::string &file);   // with HiresScanPacks
+static void hd_forget(void) { s_hdOf.clear(); }
 static int rom_on_usb(const std::string &file)
 {
     char pre[8];
@@ -7662,6 +7688,7 @@ static void tab_name(int tab, char *out, size_t size)
     if (tab == 0) _snprintf(out, size - 1, "%s", Tr(T_CAT_ALL));
     else if (tab == 1) _snprintf(out, size - 1, "%s", Tr(T_FAVORITES));
     else if (tab_is_usb(tab)) _snprintf(out, size - 1, "%s", Tr(T_CAT_USB));
+    else if (tab_is_hd(tab)) _snprintf(out, size - 1, "%s", Tr(T_CAT_HD));
     else cat_name(&s_cats[tab - 2], out, size);
     out[size - 1] = 0;
 }
@@ -7672,10 +7699,11 @@ static void tab_filter(const std::vector<RomEntry> &all, std::vector<RomEntry> *
     size_t i;
     out->clear();
     if (s_tab < 0 || s_tab >= tab_count()) s_tab = 0;
-    if (s_tab >= 2 && !tab_is_usb(s_tab)) lib_load();
+    if (s_tab >= 2 && s_tab < 2 + s_catCount) lib_load();
     for (i = 0; i < all.size(); i++)
         if (s_tab == 0 || (s_tab == 1 && fav_is(all[i].file)) || (tab_is_usb(s_tab) && rom_on_usb(all[i].file)) ||
-            (s_tab >= 2 && !tab_is_usb(s_tab) && game_in_cat(all[i].file, &s_cats[s_tab - 2])))
+            (tab_is_hd(s_tab) && hd_of_file(all[i].file)) ||
+            (s_tab >= 2 && s_tab < 2 + s_catCount && game_in_cat(all[i].file, &s_cats[s_tab - 2])))
             out->push_back(all[i]);
     s_tabGames = (int)out->size();
 }
@@ -7932,14 +7960,77 @@ void HiresSetFolder(const char *folder)
     s_hiresDir[sizeof(s_hiresDir) - 1] = 0;
 }
 
+// The folder of pack k of those HiresScanPacks found (the game's).
+static void hires_pack_dir(int k, char *dir, size_t size)
+{
+    const char *path = HiresPackPath(k), *slash = strrchr(path, '\\');
+    size_t n = slash ? (size_t)(slash - path) : 0;
+    if (n >= size) n = size - 1;
+    memcpy(dir, path, n);
+    dir[n] = 0;
+}
+
+// Which of them is in use: the folder's active.txt, else Settings > Graphics' pick, else the first.
+static int hires_active_index(const Config *c)
+{
+    char dir[192], active[128];
+    int k, n = HiresPackCount(), act;
+    if (!n) return 0;
+    hires_pack_dir(0, dir, sizeof(dir));
+    act = HiresActiveRead(dir, active, sizeof(active));
+    for (k = 0; k < n; k++)
+        if (!_stricmp(HiresPackName(k), act == 1 ? active : c->hiTexFile)) return k;
+    return 0;
+}
+
+// Whether the folder of the ROM HiresScanPacks looked for last holds a PNG pack (xb_hirespack.cpp).
+static int hires_png_here(void)
+{
+    char folder[64], dir[192];
+    if (!s_hiresRom[0]) return 0;
+    HiresFolderName(s_hiresRom, folder, sizeof(folder));
+    _snprintf(dir, sizeof(dir) - 1, "%s\\%s", s_hiresDir, folder);
+    dir[sizeof(dir) - 1] = 0;
+    return HiresPngPresent(dir);
+}
+
+static int hd_of_file(const std::string &file)
+{
+    std::map<std::string, int>::const_iterator it = s_hdOf.find(file);
+    H64Rom rom;
+    int hd = 0;
+    if (it != s_hdOf.end()) return it->second;
+    if (read_header(file.c_str(), &rom))
+    {
+        char folder[64], dir[192], pattern[208];
+        WIN32_FIND_DATAA fd;
+        HANDLE h;
+        HiresFolderName(rom.name, folder, sizeof(folder));
+        _snprintf(dir, sizeof(dir) - 1, "%s\\%s", s_hiresDir, folder);
+        dir[sizeof(dir) - 1] = 0;
+        _snprintf(pattern, sizeof(pattern) - 1, "%s\\*.hts", dir);
+        pattern[sizeof(pattern) - 1] = 0;
+        h = FindFirstFileA(pattern, &fd);
+        if (h != INVALID_HANDLE_VALUE) { FindClose(h); hd = 2; }
+        else if (HiresPngPresent(dir)) hd = 3;
+        else if (HiresPackCountFor(rom.name)) hd = 1;
+        h64_rom_free(&rom);
+    }
+    s_hdOf[file] = hd;
+    return hd;
+}
+
 void HiresScanPacks(const char *romName)
 {
-    char dir[160], pattern[176];
+    char dir[160], pattern[176], folder[64];
     WIN32_FIND_DATAA fd;
     HANDLE h;
     s_hiresPackCount = 0;
+    strncpy(s_hiresRom, romName ? romName : "", sizeof(s_hiresRom) - 1);
+    s_hiresRom[sizeof(s_hiresRom) - 1] = 0;
     if (!romName || !romName[0]) return;
-    _snprintf(dir, sizeof(dir) - 1, "%s\\%s", s_hiresDir, romName);
+    HiresFolderName(romName, folder, sizeof(folder));   // as GLideN64 names it, and the downloads put it
+    _snprintf(dir, sizeof(dir) - 1, "%s\\%s", s_hiresDir, folder);
     dir[sizeof(dir) - 1] = 0;
     _snprintf(pattern, sizeof(pattern) - 1, "%s\\*.hts", dir);
     pattern[sizeof(pattern) - 1] = 0;
@@ -7995,10 +8086,970 @@ const char *HiresPackName(int i)
     return slash ? slash + 1 : p;
 }
 
+// Settings > Graphics > Download HD pack (ROM list, the selected game having
+// one): which pack (LEFT/RIGHT when there are two), then its download and
+// unpacking with a bar (B stops it, xb_hirespack.cpp), then how it went. An
+// installed pack is the one used from then on (HD textures on). Y while it works
+// leaves it going on in the background (returns 1): one can play meanwhile, a bar
+// in the game shows it (main.cpp). One already going on is shown from its bar on.
+// png: the game's own PNG pack (its folder) converted instead, from the bar on. direct: that
+// pack of the catalog (the Packs screen) downloaded into its own game's folder, from the bar on.
+static int hires_download_screen(IDirect3DDevice9 *dev, Config *c, int png, const HiresPackEntry *direct)
+{
+    static UiAnim fill;
+    UiInput in;
+    char rom[32], folder[64], dest[192], line[192], file[128];
+    int n, pick = 0, phase = 0, st = HPACK_IDLE, err = HPERR_NONE;
+    strncpy(rom, direct ? direct->romName : s_hiresRom, sizeof(rom) - 1);
+    rom[sizeof(rom) - 1] = 0;
+    n = HiresPackCountFor(rom);
+    HiresFolderName(rom, folder, sizeof(folder));
+    _snprintf(dest, sizeof(dest) - 1, "%s\\%s", s_hiresDir, folder);
+    dest[sizeof(dest) - 1] = 0;
+    mkdir_p(s_hiresDir);
+    if (HiresPackBusy()) phase = 1;   // one in the background: that one
+    else if (png) { HiresPngStart(rom, dest); phase = 1; }
+    else if (direct) { HiresPackStart(direct, dest); phase = 1; }
+    else if (!n) return 0;
+    UiInputInit(&in);
+    fill.live = 0;
+    for (;;)
+    {
+        const HiresPackEntry *e = phase && HiresPackJob() ? HiresPackJob() : HiresPackGet(rom, pick);
+        const float w = 780, h = 300, x = (UI_WIDTH - w) * 0.5f, y = (UI_HEIGHT - h) * 0.5f, cx = x + w * 0.5f;
+        const float bx = x + 70, bw = w - 140, by = y + 196, bh = 14;
+        WORD down = UiInputPoll(&in);
+        unsigned done = 0, total = 0;
+        if (phase == 0)
+        {
+            if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) return 0;
+            if (n > 1 && (down & (XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT)))
+            {
+                pick = (pick + ((down & XINPUT_GAMEPAD_DPAD_RIGHT) ? 1 : n - 1)) % n;
+                xb_audio_ui_sound((down & XINPUT_GAMEPAD_DPAD_RIGHT) ? XB_SFX_VALUE_UP : XB_SFX_VALUE_DOWN);
+            }
+            if (down & XINPUT_GAMEPAD_A)
+            {
+                HiresPackStart(e, dest);
+                phase = 1;
+                fill.live = 0;
+            }
+        }
+        else if (phase == 1)
+        {
+            st = HiresPackStatus(&done, &total, &err, file, sizeof(file));
+            if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) HiresPackCancel();
+            else if ((down & XINPUT_GAMEPAD_Y) && st != HPACK_DONE && st != HPACK_FAILED)
+            {
+                // In the background: hiTex on now, the pack is the folder's (HiresOpen picks it up).
+                c->hiTex = 1;
+                c->hiTexFile[0] = 0;
+                return 1;
+            }
+            if (st == HPACK_DONE || st == HPACK_FAILED)
+            {
+                phase = 2;
+                if (st == HPACK_DONE)
+                {
+                    // The pack just installed is the one used.
+                    c->hiTex = 1;
+                    strncpy(c->hiTexFile, file, sizeof(c->hiTexFile) - 1);
+                    c->hiTexFile[sizeof(c->hiTexFile) - 1] = 0;
+                    HiresScanPacks(rom);
+                    xb_audio_ui_sound(XB_SFX_NOTIFY);
+                }
+                UiInputInit(&in);
+            }
+        }
+        else if (down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_START | XINPUT_GAMEPAD_BACK)) return 0;
+        if (!e) return 0;
+        dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
+        UiBegin(dev);
+        UiBackdrop();
+        browser_effect();
+        edge_glow(x, y, w, h, 22);
+        UiPanel(x, y, w, h, 22);
+        UiText(UI_BOLD, 30, cx, y + 50, UI_COL_TEXT, Tr(T_HIRESTEX), UI_CENTER);
+        // The pack and who made it.
+        if (n > 1 && phase == 0) _snprintf(line, sizeof(line) - 1, "< %s (%d/%d) >", e->title, pick + 1, n);
+        else _snprintf(line, sizeof(line) - 1, "%s", e->title);
+        line[sizeof(line) - 1] = 0;
+        UiText(UI_BOLD, 26, cx, y + 104, UI_COL_TEXT, line, UI_CENTER);
+        if (e->author[0]) _snprintf(line, sizeof(line) - 1, Tr(T_HIRES_DL_BY), e->author);
+        else _snprintf(line, sizeof(line) - 1, "%s", Tr(T_HIRES_PNG_OWN));   // the game's own PNG pack
+        line[sizeof(line) - 1] = 0;
+        UiText(UI_REGULAR, 19, cx, y + 138, UI_COL_TEXT2, line, UI_CENTER);
+        if (phase == 0) UiText(UI_REGULAR, 17, cx, y + 190, UI_COL_TEXT3, Tr(T_HIRES_DL_NOTE), UI_CENTER);
+        else if (phase == 1)
+        {
+            UiText(UI_REGULAR, 19, cx, y + 172, UI_COL_TEXT2,
+                   Tr(st == HPACK_CONVERT ? T_HIRES_DL_CONVERTING : st == HPACK_UNPACK ? T_HIRES_DL_UNPACKING
+                      : st == HPACK_DOWNLOAD ? T_HIRES_DL_DOWNLOADING : T_HIRES_DL_LOOKUP), UI_CENTER);
+            if (total && (st == HPACK_DOWNLOAD || st == HPACK_UNPACK || st == HPACK_CONVERT))
+            {
+                float f = (float)done / (float)total, shown;
+                if (f > 1.0f) f = 1.0f;
+                shown = anim_step_rate(&fill, f, !fill.live, 8.0f, 0.001f);
+                UiRoundRect(bx, by, bw, bh, bh * 0.5f, D3DCOLOR_ARGB(50, 255, 255, 255), D3DCOLOR_ARGB(35, 255, 255, 255));
+                if (shown > 0.0f) UiRoundRect(bx, by, bw * shown < bh ? bh : bw * shown, bh, bh * 0.5f, SEL_HI(255), SEL_LO(255));
+                _snprintf(line, sizeof(line) - 1, "%.1f / %.1f MB  -  %d%%", done / 1024.0f, total / 1024.0f, (int)(f * 100.0f));
+                line[sizeof(line) - 1] = 0;
+                UiText(UI_REGULAR, 17, cx, by + bh + 22, UI_COL_TEXT2, line, UI_CENTER);
+            }
+            else
+            {
+                int k, dots = (int)(UiTime() * 3.0f) % 4;
+                for (k = 0; k < 3; k++) UiCircle(cx - 24 + k * 24, by + bh * 0.5f, 6, k < dots ? UI_COL_ACCENT_HI : UI_COL_LINE);
+            }
+        }
+        else
+        {
+            int msg = st == HPACK_DONE ? T_HIRES_DL_DONE : err == HPERR_NETWORK ? T_HIRES_DL_ERR_NET : err == HPERR_SPACE ? T_HIRES_DL_ERR_SPACE
+                    : err == HPERR_TOOBIG ? T_HIRES_DL_ERR_BIG : err == HPERR_CANCELLED ? T_HIRES_DL_CANCELLED
+                    : err == HPERR_NOPACK ? T_HIRES_DL_ERR_PACK : err == HPERR_NOPNG ? T_HIRES_PNG_NONE : T_HIRES_DL_ERR_FILE;
+            UiText(UI_BOLD, 22, cx, y + 196, st == HPACK_DONE ? UI_COL_ACCENT_HI : UI_COL_TEXT, Tr(msg), UI_CENTER);
+        }
+        UiRect(x + 24, y + h - 56, w - 48, 1, UI_COL_LINE);
+        UiFooter(x + 40, y + h - 28, Tr(phase == 0 ? T_FOOT_HIRES_DL : phase == 1 ? T_FOOT_HIRES_DL_RUN : T_FOOT_NEWS));
+        UiEnd();
+        dev->Present(NULL, NULL, NULL, NULL);
+        Sleep(16);
+    }
+}
+
+static float hd_chip(float x, float cy, int hd, float a);   // below, with the cards' chips
+
+// The games whose HD pack is not to be offered again (X on the offer): their
+// header names, one a line, in <drive>:\config\hires_noask.txt.
+static std::set<std::string> s_hiresNoAsk;
+static int s_hiresNoAskLoaded;
+
+static void hires_noask_load(void)
+{
+    char path[64], line[64];
+    FILE *f;
+    if (s_hiresNoAskLoaded) return;
+    s_hiresNoAskLoaded = 1;
+    lib_file("hires_noask.txt", path, sizeof(path));
+    if (!(f = fopen(path, "r"))) return;
+    while (fgets(line, sizeof(line), f))
+    {
+        size_t n = strlen(line);
+        while (n && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = 0;
+        if (n) s_hiresNoAsk.insert(line);
+    }
+    fclose(f);
+}
+
+static void hires_noask_add(const char *rom)
+{
+    char path[64];
+    FILE *f;
+    std::set<std::string>::const_iterator it;
+    s_hiresNoAsk.insert(rom);
+    lib_file("hires_noask.txt", path, sizeof(path));
+    if (!(f = fopen(path, "w"))) { H64_WARN("[menu] cannot write %s", path); return; }
+    for (it = s_hiresNoAsk.begin(); it != s_hiresNoAsk.end(); ++it) fprintf(f, "%s\n", it->c_str());
+    fclose(f);
+}
+
+
+// A label and its value on one line of the Packs screen's card.
+static void packs_kv(float x, float y, float w, const char *label, const char *value, D3DCOLOR color)
+{
+    char fit[160];
+    UiText(UI_REGULAR, 16, x, y, UI_COL_TEXT3, label, UI_LEFT);
+    UiTextFit(UI_REGULAR, 17, w - 150, value, fit, sizeof(fit));
+    UiText(UI_REGULAR, 17, x + 150, y, color, fit, UI_LEFT);
+}
+
+// What the Packs screen knows of each pack on the drive, read when it opens and after a
+// change (not every frame): its file there, its size, whether it is the game's pack in use.
+struct PackHere { int installed, active; unsigned kb; char file[64]; };
+
+static void packs_here(int i, PackHere *ph)
+{
+    const HiresPackEntry *e = HiresPackAt(i);
+    char folder[64], dir[192], path[256], active[128];
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    int act, k;
+    memset(ph, 0, sizeof(*ph));
+    HiresFolderName(e->romName, folder, sizeof(folder));
+    _snprintf(dir, sizeof(dir) - 1, "%s\\%s", s_hiresDir, folder);
+    dir[sizeof(dir) - 1] = 0;
+    HiresPackFileName(e, ph->file, sizeof(ph->file));
+    _snprintf(path, sizeof(path) - 1, "%s\\%s", dir, ph->file);
+    path[sizeof(path) - 1] = 0;
+    ph->installed = GetFileAttributesExA(path, GetFileExInfoStandard, &fa) != 0;
+    if (!ph->installed && e->owner[0])
+    {
+        // Installed before packs were named after themselves: "<ROM>_HIRESTEXTURES.hts", taken as
+        // the game's first GitHub pack's.
+        for (k = 0; k < i; k++)
+            if (HiresPackAt(k)->owner[0] && !strcmp(HiresPackAt(k)->romName, e->romName)) break;
+        if (k == i)
+        {
+            _snprintf(ph->file, sizeof(ph->file) - 1, "%s_HIRESTEXTURES.hts", folder);
+            ph->file[sizeof(ph->file) - 1] = 0;
+            _snprintf(path, sizeof(path) - 1, "%s\\%s", dir, ph->file);
+            path[sizeof(path) - 1] = 0;
+            ph->installed = GetFileAttributesExA(path, GetFileExInfoStandard, &fa) != 0;
+        }
+    }
+    if (!ph->installed) return;
+    ph->kb = fa.nFileSizeLow >> 10;
+    act = HiresActiveRead(dir, active, sizeof(active));
+    if (act == 1) ph->active = !_stricmp(active, ph->file);
+    else if (act == 0)
+    {
+        // Not chosen: the game's only pack is the one used.
+        char pattern[208];
+        WIN32_FIND_DATAA fd;
+        HANDLE h;
+        int n = 0;
+        _snprintf(pattern, sizeof(pattern) - 1, "%s\\*.hts", dir);
+        pattern[sizeof(pattern) - 1] = 0;
+        h = FindFirstFileA(pattern, &fd);
+        if (h != INVALID_HANDLE_VALUE) { do n++; while (FindNextFileA(h, &fd)); FindClose(h); }
+        ph->active = n == 1;
+    }
+}
+
+// The Packs screen's list: headings and packs. The selected game's packs first (under its
+// name), then "Packs for other games", each game under its own name (A-Z): kept apart so
+// a pack is never taken for another game's.
+enum { PR_SECTION = 0, PR_GAME, PR_PACK };
+struct PackRow { int kind, idx; const char *text; };
+static bool pack_game_less(const char *a, const char *b) { return _stricmp(HiresGameName(a), HiresGameName(b)) < 0; }
+
+static void packs_rows(const char *romFolder, std::vector<PackRow> &rows)
+{
+    std::vector<const char *> games;
+    int n = HiresPackTotal(), k, g;
+    PackRow r;
+    rows.clear();
+    for (k = 0; k < n; k++)
+    {
+        const char *rn = HiresPackAt(k)->romName;
+        for (g = 0; g < (int)games.size() && strcmp(games[g], rn); g++) {}
+        if (g == (int)games.size() && strcmp(rn, romFolder)) games.push_back(rn);
+    }
+    std::sort(games.begin(), games.end(), pack_game_less);
+    if (romFolder[0] && HiresPackCountFor(romFolder))
+    {
+        r.kind = PR_SECTION; r.idx = -1; r.text = Tr(T_PACKS_THIS_GAME); rows.push_back(r);
+        r.kind = PR_GAME; r.text = HiresGameName(romFolder); rows.push_back(r);
+        for (k = 0; k < n; k++)
+            if (!strcmp(HiresPackAt(k)->romName, romFolder)) { r.kind = PR_PACK; r.idx = k; r.text = NULL; rows.push_back(r); }
+    }
+    r.kind = PR_SECTION; r.idx = -1; r.text = Tr(rows.empty() ? T_PACKS_ALL_GAMES : T_PACKS_OTHER_GAMES); rows.push_back(r);
+    for (g = 0; g < (int)games.size(); g++)
+    {
+        r.kind = PR_GAME; r.idx = -1; r.text = HiresGameName(games[g]); rows.push_back(r);
+        for (k = 0; k < n; k++)
+            if (!strcmp(HiresPackAt(k)->romName, games[g])) { r.kind = PR_PACK; r.idx = k; r.text = NULL; rows.push_back(r); }
+    }
+}
+
+// The next pack row from `from` going `dir` (+1/-1), round the ends; from itself when none.
+static int packs_step(const std::vector<PackRow> &rows, int from, int dir)
+{
+    int n = (int)rows.size(), k, i = from;
+    for (k = 0; k < n; k++)
+    {
+        i = (i + dir + n) % n;
+        if (rows[i].kind == PR_PACK) return i;
+    }
+    return from;
+}
+
+// The heading row of the game before (dir -1) or after (+1) the one `from` is under.
+static int packs_game_step(const std::vector<PackRow> &rows, int from, int dir)
+{
+    int n = (int)rows.size(), k, i = from;
+    if (dir < 0)
+        for (k = 0; k < n && rows[i].kind != PR_GAME; k++) i = (i - 1 + n) % n;   // its own heading first
+    for (k = 0; k < n; k++)
+    {
+        i = (i + dir + n) % n;
+        if (rows[i].kind == PR_GAME) return i;
+    }
+    return from;
+}
+
+// START in the ROM list: the whole catalog of HD packs (xb_hirespack.cpp), the selected
+// game's first, and all that is known of each - its picture, its game, its authors, where
+// it comes from, whether it is installed (its file, its size) and in use, and from GitHub
+// its latest version, date, file, size, downloads and notes. A downloads the one chosen
+// into its game's folder; Y makes an installed one the game's pack in use, or turns it off.
+static void packs_screen(IDirect3DDevice9 *dev, Config *c)
+{
+    static UiAnim selAnim;
+    UiInput in;
+    const int n = HiresPackTotal(), rows = 11;
+    std::vector<PackRow> list;                  // headings and packs, in the list's order
+    std::vector<PackHere> here(n > 0 ? n : 1);
+    std::map<int, IDirect3DTexture9 *> pics;    // pictures made textures, by catalog index
+    char romFolder[64];
+    int sel, top = 0, k;
+    float selAt = UiTime();
+    HiresFolderName(s_hiresRom, romFolder, sizeof(romFolder));
+    packs_rows(romFolder, list);
+    sel = packs_step(list, (int)list.size() - 1, 1);   // the first pack
+    for (k = 0; k < n; k++) packs_here(k, &here[k]);
+    UiInputInit(&in);
+    xb_audio_ui_sound(XB_SFX_OPEN);
+    for (;;)
+    {
+        const float x = UI_SAFE_X, y = 100, w = UI_WIDTH - 2 * UI_SAFE_X, h = 510, lw = 430, rowH = 48, pad = 10;
+        const float cx = x + lw + 20, cw = w - lw - 20, ix = cx + 28, iw = cw - 56, picW = 256, picH = 144;
+        WORD down = UiInputPoll(&in);
+        const HiresPackEntry *e;
+        const PackHere *ph;
+        HiresPackInfo info;
+        char line[256], notes[1200];
+        int cur, state;
+        float ty, sy, tw;
+        IDirect3DTexture9 *pic = NULL;
+        if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK | XINPUT_GAMEPAD_START)) break;
+        if (!n) break;
+        if (down & (XINPUT_GAMEPAD_DPAD_UP | XINPUT_GAMEPAD_DPAD_DOWN))
+        {
+            sel = packs_step(list, sel, (down & XINPUT_GAMEPAD_DPAD_DOWN) ? 1 : -1);
+            selAt = UiTime();
+            xb_audio_ui_sound(XB_SFX_MOVE);
+        }
+        if (down & (XINPUT_GAMEPAD_LEFT_SHOULDER | XINPUT_GAMEPAD_RIGHT_SHOULDER))
+        {
+            // LB/RB: the previous or the next game's first pack.
+            sel = packs_step(list, packs_game_step(list, sel, (down & XINPUT_GAMEPAD_RIGHT_SHOULDER) ? 1 : -1), 1);
+            selAt = UiTime();
+            xb_audio_ui_sound(XB_SFX_PAGE);
+        }
+        // The rows around the selection shown, with the headings just above it when they fit.
+        if (sel < top) top = sel;
+        while (top > 0 && sel - top < 2 && list[top - 1].kind != PR_PACK) top--;
+        if (sel >= top + rows) top = sel - rows + 1;
+        cur = list[sel].idx;
+        e = HiresPackAt(cur);
+        ph = &here[cur];
+        state = HiresPackInfoGet(cur, &info, UiTime() - selAt > 0.35f);   // GitHub asked once it rests here
+        if ((down & XINPUT_GAMEPAD_X) && state == HPINFO_FAILED) HiresPackInfoGet(cur, NULL, 2);   // again
+        if ((down & XINPUT_GAMEPAD_Y) && ph->installed)
+        {
+            // The game's pack in use: this one, or none (HD off for the game) when it was.
+            char folder[64], dir[192];
+            HiresFolderName(e->romName, folder, sizeof(folder));
+            _snprintf(dir, sizeof(dir) - 1, "%s\\%s", s_hiresDir, folder);
+            dir[sizeof(dir) - 1] = 0;
+            HiresActiveWrite(dir, ph->active ? NULL : ph->file);
+            if (!ph->active) c->hiTex = 1;   // HD textures on, as when one is installed
+            xb_audio_ui_sound(ph->active ? XB_SFX_VALUE_DOWN : XB_SFX_VALUE_UP);
+            for (k = 0; k < n; k++)
+                if (!strcmp(HiresPackAt(k)->romName, e->romName)) packs_here(k, &here[k]);
+        }
+        if (down & XINPUT_GAMEPAD_A)
+        {
+            hires_download_screen(dev, c, 0, e);
+            hd_forget();
+            for (k = 0; k < n; k++)
+                if (!strcmp(HiresPackAt(k)->romName, e->romName)) packs_here(k, &here[k]);
+            UiInputInit(&in);
+            continue;
+        }
+        // Its picture: asked for once the selection rests on it, a texture once loaded.
+        if (pics.count(cur)) pic = pics[cur];
+        else if (e->image && UiTime() - selAt > 0.2f)
+        {
+            const unsigned char *rgba;
+            int pw, phh;
+            if (HiresPackImage(cur, &rgba, &pw, &phh) == HPINFO_OK && rgba)
+            {
+                pic = UiImageCreate(dev, rgba, pw, phh);
+                pics[cur] = pic;
+                HiresPackImageDone(cur);
+            }
+        }
+
+        dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
+        UiBegin(dev);
+        UiBackdrop();
+        browser_effect();
+        UiText(UI_BOLD, 30, x, 58, UI_COL_TEXT, Tr(T_PACKS_TITLE), UI_LEFT);
+        _snprintf(line, sizeof(line) - 1, Tr(T_PACKS_COUNT), n);
+        line[sizeof(line) - 1] = 0;
+        UiText(UI_REGULAR, 18, x + w, 58, UI_COL_TEXT2, line, UI_RIGHT);
+
+        // ---- The list: the sections, each game's name and its packs under it (title, author;
+        // "HD" when installed - filled: in use).
+        UiPanel(x, y, lw, h, 20);
+        sy = anim_step(&selAnim, y + pad + (sel - top) * rowH, 0);
+        selection_bar(x + 8, sy + 1, lw - 16, rowH - 2);
+        for (k = 0; k < rows && top + k < (int)list.size(); k++)
+        {
+            const PackRow *row = &list[top + k];
+            const float ry = y + pad + k * rowH;
+            const int s1 = top + k == sel;
+            char fit[128];
+            const HiresPackEntry *r;
+            const PackHere *rh;
+            if (row->kind == PR_SECTION)
+            {
+                // A section: its name in the accent, a line across after it.
+                float tw2;
+                UiTextFit(UI_BOLD, 15, lw - 60, row->text, fit, sizeof(fit));
+                tw2 = UiTextWidth(UI_BOLD, 15, fit);
+                UiText(UI_BOLD, 15, x + 22, ry + rowH * 0.5f + 4, UI_COL_ACCENT_HI, fit, UI_LEFT);
+                UiRect(x + 30 + tw2, ry + rowH * 0.5f + 4, lw - 52 - tw2, 1, UiAlpha(UI_COL_ACCENT_HI, 0.35f));
+                continue;
+            }
+            if (row->kind == PR_GAME)
+            {
+                // A game: its name on a band; the packs below are its own.
+                UiRoundRect(x + 14, ry + 8, lw - 28, rowH - 12, 8, D3DCOLOR_ARGB(40, 255, 255, 255), D3DCOLOR_ARGB(26, 255, 255, 255));
+                UiTextFit(UI_BOLD, 18, lw - 60, row->text, fit, sizeof(fit));
+                UiText(UI_BOLD, 18, x + 26, ry + rowH * 0.5f + 2, UI_COL_TEXT, fit, UI_LEFT);
+                continue;
+            }
+            r = HiresPackAt(row->idx);
+            rh = &here[row->idx];
+            UiRoundRect(x + 26, ry + 12, 3, rowH - 22, 1.5f, D3DCOLOR_ARGB(70, 255, 255, 255), D3DCOLOR_ARGB(70, 255, 255, 255));   // under its game
+            UiTextFit(UI_BOLD, 18, lw - 120, r->title, fit, sizeof(fit));
+            UiText(UI_BOLD, 18, x + 40, ry + 15, s1 ? UI_COL_TEXT : UI_COL_TEXT2, fit, UI_LEFT);
+            UiTextFit(UI_REGULAR, 14, lw - 120, r->author, fit, sizeof(fit));
+            UiText(UI_REGULAR, 14, x + 40, ry + 33, UI_COL_TEXT3, fit, UI_LEFT);
+            if (rh->installed)
+            {
+                float pw = UiTextWidth(UI_BOLD, 13, "HD") + 14, px = x + lw - 30 - pw, py = ry + rowH * 0.5f - 9;
+                if (rh->active) UiRoundRect(px, py, pw, 18, 9, SEL_HI(s1 ? 255 : 200), SEL_LO(s1 ? 255 : 200));
+                else UiRoundRing(px, py, pw, 18, 9, 1.3f, UiAlpha(UI_COL_ACCENT_HI, s1 ? 1.0f : 0.75f));
+                UiText(UI_BOLD, 13, px + pw * 0.5f, ry + rowH * 0.5f, rh->active ? UI_COL_TEXT : UI_COL_ACCENT_HI, "HD", UI_CENTER);
+            }
+        }
+        if ((int)list.size() > rows)
+        {
+            const int m = (int)list.size();
+            float tx = x + lw - 12, th = h - 2 * pad - 8, hh = th * rows / m, yy = y + pad + 4 + (th - hh) * top / (float)(m - rows);
+            UiRoundRect(tx, yy, 4, hh, 2, D3DCOLOR_ARGB(150, 255, 255, 255), D3DCOLOR_ARGB(110, 255, 255, 255));
+        }
+
+        // ---- The card: its picture at the top right, then all that is known of it.
+        UiPanel(cx, y, cw, h, 20);
+        tw = e->image ? iw - picW - 20 : iw;   // the text beside the picture
+        if (e->image)
+        {
+            const float px = ix + iw - picW, py = y + 24;
+            UiRoundRect(px, py, picW, picH, 10, D3DCOLOR_ARGB(255, 22, 23, 31), D3DCOLOR_ARGB(255, 16, 17, 23));
+            if (pic)
+            {
+                // Its own shape, centred in the box.
+                D3DSURFACE_DESC d;
+                float s, dw, dh;
+                pic->GetLevelDesc(0, &d);
+                s = picW / (float)d.Width;
+                if (d.Height * s > picH) s = picH / (float)d.Height;
+                dw = d.Width * s; dh = d.Height * s;
+                UiImage(pic, px + (picW - dw) * 0.5f, py + (picH - dh) * 0.5f, dw, dh, 10, D3DCOLOR_ARGB(255, 255, 255, 255));
+            }
+            else
+            {
+                int dots = (int)(UiTime() * 3.0f) % 4;
+                for (k = 0; k < 3; k++) UiCircle(px + picW * 0.5f - 18 + k * 18, py + picH * 0.5f, 4.5f, k < dots ? UI_COL_ACCENT_HI : UI_COL_LINE);
+            }
+            UiRoundRing(px, py, picW, picH, 10, 1.0f, UiAlpha(D3DCOLOR_ARGB(46, 255, 255, 255), 1.0f));
+        }
+        ty = y + 40;
+        UiTextFit(UI_BOLD, 28, tw, e->title, line, sizeof(line));
+        UiText(UI_BOLD, 28, ix, ty, UI_COL_TEXT, line, UI_LEFT);
+        ty += 34;
+        {
+            char by[128];
+            _snprintf(by, sizeof(by) - 1, Tr(T_HIRES_DL_BY), e->author);
+            by[sizeof(by) - 1] = 0;
+            UiTextFit(UI_REGULAR, 19, tw, by, line, sizeof(line));
+        }
+        UiText(UI_REGULAR, 19, ix, ty, UI_COL_TEXT2, line, UI_LEFT);
+        ty += 36;
+        packs_kv(ix, ty + 4, tw, Tr(T_PACKS_GAME), HiresGameName(e->romName), UI_COL_TEXT);
+        if (e->owner[0]) _snprintf(line, sizeof(line) - 1, "github.com/%s/%s", e->owner, e->repo);
+        else _snprintf(line, sizeof(line) - 1, "%s", !strncmp(e->repo, "https://", 8) ? e->repo + 8 : e->repo);   // a direct download
+        line[sizeof(line) - 1] = 0;
+        packs_kv(ix, ty + 32, tw, Tr(T_PACKS_SOURCE), line, UI_COL_TEXT);
+        ty += 64;
+        UiRect(ix, ty, iw, 1, UI_COL_LINE);
+        ty += 16;
+        if (ph->installed)
+        {
+            _snprintf(line, sizeof(line) - 1, Tr(ph->active ? T_PACKS_ACTIVE : T_PACKS_INACTIVE), ph->file, ph->kb / 1024.0f);
+            line[sizeof(line) - 1] = 0;
+        }
+        else _snprintf(line, sizeof(line) - 1, "%s", Tr(T_PACKS_NOT_INSTALLED));
+        packs_kv(ix, ty + 4, iw, Tr(T_PACKS_STATE), line, ph->active ? UI_COL_ACCENT_HI : UI_COL_TEXT2);
+        _snprintf(line, sizeof(line) - 1, "%s", Tr(e->asset || !e->owner[0] ? T_PACKS_FORMAT_PNG : T_PACKS_FORMAT_HTS));
+        line[sizeof(line) - 1] = 0;
+        packs_kv(ix, ty + 32, iw, Tr(T_PACKS_FORMAT), line, UI_COL_TEXT);
+        ty += 64;
+        UiRect(ix, ty, iw, 1, UI_COL_LINE);
+        ty += 16;
+        if (!e->owner[0])
+        {
+            // A direct download: what the catalog knows of it.
+            packs_kv(ix, ty + 4, iw, Tr(T_PACKS_FILE), strrchr(e->repo, '/') ? strrchr(e->repo, '/') + 1 : e->repo, UI_COL_TEXT);
+            _snprintf(line, sizeof(line) - 1, "%.1f MB", e->size / 1048576.0f);
+            line[sizeof(line) - 1] = 0;
+            packs_kv(ix, ty + 32, iw, Tr(T_PACKS_SIZE), line, UI_COL_TEXT);
+            UiText(UI_REGULAR, 16, ix, ty + 72, UI_COL_TEXT3, Tr(T_PACKS_DIRECT), UI_LEFT);
+        }
+        else if (state == HPINFO_OK)
+        {
+            _snprintf(line, sizeof(line) - 1, "%s  " UI_CH_MIDDOT "  %s", info.version, info.date);
+            line[sizeof(line) - 1] = 0;
+            packs_kv(ix, ty + 4, iw, Tr(T_PACKS_VERSION), line, UI_COL_TEXT);
+            packs_kv(ix, ty + 32, iw, Tr(T_PACKS_FILE), info.file, UI_COL_TEXT);
+            _snprintf(line, sizeof(line) - 1, "%.1f MB  " UI_CH_MIDDOT "  %u %s", info.size / 1048576.0f, info.downloads, Tr(T_PACKS_DOWNLOADS));
+            line[sizeof(line) - 1] = 0;
+            packs_kv(ix, ty + 60, iw, Tr(T_PACKS_SIZE), line, UI_COL_TEXT);
+            ty += 96;
+            if (info.notes[0] && ty < y + h - 40)
+            {
+                int lines = (int)((y + h - 24 - ty - 22) / (15 * 1.35f));
+                UiText(UI_BOLD, 16, ix, ty, UI_COL_TEXT2, Tr(T_PACKS_NOTES), UI_LEFT);
+                if (lines > 0)
+                {
+                    UiTextWrap(UI_REGULAR, 15, iw, lines, info.notes, notes, sizeof(notes));
+                    UiText(UI_REGULAR, 15, ix, ty + 24, UI_COL_TEXT3, notes, UI_LEFT);
+                }
+            }
+        }
+        else
+        {
+            int dots = (int)(UiTime() * 3.0f) % 4;
+            if (state == HPINFO_FAILED) UiText(UI_REGULAR, 18, ix, ty + 10, UI_COL_TEXT2, Tr(T_PACKS_INFO_FAILED), UI_LEFT);
+            else
+            {
+                UiText(UI_REGULAR, 18, ix, ty + 10, UI_COL_TEXT2, Tr(T_PACKS_LOADING), UI_LEFT);
+                for (k = 0; k < 3; k++) UiCircle(ix + 6 + k * 18, ty + 44, 4.5f, k < dots ? UI_COL_ACCENT_HI : UI_COL_LINE);
+            }
+        }
+        UiScreenFooter(Tr(state == HPINFO_FAILED && e->owner[0] ? T_FOOT_PACKS_RETRY : ph->installed ? T_FOOT_PACKS_INSTALLED : T_FOOT_PACKS));
+        UiEnd();
+        dev->Present(NULL, NULL, NULL, NULL);
+        Sleep(16);
+    }
+    // The pictures go with the screen (loaded again the next time it opens).
+    {
+        std::map<int, IDirect3DTexture9 *>::iterator it;
+        for (it = pics.begin(); it != pics.end(); ++it)
+            if (it->second) UiImageRelease(dev, it->second);
+    }
+    HiresPackImageForget();
+    xb_audio_ui_sound(XB_SFX_BACK);
+}
+
+// ---- Settings > HD textures (ROM list): the hub, and "Optimize my pack" ----
+// The packs installed (every game's folder): how many, their megabytes.
+static void hires_installed_total(int *count, unsigned *kb)
+{
+    char pattern[200];
+    WIN32_FIND_DATAA fd, fd2;
+    HANDLE h, h2;
+    *count = 0;
+    *kb = 0;
+    _snprintf(pattern, sizeof(pattern) - 1, "%s\\*", s_hiresDir);
+    pattern[sizeof(pattern) - 1] = 0;
+    h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do
+    {
+        char sub[260];
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == '.') continue;
+        _snprintf(sub, sizeof(sub) - 1, "%s\\%s\\*.hts", s_hiresDir, fd.cFileName);
+        sub[sizeof(sub) - 1] = 0;
+        h2 = FindFirstFileA(sub, &fd2);
+        if (h2 == INVALID_HANDLE_VALUE) continue;
+        do { (*count)++; *kb += fd2.nFileSizeLow >> 10; } while (FindNextFileA(h2, &fd2));
+        FindClose(h2);
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+}
+
+// The import folder: <hires_texture>\import, where the user copies a pack of their own.
+static void hires_import_dir(char *out, size_t size)
+{
+    _snprintf(out, size - 1, "%s\\import", s_hiresDir);
+    out[size - 1] = 0;
+}
+
+struct ImportItem { std::string name; int kind; unsigned kb; };
+
+static void import_scan(std::vector<ImportItem> &items)
+{
+    char dir[200], pattern[220];
+    WIN32_FIND_DATAA fd;
+    HANDLE h;
+    items.clear();
+    hires_import_dir(dir, sizeof(dir));
+    _snprintf(pattern, sizeof(pattern) - 1, "%s\\*", dir);
+    pattern[sizeof(pattern) - 1] = 0;
+    h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do
+    {
+        ImportItem it;
+        int isDir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        if (fd.cFileName[0] == '.') continue;
+        it.kind = HiresImportKind(fd.cFileName, isDir);
+        if (isDir)
+        {
+            char sub[260];
+            _snprintf(sub, sizeof(sub) - 1, "%s\\%s", dir, fd.cFileName);
+            sub[sizeof(sub) - 1] = 0;
+            if (!HiresPngPresent(sub)) it.kind = 0;   // a folder without a PNG pack in it
+        }
+        if (!it.kind) continue;
+        it.name = fd.cFileName;
+        it.kb = isDir ? 0 : fd.nFileSizeLow >> 10;
+        items.push_back(it);
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+}
+
+// A centred list screen's frame: the backdrop, the title, its step line, a panel.
+static void hub_frame(const char *title, const char *step, float x, float y, float w, float h)
+{
+    UiBackdrop();
+    browser_effect();
+    UiText(UI_BOLD, 30, x, y - 52, UI_COL_TEXT, title, UI_LEFT);
+    if (step) UiText(UI_REGULAR, 18, x + w, y - 52, UI_COL_ACCENT_HI, step, UI_RIGHT);
+    edge_glow(x, y, w, h, 22);
+    UiPanel(x, y, w, h, 22);
+}
+
+// Step 2: the game the pack is for, from the ROM list (the one selected there first). Its
+// header's name - what the packs and the game's folder go by - is shown for the one chosen.
+// Returns 1 with that name in romName.
+static int import_pick_game(IDirect3DDevice9 *dev, const char *packName, char *romName, size_t romSize)
+{
+    static UiAnim selAnim;
+    UiInput in;
+    std::vector<RomEntry> roms;
+    const int rows = 10;
+    int sel = 0, top = 0, k, n, infoFor = -1;
+    char internal[32] = "", step[96];
+    scan_roms(&roms);
+    std::sort(roms.begin(), roms.end(), rom_less);
+    n = (int)roms.size();
+    for (k = 0; k < n; k++)
+        if (!_stricmp(roms[k].file.c_str(), s_browserSel.c_str())) sel = k;
+    UiInputInit(&in);
+    for (;;)
+    {
+        const float w = 820, h = 520, x = (UI_WIDTH - w) * 0.5f, y = 112, rowH = 42, pad = 14;
+        WORD down = UiInputPoll(&in);
+        float sy;
+        if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) { xb_audio_ui_sound(XB_SFX_BACK); return 0; }
+        if (n && (down & (XINPUT_GAMEPAD_DPAD_UP | XINPUT_GAMEPAD_DPAD_DOWN)))
+        {
+            sel = (sel + ((down & XINPUT_GAMEPAD_DPAD_DOWN) ? 1 : n - 1)) % n;
+            xb_audio_ui_sound(XB_SFX_MOVE);
+        }
+        if (n && (down & (XINPUT_GAMEPAD_LEFT_SHOULDER | XINPUT_GAMEPAD_RIGHT_SHOULDER)))
+        {
+            sel = (down & XINPUT_GAMEPAD_RIGHT_SHOULDER) ? (sel + rows < n ? sel + rows : n - 1) : (sel > rows ? sel - rows : 0);
+            xb_audio_ui_sound(XB_SFX_PAGE);
+        }
+        if (n && infoFor != sel)
+        {
+            // The highlighted game's header name (one header read as the selection moves).
+            H64Rom rom;
+            internal[0] = 0;
+            if (read_header(roms[sel].file.c_str(), &rom)) { strncpy(internal, rom.name, sizeof(internal) - 1); internal[sizeof(internal) - 1] = 0; h64_rom_free(&rom); }
+            infoFor = sel;
+        }
+        if (n && (down & XINPUT_GAMEPAD_A))
+        {
+            if (!internal[0]) xb_audio_ui_sound(XB_SFX_ERROR);   // not an N64 ROM it can read
+            else
+            {
+                strncpy(romName, internal, romSize - 1);
+                romName[romSize - 1] = 0;
+                xb_audio_ui_sound(XB_SFX_SELECT);
+                return 1;
+            }
+        }
+        if (sel < top) top = sel;
+        if (sel >= top + rows) top = sel - rows + 1;
+        dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
+        UiBegin(dev);
+        _snprintf(step, sizeof(step) - 1, "%s", Tr(T_IMPORT_STEP2));
+        step[sizeof(step) - 1] = 0;
+        hub_frame(Tr(T_IMPORT_TITLE), step, x, y, w, h);
+        {
+            char line[200], fit[200];
+            _snprintf(line, sizeof(line) - 1, Tr(T_IMPORT_PACK), packName);
+            line[sizeof(line) - 1] = 0;
+            UiTextFit(UI_REGULAR, 17, w - 48, line, fit, sizeof(fit));
+            UiText(UI_REGULAR, 17, x + 24, y + 26, UI_COL_TEXT2, fit, UI_LEFT);
+            UiRect(x + 24, y + 46, w - 48, 1, UI_COL_LINE);
+        }
+        if (!n) UiText(UI_REGULAR, 20, x + w * 0.5f, y + h * 0.5f, UI_COL_TEXT2, Tr(T_NO_ROM), UI_CENTER);
+        else
+        {
+            const float ly = y + 54;
+            sy = anim_step(&selAnim, ly + pad + (sel - top) * rowH, 0);
+            selection_bar(x + 10, sy + 1, w - 20, rowH - 2);
+            for (k = 0; k < rows && top + k < n; k++)
+            {
+                char fit[160];
+                const int s1 = top + k == sel;
+                UiTextFit(s1 ? UI_BOLD : UI_REGULAR, 19, w - 300, roms[top + k].shown.c_str(), fit, sizeof(fit));
+                UiText(s1 ? UI_BOLD : UI_REGULAR, 19, x + 30, ly + pad + k * rowH + rowH * 0.5f, s1 ? UI_COL_TEXT : UI_COL_TEXT2, fit, UI_LEFT);
+                if (s1 && internal[0])
+                    UiText(UI_REGULAR, 15, x + w - 28, ly + pad + k * rowH + rowH * 0.5f, UI_COL_ACCENT_HI, internal, UI_RIGHT);
+            }
+        }
+        UiScreenFooter(Tr(T_FOOT_IMPORT_GAME));
+        UiEnd();
+        dev->Present(NULL, NULL, NULL, NULL);
+        Sleep(16);
+    }
+}
+
+// Settings > HD textures > Optimize my pack: step 1, the pack (what the user copied into the
+// import folder); step 2, its game; then it is made a DXT pack in that game's folder, named
+// after the file and made the game's pack in use (the download screen's bar; Y: background).
+static void import_screen(IDirect3DDevice9 *dev, Config *c)
+{
+    static UiAnim selAnim;
+    UiInput in;
+    std::vector<ImportItem> items;
+    char dir[200];
+    const int rows = 9;
+    int sel = 0, top = 0, k;
+    hires_import_dir(dir, sizeof(dir));
+    mkdir_p(dir);
+    import_scan(items);
+    UiInputInit(&in);
+    for (;;)
+    {
+        const float w = 820, h = 520, x = (UI_WIDTH - w) * 0.5f, y = 112, rowH = 52, pad = 14;
+        const int n = (int)items.size();
+        WORD down = UiInputPoll(&in);
+        if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) { xb_audio_ui_sound(XB_SFX_BACK); return; }
+        if (down & XINPUT_GAMEPAD_Y) { import_scan(items); sel = top = 0; xb_audio_ui_sound(XB_SFX_ACTION); continue; }
+        if (n && (down & (XINPUT_GAMEPAD_DPAD_UP | XINPUT_GAMEPAD_DPAD_DOWN)))
+        {
+            sel = (sel + ((down & XINPUT_GAMEPAD_DPAD_DOWN) ? 1 : n - 1)) % n;
+            xb_audio_ui_sound(XB_SFX_MOVE);
+        }
+        if (n && (down & XINPUT_GAMEPAD_A))
+        {
+            char rom[32];
+            if (HiresPackBusy()) { hires_download_screen(dev, c, 0, NULL); UiInputInit(&in); continue; }   // one at a time: that one
+            if (import_pick_game(dev, items[sel].name.c_str(), rom, sizeof(rom)))
+            {
+                char src[260], folder[64], dest[192];
+                _snprintf(src, sizeof(src) - 1, "%s\\%s", dir, items[sel].name.c_str());
+                src[sizeof(src) - 1] = 0;
+                HiresFolderName(rom, folder, sizeof(folder));
+                _snprintf(dest, sizeof(dest) - 1, "%s\\%s", s_hiresDir, folder);
+                dest[sizeof(dest) - 1] = 0;
+                mkdir_p(s_hiresDir);
+                HiresImportStart(src, items[sel].kind == HIMPORT_PNG, rom, dest);
+                strncpy(s_hiresRom, rom, sizeof(s_hiresRom) - 1);   // the download screen's game: this one
+                s_hiresRom[sizeof(s_hiresRom) - 1] = 0;
+                hires_download_screen(dev, c, 0, NULL);   // its bar (busy: from the bar on)
+                hd_forget();
+            }
+            UiInputInit(&in);
+            continue;
+        }
+        if (sel < top) top = sel;
+        if (sel >= top + rows) top = sel - rows + 1;
+        dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
+        UiBegin(dev);
+        hub_frame(Tr(T_IMPORT_TITLE), Tr(T_IMPORT_STEP1), x, y, w, h);
+        if (!n)
+        {
+            // Nothing to optimize yet: where to put a pack, and how.
+            const float cx = x + w * 0.5f;
+            menu_icon(UI_ICON_LOAD, cx, y + 150, UI_COL_ACCENT_HI);
+            UiText(UI_BOLD, 24, cx, y + 210, UI_COL_TEXT, Tr(T_IMPORT_EMPTY), UI_CENTER);
+            UiText(UI_REGULAR, 18, cx, y + 260, UI_COL_TEXT2, Tr(T_IMPORT_HOWTO), UI_CENTER);
+            UiText(UI_BOLD, 19, cx, y + 296, UI_COL_ACCENT_HI, dir, UI_CENTER);
+            UiText(UI_REGULAR, 17, cx, y + 336, UI_COL_TEXT3, Tr(T_IMPORT_HOWTO2), UI_CENTER);
+        }
+        else
+        {
+            float sy = anim_step(&selAnim, y + pad + (sel - top) * rowH, 0);
+            selection_bar(x + 10, sy + 1, w - 20, rowH - 2);
+            for (k = 0; k < rows && top + k < n; k++)
+            {
+                const ImportItem *it = &items[top + k];
+                const float ry = y + pad + k * rowH, cy = ry + rowH * 0.5f;
+                const int s1 = top + k == sel;
+                static const char *const kinds[] = { "", "ZIP", "7Z", "HTS", "PNG" };
+                char fit[200], size[48];
+                float bw = UiTextWidth(UI_BOLD, 13, kinds[it->kind]) + 16;
+                UiRoundRing(x + 28, cy - 11, bw, 22, 6, 1.3f, UiAlpha(UI_COL_ACCENT_HI, s1 ? 1.0f : 0.7f));
+                UiText(UI_BOLD, 13, x + 28 + bw * 0.5f, cy, UI_COL_ACCENT_HI, kinds[it->kind], UI_CENTER);
+                UiTextFit(s1 ? UI_BOLD : UI_REGULAR, 19, w - 300, it->name.c_str(), fit, sizeof(fit));
+                UiText(s1 ? UI_BOLD : UI_REGULAR, 19, x + 44 + bw, cy, s1 ? UI_COL_TEXT : UI_COL_TEXT2, fit, UI_LEFT);
+                if (it->kind == HIMPORT_PNG) _snprintf(size, sizeof(size) - 1, "%s", Tr(T_IMPORT_FOLDER));
+                else _snprintf(size, sizeof(size) - 1, "%.1f MB", it->kb / 1024.0f);
+                size[sizeof(size) - 1] = 0;
+                UiText(UI_REGULAR, 16, x + w - 30, cy, UI_COL_TEXT3, size, UI_RIGHT);
+            }
+        }
+        UiScreenFooter(Tr(n ? T_FOOT_IMPORT : T_FOOT_IMPORT_EMPTY));
+        UiEnd();
+        dev->Present(NULL, NULL, NULL, NULL);
+        Sleep(16);
+    }
+}
+
+// Settings > HD textures: three choices on cards - download the community's packs (the
+// Packs screen), optimize a pack of one's own, HD textures on or off - and what is installed.
+static void hires_hub(IDirect3DDevice9 *dev, Config *c)
+{
+    static UiAnim selAnim;
+    UiInput in;
+    int sel = 0, count = 0, games = 0, k, j;
+    unsigned kb = 0;
+    hires_installed_total(&count, &kb);
+    for (k = 0; k < HiresPackTotal(); k++)
+    {
+        // The catalog's games: each counted once.
+        for (j = 0; j < k && strcmp(HiresPackAt(j)->romName, HiresPackAt(k)->romName); j++) {}
+        if (j == k) games++;
+    }
+    UiInputInit(&in);
+    xb_audio_ui_sound(XB_SFX_OPEN);
+    for (;;)
+    {
+        const float w = 820, x = (UI_WIDTH - w) * 0.5f, y = 150, cardH = 112, gap = 18;
+        WORD down = UiInputPoll(&in);
+        float sy;
+        char line[160];
+        if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) { xb_audio_ui_sound(XB_SFX_BACK); return; }
+        if (down & (XINPUT_GAMEPAD_DPAD_UP | XINPUT_GAMEPAD_DPAD_DOWN))
+        {
+            sel = (sel + ((down & XINPUT_GAMEPAD_DPAD_DOWN) ? 1 : 2)) % 3;
+            xb_audio_ui_sound(XB_SFX_MOVE);
+        }
+        if (down & XINPUT_GAMEPAD_A)
+        {
+            if (sel == 0) packs_screen(dev, c);
+            else if (sel == 1) import_screen(dev, c);
+            else { c->hiTex = !c->hiTex; xb_audio_ui_sound(c->hiTex ? XB_SFX_VALUE_UP : XB_SFX_VALUE_DOWN); }
+            if (sel != 2) { hd_forget(); hires_installed_total(&count, &kb); }
+            UiInputInit(&in);
+            continue;
+        }
+        if ((down & (XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT)) && sel == 2)
+        {
+            c->hiTex = !c->hiTex;
+            xb_audio_ui_sound(c->hiTex ? XB_SFX_VALUE_UP : XB_SFX_VALUE_DOWN);
+        }
+        dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
+        UiBegin(dev);
+        UiBackdrop();
+        browser_effect();
+        UiText(UI_BOLD, 34, x, y - 74, UI_COL_TEXT, Tr(T_HIRES_SECTION), UI_LEFT);
+        UiText(UI_REGULAR, 18, x, y - 38, UI_COL_TEXT2, Tr(T_HUB_SUBTITLE), UI_LEFT);
+        sy = anim_step(&selAnim, y + sel * (cardH + gap), 0);
+        for (k = 0; k < 3; k++)
+        {
+            const float cy = y + k * (cardH + gap);
+            static const unsigned char icons[] = { UI_ICON_LOAD, UI_ICON_SLIDERS, UI_ICON_HD };
+            static const int titles[] = { T_HUB_DOWNLOAD, T_HUB_IMPORT, T_HUB_TOGGLE };
+            const int s1 = k == sel;
+            UiPanel(x, cy, w, cardH, 20);
+            if (s1)
+            {
+                float a = selection_pulse();
+                selection_glow(x - 3, sy - 3, w + 6, cardH + 6, 22, a);
+                UiRoundRing(x - 3, sy - 3, w + 6, cardH + 6, 22, 3.0f, SEL_RING(a));
+            }
+            UiCircle(x + 62, cy + cardH * 0.5f, 30, s1 ? UiAlpha(UI_COL_ACCENT, 0.35f) : D3DCOLOR_ARGB(30, 255, 255, 255));
+            menu_icon(icons[k], x + 62, cy + cardH * 0.5f, s1 ? UI_COL_TEXT : UI_COL_TEXT2);
+            UiText(UI_BOLD, 24, x + 116, cy + 40, s1 ? UI_COL_TEXT : UI_COL_TEXT2, Tr(titles[k]), UI_LEFT);
+            if (k == 0) _snprintf(line, sizeof(line) - 1, Tr(T_HUB_DOWNLOAD_D), HiresPackTotal(), games);
+            else _snprintf(line, sizeof(line) - 1, "%s", Tr(k == 1 ? T_HUB_IMPORT_D : T_HUB_TOGGLE_D));
+            line[sizeof(line) - 1] = 0;
+            UiText(UI_REGULAR, 17, x + 116, cy + 74, UI_COL_TEXT3, line, UI_LEFT);
+            if (k == 2) draw_switch(x + w - 32, cy + cardH * 0.5f, c->hiTex, s1);
+            else icon_tri(x + w - 40, cy + cardH * 0.5f, 12, 1, s1 ? UI_COL_ACCENT_HI : UI_COL_TEXT3);   // opens a screen
+        }
+        _snprintf(line, sizeof(line) - 1, Tr(T_HUB_INSTALLED), count, kb / 1024.0f);
+        line[sizeof(line) - 1] = 0;
+        UiText(UI_REGULAR, 17, x + 8, y + 3 * (cardH + gap) + 18, UI_COL_TEXT2, line, UI_LEFT);
+        if (HiresPackBusy())
+        {
+            const HiresPackEntry *e = HiresPackJob();
+            unsigned d = 0, t = 0;
+            HiresPackStatus(&d, &t, NULL, NULL, 0);
+            _snprintf(line, sizeof(line) - 1, "%s  " UI_CH_MIDDOT "  %d%%", e ? e->title : "", t ? (int)(d * 100.0 / t) : 0);
+            line[sizeof(line) - 1] = 0;
+            UiText(UI_REGULAR, 17, x + w - 8, y + 3 * (cardH + gap) + 18, UI_COL_ACCENT_HI, line, UI_RIGHT);
+        }
+        UiScreenFooter(Tr(sel == 2 ? T_FOOT_HUB_TOGGLE : T_FOOT_HUB));
+        UiEnd();
+        dev->Present(NULL, NULL, NULL, NULL);
+        Sleep(16);
+    }
+}
+
+// Before a game starts: when there is an HD pack for it to download and none
+// installed (hd == 1, RomInfo::hd), or a PNG pack of its own to convert (hd == 3), the offer - A downloads it (its screen above), B
+// plays without, X plays without and never asks for this game again. The game
+// starts after it either way.
+static void hires_offer(IDirect3DDevice9 *dev, Config *c, const char *rom, int hd)
+{
+    UiInput in;
+    const HiresPackEntry *e;
+    char line[192];
+    if ((hd != 1 && hd != 3) || strcmp(s_hiresRom, rom)) return;   // s_hiresRom: this ROM's (rom_details)
+    hires_noask_load();
+    if (HiresPackBusy() || s_hiresNoAsk.count(rom)) return;   // one at a time
+    e = hd == 1 ? HiresPackGet(rom, 0) : NULL;   // NULL: its own PNG pack
+    if (hd == 1 && !e) return;
+    UiInputInit(&in);
+    xb_audio_ui_sound(XB_SFX_NOTIFY);
+    for (;;)
+    {
+        const float w = 780, h = 300, x = (UI_WIDTH - w) * 0.5f, y = (UI_HEIGHT - h) * 0.5f, cx = x + w * 0.5f;
+        WORD down = UiInputPoll(&in);
+        if (down & XINPUT_GAMEPAD_A) { hires_download_screen(dev, c, hd == 3, NULL); hd_forget(); return; }
+        if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) return;
+        if (down & XINPUT_GAMEPAD_X) { hires_noask_add(rom); return; }
+        dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
+        UiBegin(dev);
+        UiBackdrop();
+        browser_effect();
+        edge_glow(x, y, w, h, 22);
+        UiPanel(x, y, w, h, 22);
+        hd_chip(cx - (UiTextWidth(UI_BOLD, 15, Tr(T_HD_AVAILABLE)) + 26) * 0.5f, y + 46, 1, 1.0f);
+        UiText(UI_BOLD, 30, cx, y + 92, UI_COL_TEXT, Tr(T_HIRES_OFFER), UI_CENTER);
+        if (e) _snprintf(line, sizeof(line) - 1, "%s  " UI_CH_MIDDOT "  %s", e->title, e->author);
+        else _snprintf(line, sizeof(line) - 1, "%s", Tr(T_HIRES_PNG_OWN));
+        line[sizeof(line) - 1] = 0;
+        UiText(UI_REGULAR, 19, cx, y + 132, UI_COL_TEXT2, line, UI_CENTER);
+        UiText(UI_REGULAR, 19, cx, y + 178, UI_COL_TEXT, Tr(e ? T_HIRES_OFFER_TEXT : T_HIRES_PNG_OFFER_TEXT), UI_CENTER);
+        UiText(UI_REGULAR, 17, cx, y + 210, UI_COL_TEXT3, Tr(e ? T_HIRES_DL_NOTE : T_HIRES_PNG_NOTE), UI_CENTER);
+        UiRect(x + 24, y + h - 56, w - 48, 1, UI_COL_LINE);
+        UiFooter(x + 40, y + h - 28, Tr(e ? T_FOOT_HIRES_OFFER : T_FOOT_HIRES_PNG_OFFER));
+        UiEnd();
+        dev->Present(NULL, NULL, NULL, NULL);
+        Sleep(16);
+    }
+}
+
 // The header of one ROM, for the details card.
 struct RomInfo
 {
     int ok;
+    int hd;   // its HD texture pack: 2 installed, 1 one to download (xb_hirespack.cpp), 0 none
     char name[24], code[8], size[16], save[128], folder[64], region[32];
 };
 
@@ -8023,6 +9074,7 @@ static void rom_details(const char *path, RomInfo *info)
     info->size[sizeof(info->size) - 1] = 0;
     info->save[sizeof(info->save) - 1] = 0;
     HiresScanPacks(rom.name);   // keeps the Graphics settings' pack picker matching this ROM
+    info->hd = HiresPackCount() ? 2 : hires_png_here() ? 3 : HiresPackCountFor(rom.name) ? 1 : 0;
     h64_rom_free(&rom);
 }
 
@@ -8081,6 +9133,25 @@ static void settings_loop(IDirect3DDevice9 *dev, Config *c, const char *settings
                 ui_from_config(c);
             }
             settings_values(&m, c);
+            UiInputInit(&in);
+            continue;
+        }
+        if (r == SET_HIRES_HUB)
+        {
+            // Settings > HD textures: its own screen.
+            hires_hub(dev, c);
+            settings_values(&m, c);
+            UiInputInit(&in);
+            continue;
+        }
+        if (r == SET_HIRES_DL || r == SET_HIRES_PNG)
+        {
+            // Settings > Graphics > Download HD pack.
+            int row = m.sel;
+            hires_download_screen(dev, c, r == SET_HIRES_PNG, NULL);
+            hd_forget();
+            settings_graphics(&m, c);   // the HD textures row shows the new pack
+            m.sel = row < m.count ? row : m.count - 1;
             UiInputInit(&in);
             continue;
         }
@@ -8501,6 +9572,121 @@ static float chip(float x, float cy, const char *text, float a)
     return w;
 }
 
+// A region's flag (its English name, the first of a list), w x h at (x, y); 0 when it has none.
+static int flag_draw(float x, float y, float w, float h, const char *english, float a)
+{
+    static const char *const names[] = { "USA", "Japan", "Europe", "Germany", "France", "Italy", "Spain", "Australia",
+                                         "Brazil", "China", "Korea", "Netherlands", "Scandinavia", "Canada" };
+    char first[32];
+    int k, i, n = -1;
+    const D3DCOLOR white = UiAlpha(D3DCOLOR_ARGB(255, 245, 245, 245), a), red = UiAlpha(D3DCOLOR_ARGB(255, 205, 40, 50), a);
+    const D3DCOLOR blue = UiAlpha(D3DCOLOR_ARGB(255, 30, 60, 150), a), gold = UiAlpha(D3DCOLOR_ARGB(255, 250, 205, 40), a);
+    for (k = 0; english && english[k] && english[k] != ',' && english[k] != '/' && k < (int)sizeof(first) - 1; k++) first[k] = english[k];
+    first[k] = 0;
+    for (i = 0; i < (int)(sizeof(names) / sizeof(names[0])); i++)
+        if (!_stricmp(first, names[i])) n = i;
+    if (n < 0) return 0;
+    switch (n)
+    {
+    case 0:   // USA: 7 stripes, the blue canton
+        for (k = 0; k < 7; k++) UiRect(x, y + h * k / 7, w, h / 7 + 0.3f, k & 1 ? white : red);
+        UiRect(x, y, w * 0.45f, h * 4 / 7, blue);
+        break;
+    case 1: UiRect(x, y, w, h, white); UiCircle(x + w * 0.5f, y + h * 0.5f, h * 0.3f, red); break;
+    case 2:   // Europe: a ring of 12 stars (dots) on blue
+        UiRect(x, y, w, h, blue);
+        for (k = 0; k < 12; k++)
+            UiCircle(x + w * 0.5f + cosf(k * 0.5236f) * h * 0.32f, y + h * 0.5f + sinf(k * 0.5236f) * h * 0.32f, 0.9f, gold);
+        break;
+    case 3:
+        UiRect(x, y, w, h / 3, UiAlpha(D3DCOLOR_ARGB(255, 20, 20, 20), a));
+        UiRect(x, y + h / 3, w, h / 3, red);
+        UiRect(x, y + h * 2 / 3, w, h / 3 + 0.3f, gold);
+        break;
+    case 4: case 5:   // France, Italy: three bands across
+        UiRect(x, y, w / 3, h, n == 4 ? blue : UiAlpha(D3DCOLOR_ARGB(255, 0, 140, 70), a));
+        UiRect(x + w / 3, y, w / 3, h, white);
+        UiRect(x + w * 2 / 3, y, w / 3 + 0.3f, h, red);
+        break;
+    case 6: UiRect(x, y, w, h, red); UiRect(x, y + h / 4, w, h / 2, gold); break;
+    case 7:   // Australia: blue, a small cross in its corner, white stars
+        UiRect(x, y, w, h, blue);
+        UiRect(x, y + h * 0.2f, w * 0.45f, h * 0.12f, red);
+        UiRect(x + w * 0.19f, y, w * 0.08f, h * 0.5f, red);
+        UiCircle(x + w * 0.72f, y + h * 0.3f, 1.0f, white);
+        UiCircle(x + w * 0.8f, y + h * 0.7f, 1.0f, white);
+        UiCircle(x + w * 0.25f, y + h * 0.75f, 1.3f, white);
+        break;
+    case 8:   // Brazil: green, a gold diamond, a blue disc
+        UiRect(x, y, w, h, UiAlpha(D3DCOLOR_ARGB(255, 0, 150, 60), a));
+        icon_tri(x + w * 0.5f, y + h * 0.32f, h * 0.36f, 0, gold);
+        icon_tri(x + w * 0.5f, y + h * 0.68f, h * 0.36f, 2, gold);
+        UiCircle(x + w * 0.5f, y + h * 0.5f, h * 0.2f, blue);
+        break;
+    case 9:
+        UiRect(x, y, w, h, red);
+        UiCircle(x + w * 0.22f, y + h * 0.3f, h * 0.14f, gold);
+        for (k = 0; k < 4; k++) UiCircle(x + w * 0.4f, y + h * (0.15f + k * 0.17f), 0.8f, gold);
+        break;
+    case 10:   // Korea: white, the red and blue disc
+        UiRect(x, y, w, h, white);
+        UiCircle(x + w * 0.5f, y + h * 0.5f, h * 0.27f, blue);
+        UiCircle(x + w * 0.5f, y + h * 0.42f, h * 0.2f, red);
+        break;
+    case 11: UiRect(x, y, w, h / 3, red); UiRect(x, y + h / 3, w, h / 3, white); UiRect(x, y + h * 2 / 3, w, h / 3 + 0.3f, blue); break;
+    case 12: UiRect(x, y, w, h, blue); UiRect(x, y + h * 0.4f, w, h * 0.2f, gold); UiRect(x + w * 0.3f, y, w * 0.14f, h, gold); break;
+    case 13: UiRect(x, y, w, h, white); UiRect(x, y, w / 4, h, red); UiRect(x + w * 0.75f, y, w / 4, h, red); UiCircle(x + w * 0.5f, y + h * 0.5f, h * 0.22f, red); break;
+    }
+    UiRoundRing(x - 0.5f, y - 0.5f, w + 1, h + 1, 1.5f, 1.0f, UiAlpha(D3DCOLOR_ARGB(70, 0, 0, 0), a));
+    return 1;
+}
+
+// A chip with a small symbol before its text: the genre (a grid of four), the players
+// (a figure) or the region (its flag, english: its English name; text only without one).
+enum { CHIP_GENRE = 1, CHIP_PLAYERS, CHIP_REGION };
+static float chip_width(const char *text, int kind, const char *english)
+{
+    (void)english;
+    return UiTextWidth(UI_BOLD, 15, text) + 26 + (kind == CHIP_REGION ? 28 : 20);
+}
+
+static float chip_icon(float x, float cy, const char *text, int kind, const char *english, float a)
+{
+    float w = chip_width(text, kind, english), h = 28, gx = x + 12;
+    D3DCOLOR g = UiAlpha(UI_COL_TEXT2, a);
+    UiRoundRect(x, cy - h * 0.5f, w, h, h * 0.5f, UiAlpha(D3DCOLOR_ARGB(255, 50, 53, 68), a), UiAlpha(D3DCOLOR_ARGB(255, 42, 45, 58), a));
+    UiRoundRing(x, cy - h * 0.5f, w, h, h * 0.5f, 1.0f, UiAlpha(D3DCOLOR_ARGB(34, 255, 255, 255), a));
+    if (kind == CHIP_GENRE)
+    {
+        UiRoundRect(gx, cy - 6, 5, 5, 1.2f, g, g);
+        UiRoundRect(gx + 7, cy - 6, 5, 5, 1.2f, g, g);
+        UiRoundRect(gx, cy + 1, 5, 5, 1.2f, g, g);
+        UiRoundRect(gx + 7, cy + 1, 5, 5, 1.2f, UiAlpha(UI_COL_ACCENT_HI, a), UiAlpha(UI_COL_ACCENT, a));
+    }
+    else if (kind == CHIP_PLAYERS)
+    {
+        UiCircle(gx + 6, cy - 3.5f, 3.2f, g);
+        UiRoundRect(gx + 0.5f, cy + 1, 11, 6, 3, g, g);
+    }
+    else if (kind == CHIP_REGION && !flag_draw(gx - 1, cy - 6.5f, 20, 13, english, a))
+        UiRoundRing(gx + 1, cy - 7, 14, 14, 7, 1.6f, g);   // no flag: a globe's ring
+    UiText(UI_BOLD, 15, x + w - 13, cy, UiAlpha(UI_COL_TEXT2, a), text, UI_RIGHT);
+    return w;
+}
+
+// The game's HD texture pack (RomInfo::hd): "HD" in the accent when installed,
+// "HD available" outlined when there is one to download; 0 wide when none.
+static float hd_chip(float x, float cy, int hd, float a)
+{
+    const char *text = Tr(hd == 2 ? T_HD_INSTALLED : T_HD_AVAILABLE);
+    float w = UiTextWidth(UI_BOLD, 15, text) + 26, h = 28;
+    if (!hd) return 0;
+    if (hd == 2) UiRoundRect(x, cy - h * 0.5f, w, h, h * 0.5f, SEL_HI((int)(255 * a)), SEL_LO((int)(255 * a)));
+    else UiRoundRing(x, cy - h * 0.5f, w, h, h * 0.5f, 1.5f, UiAlpha(UI_COL_ACCENT_HI, a));
+    UiText(UI_BOLD, 15, x + w * 0.5f, cy, UiAlpha(hd == 2 ? UI_COL_TEXT : UI_COL_ACCENT_HI, a), text, UI_CENTER);
+    return w;
+}
+
 // One label / value pair of the card's last row.
 static void detail(float x, float y, float w, const char *label, const char *value, float a)
 {
@@ -8606,19 +9792,20 @@ static void card_draw(const char *shown, const RomInfo *ri, const ArtView *v, in
     // ---- Genre, players, region.
     {
         float cxp = ix;
-        const char *region = TrRegion(gi && gi->region[0] ? gi->region : ri->region);
+        const char *regionEn = gi && gi->region[0] ? gi->region : ri->region, *region = TrRegion(regionEn);
         char players[64];
         int any = 0;
-        if (gi && gi->genre[0]) { cxp += chip(cxp, ty, gi->genre, a) + 8; any = 1; }
+        if (ri->ok && ri->hd) { cxp += hd_chip(cxp, ty, ri->hd, a) + 8; any = 1; }
+        if (gi && gi->genre[0]) { cxp += chip_icon(cxp, ty, gi->genre, CHIP_GENRE, NULL, a) + 8; any = 1; }
         if (gi && gi->players[0])
         {
             if (!strcmp(gi->players, "1")) strcpy(players, Tr(T_ONE_PLAYER));
             else _snprintf(players, sizeof(players) - 1, Tr(T_N_PLAYERS), gi->players);
             players[sizeof(players) - 1] = 0;
-            cxp += chip(cxp, ty, players, a) + 8;
+            cxp += chip_icon(cxp, ty, players, CHIP_PLAYERS, NULL, a) + 8;
             any = 1;
         }
-        if (region[0] && cxp + UiTextWidth(UI_BOLD, 15, region) + 26 <= ix + iw) { cxp += chip(cxp, ty, region, a) + 8; any = 1; }
+        if (region[0] && cxp + chip_width(region, CHIP_REGION, regionEn) <= ix + iw) { cxp += chip_icon(cxp, ty, region, CHIP_REGION, regionEn, a) + 8; any = 1; }
         if (any) ty += 28;
     }
 
@@ -9039,6 +10226,49 @@ static void fx_xmb(float t)
     }
 }
 
+// PSP: its XMB wave - a few wide sheets of light, translucent, folding over each other
+// across the screen, each with a bright soft crest and a fainter lower edge, and a glow
+// under them. The sheets are filled in strips; every edge is a smooth line (UiPolyline,
+// soft) over them, so neither the strips' joints nor their slanted sides show a saw-tooth.
+static void fx_psp(float t)
+{
+    const int sheets = 5;
+    float top[XMB_PTS], bot[XMB_PTS], pts[XMB_PTS * 2];
+    int i, j;
+    for (j = 1; j < XMB_PTS; j++)
+    {
+        // The glow under the wave: wide, faint, following its middle.
+        float x0 = (float)((j - 1) * XMB_STEP), x1 = (float)(j * XMB_STEP);
+        float m0 = 390 + 60 * sinf(x0 * 0.0035f + t * 0.24f), m1 = 390 + 60 * sinf(x1 * 0.0035f + t * 0.24f);
+        UiStrip(x0, m0 - 40, m0 + 200, x1, m1 - 40, m1 + 200, fx_pal(0.5f, 10), fx_pal(0.5f, 0));
+    }
+    for (i = 0; i < sheets; i++)
+    {
+        float f = (float)i / (sheets - 1), ph = i * 1.7f;
+        for (j = 0; j < XMB_PTS; j++)
+        {
+            float x = (float)(j * XMB_STEP);
+            float y = 360 + i * 12 + 60 * sinf(x * 0.0035f + t * (0.22f + 0.04f * i) + ph) + 24 * sinf(x * 0.0083f - t * 0.31f + ph * 0.6f);
+            float h = 18 + 46 * (0.5f + 0.5f * sinf(x * 0.0026f + t * 0.17f + ph * 1.3f));   // the sheet widens and thins: its fold
+            top[j] = y;
+            bot[j] = y + h;
+        }
+        for (j = 1; j < XMB_PTS; j++)
+        {
+            float x0 = (float)((j - 1) * XMB_STEP), x1 = (float)(j * XMB_STEP);
+            UiStrip(x0, top[j - 1], bot[j - 1], x1, top[j], bot[j], fx_palw(f, 0.35f, 26), fx_palw(f, 0.35f, 4));
+        }
+        for (j = 0; j < XMB_PTS; j++)
+        {
+            pts[2 * j] = (float)(j * XMB_STEP);
+            pts[2 * j + 1] = top[j];
+        }
+        UiPolyline(pts, XMB_PTS, 1.4f, 1.6f, fx_palw(f, 0.55f, 120));   // its crest
+        for (j = 0; j < XMB_PTS; j++) pts[2 * j + 1] = bot[j];
+        UiPolyline(pts, XMB_PTS, 1.0f, 1.6f, fx_palw(f, 0.35f, 28));    // its lower edge
+    }
+}
+
 // PS4: wide bands of light sweeping slowly on the slant, each with a bright edge,
 // and fine particles rising through them.
 static void fx_ps4_flow(float t)
@@ -9422,6 +10652,7 @@ static const unsigned char s_fxDefault[BGFX_COUNT][3][3] = {
     { { 60, 90, 255 }, { 90, 200, 255 }, { 200, 80, 255 } },   // fractal
     { { 40, 140, 200 }, { 120, 220, 255 }, { 220, 250, 255 } }, // burst
     { { 255, 60, 170 }, { 110, 80, 255 }, { 60, 220, 255 } },  // hyperspace
+    { { 110, 160, 255 }, { 190, 220, 255 }, { 255, 255, 255 } }, // PSP (its default blue to white)
 };
 
 // The effect chosen (s_bgEffect: BGFX_*), right after UiBackdrop.
@@ -9478,6 +10709,7 @@ static void browser_effect(void)
     case BGFX_FRACTAL: fx_fractal(t); break;
     case BGFX_BURST: fx_burst(t); break;
     case BGFX_WARP: fx_warp(t); break;
+    case BGFX_PSP: fx_psp(t); break;
     }
 }
 
@@ -9600,7 +10832,7 @@ static void browser_draw(const std::vector<RomEntry> &roms, int sel, int top, in
         // A tab with no game in it (no favourites yet, an empty category).
         float cy = listY + listH * 0.5f;
         UiText(UI_BOLD, 24, listX + listW * 0.5f, cy - 20, UI_COL_TEXT, Tr(T_CAT_EMPTY), UI_CENTER);
-        UiText(UI_REGULAR, 19, listX + listW * 0.5f, cy + 20, UI_COL_TEXT2, Tr(s_tab == 1 ? T_FAV_HINT : T_CAT_HINT), UI_CENTER);
+        UiText(UI_REGULAR, 19, listX + listW * 0.5f, cy + 20, UI_COL_TEXT2, Tr(s_tab == 1 ? T_FAV_HINT : tab_is_hd(s_tab) ? T_CAT_HD_HINT : T_CAT_HINT), UI_CENTER);
     }
     else if (!n)
     {
@@ -9626,8 +10858,24 @@ static void browser_draw(const std::vector<RomEntry> &roms, int sel, int top, in
             if (fav_is(roms[top + i].file)) fav_star(thx + tw - 2, cy - th * 0.5f + 3, 10, 1.0f);
             UiTextFit(s ? UI_BOLD : UI_REGULAR, 21, textW, roms[top + i].shown.c_str(), buf, sizeof(buf));
             UiText(s ? UI_BOLD : UI_REGULAR, 21, thx + tw + 16, cy, s ? UI_COL_TEXT : UI_COL_TEXT2, buf, UI_LEFT);
-            if (rv && rv->hasInfo && rv->info.year[0])
-                UiText(UI_REGULAR, 16, listX + listW - (n > rows ? 32 : 20), cy, s ? UI_COL_TEXT2 : UI_COL_TEXT3, rv->info.year, UI_RIGHT);
+            {
+                // At the right: the year, and before it "HD" when the game has HD textures (filled:
+                // installed; outlined: to download or convert).
+                float right = listX + listW - (n > rows ? 32 : 20);
+                int hd = hd_of_file(roms[top + i].file);
+                if (rv && rv->hasInfo && rv->info.year[0])
+                {
+                    UiText(UI_REGULAR, 16, right, cy, s ? UI_COL_TEXT2 : UI_COL_TEXT3, rv->info.year, UI_RIGHT);
+                    right -= UiTextWidth(UI_REGULAR, 16, rv->info.year) + 10;
+                }
+                if (hd)
+                {
+                    float pw = UiTextWidth(UI_BOLD, 13, "HD") + 14, ph = 18;
+                    if (hd == 2) UiRoundRect(right - pw, cy - ph * 0.5f, pw, ph, ph * 0.5f, SEL_HI(s ? 255 : 200), SEL_LO(s ? 255 : 200));
+                    else UiRoundRing(right - pw, cy - ph * 0.5f, pw, ph, ph * 0.5f, 1.3f, UiAlpha(UI_COL_ACCENT_HI, s ? 1.0f : 0.75f));
+                    UiText(UI_BOLD, 13, right - pw * 0.5f, cy, hd == 2 ? UI_COL_TEXT : UI_COL_ACCENT_HI, "HD", UI_CENTER);
+                }
+            }
         }
         if (n > rows)
         {
@@ -10321,7 +11569,7 @@ static void cover_detail_draw(const RomEntry *rom, const RomInfo *ri, const ArtV
     const float gap = 36, textX = ix + boxW + gap, textW = (ix + iw) - textX;
     const H64GameInfo *gi = v && v->hasInfo && v->info.found ? &v->info : NULL;
     char titleBuf[1024], subtRaw[1024], subtFit[256], descBuf[1024];
-    const char *region = TrRegion(gi && gi->region[0] ? gi->region : ri->region);
+    const char *regionEn = gi && gi->region[0] ? gi->region : ri->region, *region = TrRegion(regionEn);
     char players[64];
     int titleLines, descLines = 0, hasSubt = 0, hasChips = 0;
     float titleH, subtH = 0, chipsH = 0, descH = 0, textColH, contentH;
@@ -10358,7 +11606,7 @@ static void cover_detail_draw(const RomEntry *rom, const RomInfo *ri, const ArtV
         else _snprintf(players, sizeof(players) - 1, Tr(T_N_PLAYERS), gi->players);
         players[sizeof(players) - 1] = 0;
     }
-    hasChips = (gi && gi->genre[0]) || players[0] || region[0];
+    hasChips = (gi && gi->genre[0]) || players[0] || region[0] || (ri->ok && ri->hd);
     if (hasChips) chipsH = 44;
 
     // ---- Measure: a few lines about the game (Wikipedia), capped so a long
@@ -10405,9 +11653,10 @@ static void cover_detail_draw(const RomEntry *rom, const RomInfo *ri, const ArtV
     if (hasChips)
     {
         float cxp = textX, cy = boxY + titleH + subtH;
-        if (gi && gi->genre[0]) cxp += chip(cxp, cy, gi->genre, 1.0f) + 8;
-        if (players[0]) cxp += chip(cxp, cy, players, 1.0f) + 8;
-        if (region[0] && cxp + UiTextWidth(UI_BOLD, 15, region) + 26 <= textX + textW) cxp += chip(cxp, cy, region, 1.0f) + 8;
+        if (ri->ok && ri->hd) cxp += hd_chip(cxp, cy, ri->hd, 1.0f) + 8;
+        if (gi && gi->genre[0]) cxp += chip_icon(cxp, cy, gi->genre, CHIP_GENRE, NULL, 1.0f) + 8;
+        if (players[0]) cxp += chip_icon(cxp, cy, players, CHIP_PLAYERS, NULL, 1.0f) + 8;
+        if (region[0] && cxp + chip_width(region, CHIP_REGION, regionEn) <= textX + textW) cxp += chip_icon(cxp, cy, region, CHIP_REGION, regionEn, 1.0f) + 8;
     }
     if (descLines > 0)
     {
@@ -10502,6 +11751,7 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
     // Every folder of Settings > Paths, there to be filled from the first start on; the ROMs' read from its own.
     paths_apply(c);
     paths_create(c);
+    hd_forget();   // a pack may have come in the background while a game ran
     scan_roms(&allRoms);
     s_romsTotal = (int)allRoms.size();
     for (i = 0; i < (int)allRoms.size(); i++) allPaths.push_back(allRoms[i].file.c_str());
@@ -10785,6 +12035,9 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
                 if (down & XINPUT_GAMEPAD_RIGHT_SHOULDER) sel = sel + rows < n ? sel + rows : n - 1;
                 if (down & XINPUT_GAMEPAD_A)
                 {
+                    // Its HD pack offered first, when there is one to download.
+                    if (detailsFor != sel) { rom_details(roms[sel].file.c_str(), &details); detailsFor = sel; }
+                    hires_offer(dev, c, details.name, details.ok ? details.hd : 0);
                     strncpy(path, roms[sel].file.c_str(), pathSize - 1);
                     path[pathSize - 1] = 0;
                     strncpy(c->lastRom, path, sizeof(c->lastRom) - 1);
@@ -10851,6 +12104,8 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
                 {
                     if (cover_detail_screen(dev, roms, sel, page, c->browserDesign))
                     {
+                        if (detailsFor != sel) { rom_details(roms[sel].file.c_str(), &details); detailsFor = sel; }
+                        hires_offer(dev, c, details.name, details.ok ? details.hd : 0);   // as the list's A press
                         strncpy(path, roms[sel].file.c_str(), pathSize - 1);
                         path[pathSize - 1] = 0;
                         strncpy(c->lastRom, path, sizeof(c->lastRom) - 1);
@@ -10950,6 +12205,23 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
                 page = n ? sel / grid_per_page(grid_layout(c->browserDesign)) : 0;
                 lastSel = detailsFor = -1;
             }
+        }
+        if (down & XINPUT_GAMEPAD_START)
+        {
+            // The Packs screen (every HD pack there is); the list's HD marks and tab may change.
+            packs_screen(dev, c);
+            hd_forget();
+            if (tab_is_hd(s_tab))
+            {
+                std::string keep = n ? roms[sel].file : std::string();
+                sel = browser_retab(allRoms, &roms, &paths, keep);
+                n = (int)roms.size();
+                top = sel >= rows ? sel - rows + 1 : 0;
+                page = n ? sel / grid_per_page(grid_layout(c->browserDesign)) : 0;
+            }
+            lastSel = detailsFor = -1;
+            UiInputInit(&in);
+            continue;
         }
         if (down & XINPUT_GAMEPAD_Y)
         {

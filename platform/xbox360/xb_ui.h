@@ -113,6 +113,9 @@ IDirect3DTexture9 *UiImageCreateDxt1(IDirect3DDevice9 *dev, const unsigned char 
 IDirect3DDevice9 *UiDevice(void);
 // Waits for the GPU to be done with it, then releases it (outside UiBegin/UiEnd).
 void UiImageRelease(IDirect3DDevice9 *dev, IDirect3DTexture9 *tex);
+// A JPEG, PNG or BMP file's bytes decoded to RGBA, at most maxW x maxH keeping its shape: a malloc'd
+// buffer (*w x *h), NULL when it cannot be read. Any thread (no device).
+unsigned char *UiDecodeImage(const unsigned char *enc, long size, int maxW, int maxH, int *w, int *h);
 // Draws the whole picture stretched over (x, y, w, h), corners rounded by `r`,
 // tinted by `color` (white: as it is; its alpha fades the picture).
 void UiImage(IDirect3DTexture9 *tex, float x, float y, float w, float h, float r, D3DCOLOR color);

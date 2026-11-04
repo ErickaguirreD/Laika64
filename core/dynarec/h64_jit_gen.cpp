@@ -2742,6 +2742,22 @@ H64JitBlock *h64_jit_compile(H64System *sys, u32 pc, u32 paddr)
     // the code memory has filled, where a branch of the page lands (splitTargets).
     u32 targets[1024 / 32];
     const u32 first = (paddr & 0xFFF) >> 2;
+    if (!j->splitTargets && sys->rom.size >= (32u << 20))
+    {
+        // A large ROM (Smash Remix, 64 MB) compiles each instruction ~3 times over and fills
+        // the code memory mid-game: its flush cost one frame 150 ms (a visible hitch). Split
+        // at the branch targets from the start instead, as that flush turns on anyway.
+        H64_INFO("[jit] %u MB ROM: blocks end at the branch targets of their page from the start", sys->rom.size >> 20);
+        j->splitTargets = 1;
+        if (!j->hotPermille)
+        {
+            // ... and the code memory used as a ring from the start (old code dropped a little
+            // at a time, h64_jit_make_room), split as such a game uses it (Smash Remix: 41% hot):
+            // otherwise its first fill is a full flush, the hitch again.
+            j->hotPermille = 410;
+            h64_jit_reset(sys);
+        }
+    }
     if (j->splitTargets) page_targets(sys, paddr & ~0xFFFu, pc & ~0xFFFu, targets);
     memset(side, 0, sizeof(side));
     while (n < H64_JIT_MAX_INSNS && paddr + n * 4 < pageEnd)

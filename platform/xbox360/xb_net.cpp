@@ -220,9 +220,11 @@ static int dechunk(u8 *buf, u32 len)
     }
 }
 
-// One GET (no redirects). Returns the status or 0; see NetGet.
+// One GET (no redirects). Returns the status or 0; see NetGet. With `sink`
+// the body goes into that file as it arrives (NetDownload), `cancel` set
+// stops it.
 static int request(const char *host, const char *path, u8 **body, u32 *bodyLen, u32 maxLen, char *location, int locSize,
-                   NetProgress *pr)
+                   NetProgress *pr, FILE *sink, volatile long *cancel)
 {
     NetTls *t;
     IN_ADDR ip;
@@ -261,6 +263,26 @@ static int request(const char *host, const char *path, u8 **body, u32 *bodyLen, 
     if (!t || !head || !req) { free(t); free(head); free(req); closesocket(s); return 0; }
 
     br_ssl_client_init_full(&t->sc, &t->xc, NULL, 0);
+    {
+        // Speed: the downloads (HD packs of hundreds of MB, updates) are decrypted here, on
+        // one hardware thread with no AES instructions. ChaCha20-Poly1305 first (fastest in
+        // software, where the server honours the client's order), then AES-GCM; and the
+        // table AES and 64-bit GHASH instead of the constant-time ones init_full picks on a
+        // 32-bit build (BR_64 is not detected on the Xbox's compiler).
+        static const uint16_t suites[] = {
+            BR_TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256, BR_TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+            BR_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, BR_TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+            BR_TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384, BR_TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+            BR_TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256, BR_TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256,
+            BR_TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA, BR_TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
+            BR_TLS_RSA_WITH_AES_128_GCM_SHA256, BR_TLS_RSA_WITH_AES_256_GCM_SHA384,
+            BR_TLS_RSA_WITH_AES_128_CBC_SHA256, BR_TLS_RSA_WITH_AES_128_CBC_SHA
+        };
+        br_ssl_engine_set_suites(&t->sc.eng, suites, sizeof(suites) / sizeof(suites[0]));
+        br_ssl_engine_set_aes_ctr(&t->sc.eng, &br_aes_big_ctr_vtable);
+        br_ssl_engine_set_aes_cbc(&t->sc.eng, &br_aes_big_cbcenc_vtable, &br_aes_big_cbcdec_vtable);
+        br_ssl_engine_set_ghash(&t->sc.eng, br_ghash_ctmul64);
+    }
     ssl_time(&days, &secs);
     br_x509_minimal_set_time(&t->xc, days, secs);
     t->na.vtable = &s_noAnchorVtable;
@@ -294,6 +316,13 @@ static int request(const char *host, const char *path, u8 **body, u32 *bodyLen, 
         if (!n) H64_INFO("[net] %s: TLS error %d", host, br_ssl_engine_last_error(&t->sc.eng));
         goto done;
     }
+    if (sink)
+    {
+        // The suite the server chose (a download's speed depends on it; see above).
+        br_ssl_session_parameters sp;
+        br_ssl_engine_get_session_parameters(&t->sc.eng, &sp);
+        H64_INFO("[net] %s: TLS suite %04X", host, sp.cipher_suite);
+    }
     head[hlen - 2] = 0;   // the headers alone, one CRLF kept for header()
     if (strncmp(head, "HTTP/1.", 7) || strlen(head) < 12) goto done;
     status = atoi(head + 9);
@@ -307,7 +336,7 @@ static int request(const char *host, const char *path, u8 **body, u32 *bodyLen, 
             location[vn] = 0;
         }
     }
-    if (!body || status < 200 || status >= 300) { ok = 1; goto done; }
+    if ((!body && !sink) || status < 200 || status >= 300) { ok = 1; goto done; }
 
     // The body: Content-Length bytes, chunked, or up to the end of the connection.
     {
@@ -316,6 +345,73 @@ static int request(const char *host, const char *path, u8 **body, u32 *bodyLen, 
         u32 want = 0;
         if (te && !_strnicmp(te, "chunked", 7)) chunked = 1;
         if (cl && !chunked) want = (u32)strtoul(cl, NULL, 10);
+        if (sink)
+        {
+            // Into the file 64 KB at a time (a texture pack: hundreds of MB): Content-Length bytes,
+            // a chunked answer (decoded as it comes) or, without either, up to the connection's end
+            // (n64textures.com sends its files so).
+            enum { CS_SIZE, CS_DATA, CS_END, CS_DONE };
+            u8 *chunk = (u8 *)malloc(64 * 1024);
+            const u8 *p = (const u8 *)head + hlen;
+            u32 avail = (u32)(n - hlen), csize = 0, left = 0;
+            int cs = CS_SIZE, ext = 0, bad = 0;
+            if (!chunk) goto done;
+            got = 0;
+            if (pr)
+            {
+                if (want) InterlockedExchange(&pr->total, (LONG)want);   // else the caller's guess (the release's size) stays
+                InterlockedExchange(&pr->got, 0);
+            }
+            for (;;)
+            {
+                while (avail && !bad && cs != CS_DONE)
+                {
+                    if (!chunked)
+                    {
+                        u32 take = want && avail > want - got ? want - got : avail;
+                        if (fwrite(p, 1, take, sink) != take) { bad = 1; break; }
+                        got += take; p += take; avail -= take;
+                        if (want && got >= want) cs = CS_DONE;
+                    }
+                    else if (cs == CS_SIZE)
+                    {
+                        u8 c = *p++;
+                        int v = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+                        avail--;
+                        if (c == '\n') { if (!csize) cs = CS_DONE; else { cs = CS_DATA; left = csize; } }
+                        else if (c == ';') ext = 1;
+                        else if (v >= 0 && !ext) { if (csize > 0x0FFFFFFF) bad = 1; csize = csize * 16 + (u32)v; }
+                    }
+                    else if (cs == CS_DATA)
+                    {
+                        u32 take = avail < left ? avail : left;
+                        if (fwrite(p, 1, take, sink) != take) { bad = 1; break; }
+                        got += take; p += take; avail -= take; left -= take;
+                        if (!left) cs = CS_END;
+                    }
+                    else   // CS_END: the CRLF after a chunk's data
+                    {
+                        if (*p++ == '\n') { cs = CS_SIZE; csize = 0; ext = 0; }
+                        avail--;
+                    }
+                }
+                if (pr) InterlockedExchange(&pr->got, (LONG)got);
+                if (bad || cs == CS_DONE || (cancel && *cancel)) break;
+                r = br_sslio_read(&t->ioc, chunk, 64 * 1024);
+                if (r <= 0) break;   // the end of the connection
+                p = chunk;
+                avail = (u32)r;
+            }
+            free(chunk);
+            if (bad || (cancel && *cancel) || (want && got < want) || (chunked && cs != CS_DONE) || !got)
+            {
+                H64_INFO("[net] %s%s: stopped at %u of %u bytes%s", host, path, got, want, chunked ? " (chunked)" : "");
+                goto done;
+            }
+            if (bodyLen) *bodyLen = got;
+            ok = 1;
+            goto done;
+        }
         if (want > maxLen) { H64_INFO("[net] %s%s: %u bytes, more than %u", host, path, want, maxLen); goto done; }
         cap = want ? want : 64 * 1024;
         buf = (u8 *)malloc(cap + 1);
@@ -375,8 +471,23 @@ int NetGet(const char *host, const char *path, int follow, u8 **body, u32 *len, 
     return NetGetEx(host, path, follow, body, len, maxLen, location, locSize, NULL);
 }
 
+static int net_get(const char *host, const char *path, int follow, u8 **body, u32 *len, u32 maxLen, char *location, int locSize,
+                   NetProgress *progress, FILE *sink, volatile long *cancel);
+
 int NetGetEx(const char *host, const char *path, int follow, u8 **body, u32 *len, u32 maxLen, char *location, int locSize,
              NetProgress *progress)
+{
+    return net_get(host, path, follow, body, len, maxLen, location, locSize, progress, NULL, NULL);
+}
+
+int NetDownload(const char *host, const char *path, FILE *file, u32 *len, NetProgress *progress, volatile long *cancel)
+{
+    return net_get(host, path, 1, NULL, len, 0xFFFFFFFFu, NULL, 0, progress, file, cancel);
+}
+
+// The redirects followed (up to 4) round request().
+static int net_get(const char *host, const char *path, int follow, u8 **body, u32 *len, u32 maxLen, char *location, int locSize,
+                   NetProgress *progress, FILE *sink, volatile long *cancel)
 {
     char curHost[128], *curPath = (char *)malloc(NET_URL_MAX + 1), *loc = (char *)malloc(NET_URL_MAX + 1);
     int hop, status = 0, done = 0;
@@ -389,7 +500,7 @@ int NetGetEx(const char *host, const char *path, int follow, u8 **body, u32 *len
     curPath[NET_URL_MAX] = 0;
     for (hop = 0; hop < 5 && !done; hop++)
     {
-        status = request(curHost, curPath, body, len, maxLen, loc, NET_URL_MAX + 1, progress);
+        status = request(curHost, curPath, body, len, maxLen, loc, NET_URL_MAX + 1, progress, sink, cancel);
         if (location && locSize > 0)
         {
             strncpy(location, loc, locSize - 1);

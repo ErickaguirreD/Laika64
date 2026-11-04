@@ -734,6 +734,28 @@ struct WallPixels
     float ow, oh;
 };
 
+// A JPEG/PNG/BMP decoded to RGBA, made at most maxW x maxH (keeping its shape; box filter):
+// the Packs screen's pictures, on the downloads' thread (see xb_ui.h).
+unsigned char *UiDecodeImage(const unsigned char *enc, long size, int maxW, int maxH, int *wOut, int *hOut)
+{
+    int w = 0, h = 0, n = 0, tw, th;
+    unsigned char *img, *out;
+    *wOut = *hOut = 0;
+    if (!enc || size <= 0) return NULL;
+    img = stbi_load_from_memory(enc, (int)size, &w, &h, &n, 4);
+    if (!img) return NULL;
+    h64_image_fit(w, h, maxW, maxH, &tw, &th);
+    if (tw == w && th == h)
+    {
+        out = (unsigned char *)malloc((size_t)w * h * 4);
+        if (out) memcpy(out, img, (size_t)w * h * 4);
+    }
+    else out = h64_image_scale(img, w, h, tw, th);
+    stbi_image_free(img);
+    if (out) { *wOut = tw; *hOut = th; }
+    return out;
+}
+
 static int wall_pixels(const unsigned char *enc, long size, WallPixels *px)
 {
     int w = 0, h = 0, n = 0, tw, th, x, y;

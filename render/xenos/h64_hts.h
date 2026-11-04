@@ -47,6 +47,9 @@ u64 h64_hts_by_texture(const H64Hts *h, u32 texelChecksum);
 void h64_hts_request(H64Hts *h, u64 checksum);
 int h64_hts_ready(H64Hts *h, u64 checksum);
 int h64_hts_take(H64Hts *h, u64 checksum, int firstOk, const u32 **out, u32 *w, u32 *hgt);
+// The DXT blocks of a texture taken (h64_hts_take), when the pack holds it as DXT: its kind
+// (1, 3 or 5; 0: none) and the blocks, valid as long as the pixels h64_hts_take gave.
+int h64_hts_take_dxt(H64Hts *h, u64 checksum, const u8 **blocks, u32 *bytes);
 
 // The pixels last taken for the same texels under another palette (not `exclude`), if
 // still loaded: a stand-in while that palette's own texture loads. 1 found, 0 none.

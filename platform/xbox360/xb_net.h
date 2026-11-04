@@ -15,6 +15,7 @@
 #ifndef XB_NET_H
 #define XB_NET_H
 
+#include <stdio.h>
 #include "../../core/common/h64_types.h"
 
 // Starts the network stack (first call) and waits up to 15 s for a link and
@@ -37,5 +38,9 @@ struct NetProgress { volatile long got, total; };
 // NetGet that keeps `progress` up to date as the body arrives (NULL: none).
 int NetGetEx(const char *host, const char *path, int follow, u8 **body, u32 *len, u32 maxLen, char *location, int locSize,
              NetProgress *progress);
+// GET into `file` (redirects followed) as the body arrives, its size known
+// (Content-Length): for files too big to hold in memory. `cancel` set (any
+// thread) stops it. Returns the HTTP status, or 0 (also when stopped or cut).
+int NetDownload(const char *host, const char *path, FILE *file, u32 *len, NetProgress *progress, volatile long *cancel);
 
 #endif
