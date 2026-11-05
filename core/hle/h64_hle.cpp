@@ -704,8 +704,10 @@ int h64_hle_try_task(H64System *sys, u32 *statusBits, u32 *busyCycles, int *dpIn
                 // The slot's previous task (two tasks ago) must be rendered:
                 // its lists and snapshot are reused. The previous task may
                 // still render while this one is parsed.
-                u64 t0 = h64_prof_now(sys);
+                u64 t0 = h64_prof_now(sys), t1;
                 if (s->used) sys->asyncWaitTicket(sys->asyncUser, s->renderTicket);
+                t1 = h64_prof_now(sys);
+                sys->prof[H64_PROF_ASYNC_WAIT] += t1 - t0;   // h64_hle_async_wait below adds its own
                 if (!sys->asyncParseStart) h64_hle_async_wait(sys);   // one worker: in order anyway
                 sys->prof[H64_PROF_WAIT_START] += h64_prof_now(sys) - t0;
             }
@@ -715,9 +717,16 @@ int h64_hle_try_task(H64System *sys, u32 *statusBits, u32 *busyCycles, int *dpIn
             s->parseOnSecond = sys->asyncParseStart != NULL && sys->asyncParseWaitTicket != NULL;
             hle->gfxCur = s;
             hle->gfxAsyncPending = 1;
-            if (s->parseOnSecond) s->parseTicket = sys->asyncParseStart(sys->asyncUser, gfx_parse_job, s);
-            else s->parseTicket = sys->asyncStart(sys->asyncUser, gfx_parse_job, s);
-            s->renderTicket = sys->asyncStart(sys->asyncUser, gfx_render_job, s);
+            {
+                // Queuing waits when a worker's queue is full or the device is
+                // taken back: waiting too, not the helper's time.
+                u64 t0 = h64_prof_now(sys);
+                if (s->parseOnSecond) s->parseTicket = sys->asyncParseStart(sys->asyncUser, gfx_parse_job, s);
+                else s->parseTicket = sys->asyncStart(sys->asyncUser, gfx_parse_job, s);
+                s->renderTicket = sys->asyncStart(sys->asyncUser, gfx_render_job, s);
+                sys->prof[H64_PROF_ASYNC_WAIT] += h64_prof_now(sys) - t0;
+                sys->prof[H64_PROF_WAIT_START] += h64_prof_now(sys) - t0;
+            }
             *statusBits = SP_STATUS_TASKDONE | SP_STATUS_BROKE | SP_STATUS_HALT;
             *busyCycles = sys->asyncGfxCycles ? sys->asyncGfxCycles : H64_HLE_GFX_CYCLES;
             if (sys->options.gfxShortTask && *busyCycles > H64_HLE_GFX_CYCLES) *busyCycles = H64_HLE_GFX_CYCLES;

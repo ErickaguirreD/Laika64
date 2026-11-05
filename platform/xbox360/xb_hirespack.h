@@ -38,6 +38,16 @@ void HiresPackStart(const HiresPackEntry *e, const char *destDir);
 // Stops it (it ends as HPACK_FAILED, HPERR_CANCELLED).
 void HiresPackCancel(void);
 
+// "Download all" (Settings > HD textures): the catalog packs `packs` (indices), one after
+// another, each into <texturesDir>\<its game>. A pack got this way does not replace the
+// game's pack in use. HiresQueueTick starts the next one when none is at work (1 when it
+// did): called by its screen, the ROM list and the game loop, so it goes on everywhere.
+// HiresQueueStatus: 1 while it runs; the packs started, in all, installed, failed.
+void HiresQueueSet(const int *packs, int n, const char *texturesDir);
+int HiresQueueTick(void);
+int HiresQueueStatus(int *pos, int *total, int *ok, int *failed);
+void HiresQueueCancel(void);
+
 enum { HPACK_IDLE = 0, HPACK_LOOKUP, HPACK_DOWNLOAD, HPACK_UNPACK, HPACK_DONE, HPACK_FAILED, HPACK_CONVERT };
 enum { HPERR_NONE = 0, HPERR_NETWORK, HPERR_NOPACK, HPERR_SPACE, HPERR_TOOBIG, HPERR_ARCHIVE, HPERR_FILE, HPERR_CANCELLED, HPERR_NOPNG };
 // The state (HPACK_*); while it works the KB done and in all (`total` 0 while

@@ -124,6 +124,8 @@ struct H64Options
     int gfxSoft8bit;        // GPU renderer (game profile): drawing into 8-bit colour images done by the software RDP
     int gfxSoftSmall;       // GPU renderer (game profile): drawing into 16-bit colour images narrower than 320 done by the
                             // software RDP, in RDRAM (the CPU reads them)
+    int gfxCopyBackLate;    // GPU renderer (game profile): an image narrower than 320 is copied back as it was a frame
+                            // before (read without waiting for the GPU), the copy of now read at the next one
     int gfxSoftTiny;        // GPU renderer (game profile): drawing into colour images at most 16 pixels wide done by the
                             // software RDP
     int gfxDepthFillToRdram; // GPU renderer (game profile): depth clears also fill the depth image in RDRAM
@@ -167,6 +169,10 @@ struct H64System
     H64Cpu cpu;
     H64Scheduler sched;
     H64Options options;
+    // Profile gfxFrameToRdram: until this VI frame each graphics task waits for its frame's
+    // copy into RDRAM (the renderer sets it when the VI shows a picture the CPU made:
+    // Castlevania's page turns). Otherwise the copy is made beside the CPU.
+    u32 frameSyncUntil;
 
     u8 *rdram;          // H64_RDRAM_SIZE bytes, N64 byte order
     u8 spMem[0x2000];   // DMEM (0x0000) + IMEM (0x1000)
@@ -267,12 +273,14 @@ static inline void h64_jit_notify_write(H64System *sys, u32 paddr, u32 len)
 
 static inline u64 h64_prof_now(const H64System *sys) { return sys->profClock ? sys->profClock() : 0; }
 
-// HLE and LLE RSP time spent on the CPU thread, to leave out of what a caller
-// measures (the workers add theirs to the same counters while the CPU runs).
+// HLE and LLE RSP time spent on the CPU thread, and the waits for the workers,
+// to leave out of what a caller measures (the workers add theirs to the same
+// counters while the CPU runs). Waits at a task start counted as "helper"
+// hid Mario Tennis's GPU-bound scenes (~85 ms a frame) as recompiler time.
 static inline u64 h64_prof_nested(const H64System *sys)
 {
     return (sys->asyncStart ? 0 : sys->prof[H64_PROF_GFX_HLE]) + (sys->asyncAudioStart ? 0 : sys->prof[H64_PROF_AUDIO_HLE]) +
-           sys->prof[H64_PROF_RSP_LLE];
+           sys->prof[H64_PROF_RSP_LLE] + sys->prof[H64_PROF_ASYNC_WAIT];
 }
 
 // Adds the time since t0 minus the nested time since `nested` (h64_prof_nested at t0) to prof[slot].

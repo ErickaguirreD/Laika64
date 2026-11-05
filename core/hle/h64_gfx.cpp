@@ -4082,8 +4082,11 @@ int h64_gfx_package(H64System *sys, H64Gfx *g, H64GfxOut *out)
     // A task that reads a colour image as a texture renders from the snapshot
     // too: the renderer copies the image back into both (h64_gfx_render).
     // Profile gfxFrameToRdram: the renderer writes the frame into RDRAM at the
-    // full sync; the task ends only once that is done.
-    mustSync = sys->options.gfxFrameToRdram != 0;
+    // full sync; the task ends only once that is done - while the game makes
+    // pictures from its frames with the CPU (sys->frameSyncUntil). Waiting at
+    // every task cost Castlevania ~11 ms a frame (42-52 VI/s by walls); the
+    // copy still lands beside the CPU, a frame later at most.
+    mustSync = sys->options.gfxFrameToRdram && sys->vi.frames < sys->frameSyncUntil;
     if (!snapshot_ranges(sys, g, out)) mustSync = 1;
     out->parts = 0;
     return mustSync;

@@ -87,6 +87,19 @@ struct FbSlot
     u32 splitAt;       // presentCount of the last swap of tex and front
     int valid;
     int gpuDirty;      // drawn by the GPU since the last copy back to RDRAM
+    int ramFresh;      // RDRAM got its picture (frame_to_rdram) since it was last drawn into
+    // Profile gfxCopyBackLate: its copy back of the frame before, read without waiting. One
+    // per copy back of it in a frame (Conker draws its title text and its shadow into the
+    // same image, one after the other): the k-th of a frame gets the k-th of the one before.
+#define LATE_USES 4
+    IDirect3DTexture9 *lateTex[LATE_USES];   // a resolve at that copy back (CPU-cached), lateFence ends it
+    DWORD lateFence[LATE_USES];
+    int latePending[LATE_USES];              // lateTex holds lines lateR0..lateR1 not read into lateBuf yet
+    u32 lateR0[LATE_USES], lateR1[LATE_USES];
+    u32 *lateBuf[LATE_USES];                 // the last copy read (lateW x RB_HEIGHT pixels), lateValid
+    u32 lateW[LATE_USES];
+    int lateValid[LATE_USES];
+    u32 lateUse, lateUseAt;                  // copy backs of it in the present lateUseAt
     u32 cleanLo, cleanHi;   // while gpuDirty: the lines copied back since (a copy back of part of the image)
     int cleanSnap;          // they went into the RDRAM snapshot of job cleanGen only (not RDRAM)
     u32 cleanGen;
@@ -2026,6 +2039,7 @@ static void frame_to_rdram(Xenos *x, int slot)
     x->st->loadRam = 0;   // copy_back_rows writes RDRAM when there is no snapshot
     copy_back_rows(x, slot, 0, 0xFFFFFFFFu);
     x->st->loadRam = keep;
+    s->ramFresh = 1;      // the present need not copy it again
     if (keep)
     {
         s->gpuDirty = 1;  // the snapshot still lacks it: later loads of this task copy it there too
@@ -2075,6 +2089,8 @@ static void select_framebuffer(Xenos *x)
         s->addr = addr;
         s->valid = 0;
         s->drawnH = 0;
+        memset(s->latePending, 0, sizeof(s->latePending));   // another image: no copy of the frame before
+        memset(s->lateValid, 0, sizeof(s->lateValid));
         x->dev->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);   // Clear() keeps to the scissor
         x->stateDirty = 1;
         x->dev->Clear(0, NULL, D3DCLEAR_TARGET, x->debug == 1 ? 0xFF0000FF : 0xFF000000, 1.0f, 0);
@@ -2121,6 +2137,7 @@ static void select_framebuffer(Xenos *x)
         x->stateDirty = 1;
     }
     s->gpuDirty = 1;
+    s->ramFresh = 0;
     s->cleanLo = s->cleanHi = 0;
     s->cleanSnap = 0;
     s->drawnAt = x->presentCount;
@@ -2183,7 +2200,39 @@ static void copy_back_rows(Xenos *x, int slot, u32 r0, u32 r1)
         RECT ur;
         D3DPOINT dp;
         POINT up;
+        int late = x->sys->options.gfxCopyBackLate && w < 320, k = 0;
+        const u32 *from;
         if (y2 > ha) y2 = ha;
+        if (late)
+        {
+            // Which copy back of it this is in this frame.
+            if (s->lateUseAt != x->presentCount) { s->lateUseAt = x->presentCount; s->lateUse = 0; }
+            k = (int)s->lateUse++;
+            if (k >= LATE_USES) late = 0;
+        }
+        if (late && !s->lateTex[k] &&
+            FAILED(x->dev->CreateTexture(RB_WIDTH, RB_HEIGHT, 1, D3DUSAGE_CPU_CACHED_MEMORY, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &s->lateTex[k], NULL)))
+            s->lateTex[k] = NULL;
+        if (late && !s->lateBuf[k]) s->lateBuf[k] = (u32 *)calloc(RB_WIDTH * RB_HEIGHT, 4);
+        if (late && (!s->lateTex[k] || !s->lateBuf[k])) late = 0;
+        if (late && s->latePending[k])
+        {
+            // The resolve made at this copy back a frame ago: done by now, read (no wait in practice).
+            RECT lur;
+            POINT lup;
+            x->dev->BlockOnFence(s->lateFence[k]);
+            if (SUCCEEDED(s->lateTex[k]->LockRect(0, &lr, NULL, D3DLOCK_READONLY)))
+            {
+                for (i = 0; i < RB_WIDTH * RB_HEIGHT * 4; i += 128) __dcbf(i, lr.pBits);
+                lur.left = 0; lur.top = (LONG)s->lateR0[k]; lur.right = (LONG)w; lur.bottom = (LONG)s->lateR1[k];
+                lup.x = 0; lup.y = (LONG)s->lateR0[k];
+                XGUntileSurface(s->lateBuf[k], w * 4, &lup, lr.pBits, RB_WIDTH, RB_HEIGHT, &lur, 4);
+                s->lateTex[k]->UnlockRect(0);
+                s->lateW[k] = w;
+                s->lateValid[k] = 1;
+            }
+            s->latePending[k] = 0;
+        }
         x->dev->SetRenderTarget(0, x->rbSurf);
         x->dev->SetDepthStencilSurface(NULL);
         x->targetBound = 0;     // the N64 target is bound again (its EDRAM content kept) at the next draw
@@ -2191,6 +2240,19 @@ static void copy_back_rows(Xenos *x, int slot, u32 r0, u32 r1)
         draw_textured(x, s->tex, x->uMax, x->vMax, 0.0f, 0.0f, (float)w, (float)h, (float)RB_WIDTH, (float)RB_HEIGHT);
         r.x1 = 0; r.y1 = (LONG)y1; r.x2 = (LONG)wa; r.y2 = (LONG)y2;   // 32x8-aligned
         dp.x = 0; dp.y = (LONG)y1;
+        if (late && s->lateValid[k] && s->lateW[k] == w)
+        {
+            // The picture of the frame before goes to RDRAM now; this one is resolved
+            // for the same copy back of the next frame, read once the GPU got there (its fence).
+            x->dev->Resolve(D3DRESOLVE_RENDERTARGET0, &r, s->lateTex[k], &dp, 0, 0, NULL, 0.0f, 0, NULL);
+            s->lateFence[k] = x->dev->InsertFence();
+            s->latePending[k] = 1;
+            s->lateR0[k] = r0;
+            s->lateR1[k] = r1;
+            from = s->lateBuf[k];
+        }
+        else
+        {
         x->dev->Resolve(D3DRESOLVE_RENDERTARGET0, &r, x->rbTex, &dp, 0, 0, NULL, 0.0f, 0, NULL);
         {
             u64 w0 = h64_prof_now(x->sys);
@@ -2205,9 +2267,18 @@ static void copy_back_rows(Xenos *x, int slot, u32 r0, u32 r1)
         up.x = 0; up.y = (LONG)r0;
         XGUntileSurface(&x->copyBuf[0], w * 4, &up, lr.pBits, RB_WIDTH, RB_HEIGHT, &ur, 4);
         x->rbTex->UnlockRect(0);
+        from = &x->copyBuf[0];
+        if (late)
+        {
+            // The first copy back of it waited: kept as the "frame before" of the next.
+            memcpy(s->lateBuf[k] + r0 * w, from + r0 * w, (r1 - r0) * w * 4);
+            s->lateW[k] = w;
+            s->lateValid[k] = 1;
+        }
+        }
         for (y = r0; y < r1; y++)
         {
-            const u32 *src = &x->copyBuf[y * w];
+            const u32 *src = &from[y * w];
             for (xx = 0; xx < w; xx++)
             {
                 u32 a = s->addr + (y * w + xx) * s->bytes;
@@ -2785,6 +2856,19 @@ static int soft_small(const Xenos *x)
 
 static void xenos_rdp(void *user, const u64 *words, u32 count);   // below
 
+// Profile gfxNoCopyBack: a triangle or rectangle drawn with the depth image
+// as the colour image is left out. Our depth is the EDRAM's, apart from any
+// colour image: drawn, it went into a colour slot of its own that is never
+// shown, read as a texture or copied back, and each change to it and back
+// cost a whole-target resolve and restore. Mario Tennis alternates its frame
+// and its depth image (0x400) up to ~100 times a frame in matches: 20-33
+// VI/s. Depth fills stay depth clears (fill_rect).
+static int colour_is_depth(const Xenos *x)
+{
+    const H64RdpState *st = x->st;
+    return x->sys->options.gfxNoCopyBack && (st->colorAddr & 0xFFFFFF) == (st->depthAddr & 0xFFFFFF);
+}
+
 static void xenos_triangle(void *user, const H64RenderVertex *a, const H64RenderVertex *b, const H64RenderVertex *c,
                            u32 flags, u32 tile, u32 levels)
 {
@@ -2794,9 +2878,11 @@ static void xenos_triangle(void *user, const H64RenderVertex *a, const H64Render
     const H64RdpTile *t0 = &st->tiles[tile & 7], *t1 = &st->tiles[(tile + 1) & 7];
     XVtx *q;
     int i, persp = (st->rasterFlags & RS_PERSPECTIVE) != 0, wsFull;
-    if (soft_small(x))
+    if (colour_is_depth(x)) return;
+    if (soft_small(x) || (x->sys->options.gfxSoft8bit && st->colorFmt == FB_I8))
     {
-        // An image the software RDP draws (profile gfxSoftSmall): as an RDP triangle command.
+        // An image the software RDP draws (profiles gfxSoftSmall, gfxSoft8bit - Conker's
+        // 64-pixel 8-bit image, copied back each frame from the GPU): as an RDP triangle command.
         u64 w[22];
         u32 n = h64_rdp_build_triangle(a, b, c, flags, tile, levels, w);
         xenos_rdp(user, w, n);
@@ -3019,10 +3105,18 @@ static void fb_load(Xenos *x, const u32 *w, int block)
     u32 a = st->texAddr & 0xFFFFFF, i, bytes = st->texSize == 2 ? 2 : st->texSize == 3 ? 4 : 0;
     u32 sl = (w[0] >> 12) & 0xFFF, tl = w[0] & 0xFFF, sh = (w[1] >> 12) & 0xFFF, th = w[1] & 0xFFF;
     int found = -1;
-    if (!bytes || st->texFmt != 0 || no_copy_back(x)) return;
+    if (!bytes || st->texFmt != 0 || x->debug == 5) return;
     for (i = 0; i < FB_SLOTS; i++)
     {
         const FbSlot *s = &x->fb[i];
+        // Profile gfxNoCopyBack: whole frames only, sampled on the GPU (no
+        // RDRAM write). Mario Tennis's pause menu draws over its last frame:
+        // from RDRAM, never written, black with stripes of old HUD letters.
+        // Narrow images only when drawn since the last present (rendered to
+        // a texture this frame: its replay zooms on the ball through 64-pixel
+        // images, a square of noise from RDRAM); older ones keep reading
+        // RDRAM, which the CPU may have rewritten (players and net, see profile).
+        if (no_copy_back(x) && s->width < 320 && s->drawnAt != x->presentCount) continue;
         if (s->valid && s->tex && s->bytes == bytes && s->width == st->texWidth && a >= s->addr &&
             a < s->addr + s->width * s->height * s->bytes && (found < 0 || s->addr > x->fb[found].addr))
             found = (int)i;
@@ -3189,6 +3283,7 @@ static void tex_rect(Xenos *x, const u32 *w, int flip)
     float xl = ((w[1] >> 12) & 0xFFF) / 4.0f, yl = (w[1] & 0xFFF) / 4.0f;
     float s = (float)(s16)(w[2] >> 16), t = (float)(s16)w[2];
     float dsdx = (float)(s16)(w[3] >> 16) / 1024.0f, dtdy = (float)(s16)w[3] / 1024.0f;
+    if (colour_is_depth(x)) return;
     float z = st->usePrimDepth ? (float)(st->primDepth >> 16) / 32767.0f : 0.0f;
     TexBinding tb0, tb1;
     XVtx q[4];
@@ -3735,7 +3830,10 @@ void h64_xenos_present_vi(H64Renderer *r, const u32 *vi)
         if (src < 0)
             for (i = 0; i < FB_SLOTS; i++)
                 if (x->fb[i].valid && x->fb[i].tex && x->fb[i].gpuDirty && (src < 0 || x->fb[i].lastUse > x->fb[src].lastUse)) src = (int)i;
-        if (src >= 0 && x->fb[src].gpuDirty)
+        // The VI shows a picture no frame slot holds: the CPU made it from a frame
+        // (the page turns). Each task waits for its copy for a while (h64_gfx_package).
+        if (found < 0) x->sys->frameSyncUntil = x->sys->vi.frames + 180;
+        if (src >= 0 && x->fb[src].gpuDirty && !x->fb[src].ramFresh)
         {
         // Profile: the picture shown goes back to RDRAM, where the CPU reads it
         // (Castlevania's magnifying glass on the character select enlarges
@@ -4030,6 +4128,12 @@ void h64_xenos_free(H64Renderer *r)
     if (x->n64Depth) x->n64Depth->Release();
     if (x->rbSurf) x->rbSurf->Release();
     if (x->rbTex) x->rbTex->Release();
+    for (int k = 0; k < FB_SLOTS; k++)
+        for (int u = 0; u < LATE_USES; u++)
+        {
+            if (x->fb[k].lateTex[u]) x->fb[k].lateTex[u]->Release();
+            free(x->fb[k].lateBuf[u]);
+        }
     if (x->shotTex) x->shotTex->Release();
     if (x->dfTex[0]) x->dfTex[0]->Release();
     if (x->dfTex[1]) x->dfTex[1]->Release();
@@ -4112,7 +4216,17 @@ static u32 *shown_pixels(Xenos *x, u32 *pw, u32 *ph)
             x->targetBound = 0;
             x->stateDirty = 1;
             x->curSlot = -1;
-            draw_textured(x, x->shown, 1.0f, 1.0f, 0.0f, 0.0f, (float)RT_WIDTH, (float)RT_HEIGHT, (float)RT_WIDTH, (float)RT_HEIGHT);
+            {
+                // The shown w x h part 1:1 onto the target's top-left, in a
+                // viewport of that size: the present's viewport was left set,
+                // and the shot came out squeezed into ~540 lines over garbage.
+                D3DVIEWPORT9 vp;
+                vp.X = 0; vp.Y = 0; vp.Width = w < x->rtW ? w : x->rtW; vp.Height = h < x->rtH ? h : x->rtH; vp.MinZ = 0.0f; vp.MaxZ = 1.0f;
+                x->dev->SetViewport(&vp);
+                w = vp.Width;
+                h = vp.Height;
+                draw_textured(x, x->shown, (float)w / RT_WIDTH, (float)h / RT_HEIGHT, 0.0f, 0.0f, (float)w, (float)h, (float)w, (float)h);
+            }
             x->dev->Resolve(D3DRESOLVE_RENDERTARGET0, NULL, x->shotTex, NULL, 0, 0, NULL, 0.0f, 0, NULL);
             src = x->shotTex;
         }

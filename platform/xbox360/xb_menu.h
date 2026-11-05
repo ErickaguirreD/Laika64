@@ -109,7 +109,7 @@ void AboutScreen(IDirect3DDevice9 *dev);
 // ---- Hi-res texture packs (a game can have more than one .hts) ----
 #define HIRES_PACKS_MAX 8
 // Lists game:\hires_texture\<romName>\*.hts into a shared, static list the
-// Graphics settings row (G_HIRES) reads from. Call whenever the ROM in
+// pause menu's HD textures page reads from. Call whenever the ROM in
 // context changes: the browser's selection (rom_details) and HiresOpen
 // (main.cpp, at launch) both call this, so the picker always matches
 // whichever ROM is selected or running. Cheap - just a directory listing,
@@ -118,10 +118,15 @@ void HiresScanPacks(const char *romName);
 int HiresPackCount(void);
 const char *HiresPackName(int i);   // i: 0..HiresPackCount()-1, just the .hts file name
 const char *HiresPackPath(int i);   // the full <textures folder>\<rom>\... path, to open it
+// The pause menu's HD textures page: pack k's authors when the catalog knows it (else NULL),
+// the pack in use (-1: off), and choosing one (-1: off; its active.txt and the game's profile).
+const char *HiresPackAuthor(int k);
+int HiresActiveIndex(const Config *c);
+void HiresSelect(Config *c, int k);
 // The folder the packs are in (Settings > Paths > Textures; game:\hires_texture by default).
 void HiresSetFolder(const char *folder);
 
-// A preview of the pack G_HIRES currently points at (Config::hiTex/hiTexFile):
+// A preview of the pack in use (Config::hiTex/hiTexFile):
 // one representative texture, decoded from the pack itself (packs carry no
 // preview image of their own). Same split as the About panel: the ROM browser
 // (which has its own IDirect3DDevice9*) uses the blocking HiresPreviewScreen;

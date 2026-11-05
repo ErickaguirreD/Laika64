@@ -39,7 +39,9 @@ static const GameProfile s_profiles[] = {
     // frame into narrow strips: copying those strips back garbled the HUD,
     // and no copy back at all left the course black once the camera stops.
     { "NMF", "Mario Golf", H64_GP_OTHERMODE_INIT | H64_GP_COPY_BACK_FULL },
-    // Missing players and net with copy backs; right without.
+    // Missing players and net with copy backs; right without. Also: what it
+    // draws into its depth image (0x400) as colour is left out (Xenos
+    // colour_is_depth): ~100 changes of image a frame in matches, 20-33 VI/s.
     { "NM8", "Mario Tennis", H64_GP_NO_COPY_BACK },
     // Never sets the texture conversion either (F3DLX 1.23): its legal
     // screens' 32-bit letters were read as YUV, almost invisible.
@@ -246,7 +248,7 @@ static const GameProfile s_profiles[] = {
 };
 
 // Options with no bit left in the flags above, set by h64_apply_game_profile.
-enum { H64_GX_SOFT_TINY = 1, H64_GX_TALL_SCISSOR = 2, H64_GX_SOFT_SMALL = 4 };   // options.gfxSoftTiny, gfxTallScissor, gfxSoftSmall
+enum { H64_GX_SOFT_TINY = 1, H64_GX_TALL_SCISSOR = 2, H64_GX_SOFT_SMALL = 4, H64_GX_COPY_LATE = 8 };   // options.gfxSoftTiny, gfxTallScissor, gfxSoftSmall, gfxCopyBackLate
 struct GameExtra { const char *code; u32 extra; };
 static const GameExtra s_extras[] = {
     // Each character's shaded palette is drawn into a 16x1 image, then loaded
@@ -263,6 +265,14 @@ static const GameExtra s_extras[] = {
     // were noise; copied back each time it left them, 30 VI/s in battles.
     // The software RDP draws them in RDRAM, as the console.
     { "NPO", H64_GX_SOFT_SMALL },
+    // Conker's Bad Fur Day draws an 8-bit 64x240 image each frame (its
+    // character's shadow, ~1300 triangles) and loads it as a texture. Copied
+    // back, each load waited for the GPU to drain (~4 ms) and the CPU for the
+    // graphics worker (~11 ms a frame, 36-40 VI/s in its levels). Its copy is
+    // now the previous frame's, read without waiting. (The software RDP took
+    // 16 ms a frame for it; with every image under 320 wide, its intro screens
+    // too, ~139 ms a frame.)
+    { "NFU", H64_GX_COPY_LATE },
 };
 
 static void apply_idle_yield(H64System *sys);
@@ -292,6 +302,7 @@ void h64_apply_game_profile(H64System *sys)
     sys->options.gfxSoftTiny = (extra & H64_GX_SOFT_TINY) != 0;
     sys->options.gfxTallScissor = (extra & H64_GX_TALL_SCISSOR) != 0;
     sys->options.gfxSoftSmall = (extra & H64_GX_SOFT_SMALL) != 0;
+    sys->options.gfxCopyBackLate = (extra & H64_GX_COPY_LATE) != 0;
     if (name) H64_INFO("[profile] %s: flags %X%s", name, f, extra ? " (+ extra options)" : "");
 }
 

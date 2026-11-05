@@ -910,7 +910,7 @@ static int RunFrame(H64System *sys)
 // ---- Hi-res texture packs ----
 // game:\\hires_texture\\<ROM internal name>\\ can hold more than one GlideN64-style
 // pack (*.hts): HiresScanPacks (xb_menu.cpp) lists them for the Graphics settings'
-// picker (G_HIRES) and for us here. c->hiTexFile picks which one (empty: the first
+// page (pause menu > HD textures) and for us here. c->hiTexFile picks which one (empty: the first
 // one found, same as before this game could have more than one).
 static void HiresOpen(H64System *sys, H64Renderer *renderer, const Config *c)
 {
@@ -1208,6 +1208,125 @@ static int CheatsInput(WORD down)
     return 0;
 }
 
+// ---- HD textures (the pause menu's page, above Settings) ----
+// "Off", then each pack installed for the game once (HiresScanPacks, at launch): A uses it, Y
+// shows a texture of it. The one in use in a green box, the other packs (downloaded) in blue,
+// their authors when the catalog knows them; a bar when they do not all fit.
+static int s_texOpen, s_texSel, s_texTop, s_texActive = -1;
+#define TEX_ROWS 10
+
+static void TexturesOpen(const Config *c)
+{
+    s_texActive = HiresActiveIndex(c);
+    s_texSel = s_texActive + 1;   // row 0 is "Off"
+    s_texTop = s_texSel >= TEX_ROWS ? s_texSel - TEX_ROWS + 1 : 0;
+    s_texOpen = 1;
+}
+
+static void TexturesDraw(void)
+{
+    const float w = 860, h = 560, x = (UI_WIDTH - w) * 0.5f, y = (UI_HEIGHT - h) * 0.5f, rowH = 40, lx = x + 30, lw = w - 60;
+    const int packs = HiresPackCount(), n = packs + 1;
+    char fit[200], name[128];
+    int k;
+    UiRect(0, 0, UI_WIDTH, UI_HEIGHT, D3DCOLOR_ARGB(150, 0, 0, 0));
+    UiPanel(x, y, w, h, 22);
+    UiText(UI_BOLD, 28, lx, y + 36, UI_COL_TEXT, Tr(T_HIRESTEX), UI_LEFT);
+    if (s_npTitle[0])
+    {
+        UiTextFit(UI_REGULAR, 15, lw, s_npTitle, fit, sizeof(fit));
+        UiText(UI_REGULAR, 15, lx, y + 64, UI_COL_TEXT3, fit, UI_LEFT);
+    }
+    UiRect(lx, y + 84, lw, 1, UI_COL_LINE);
+    for (k = 0; k < TEX_ROWS && s_texTop + k < n; k++)
+    {
+        const int row = s_texTop + k, pack = row - 1, sel = row == s_texSel, active = pack == s_texActive;
+        const float ry = y + 96 + k * rowH, cy = ry + rowH * 0.5f;
+        const char *author = pack >= 0 ? HiresPackAuthor(pack) : NULL;
+        float textR = x + w - 40;
+        int ba = sel ? 235 : 120;
+        if (active) UiRoundRect(x + 14, ry + 2, w - 40, rowH - 4, 10, D3DCOLOR_ARGB(ba, 70, 200, 100), D3DCOLOR_ARGB(ba, 40, 150, 70));
+        else if (pack >= 0) UiRoundRect(x + 14, ry + 2, w - 40, rowH - 4, 10, D3DCOLOR_ARGB(ba, 60, 130, 230), D3DCOLOR_ARGB(ba, 35, 90, 180));
+        else if (sel) UiRoundRect(x + 14, ry + 2, w - 40, rowH - 4, 10, UiAlpha(UI_COL_ACCENT, 0.35f), UiAlpha(UI_COL_ACCENT, 0.22f));
+        if (sel) UiRoundRing(x + 14, ry + 2, w - 40, rowH - 4, 10, 2.0f, UiAlpha(UI_COL_TEXT, 0.85f));
+        if (active)
+        {
+            // The one in use: a check at the right.
+            UiLine(textR - 14, cy, textR - 8, cy + 6, 3.0f, UI_COL_TEXT);
+            UiLine(textR - 8, cy + 6, textR + 4, cy - 7, 3.0f, UI_COL_TEXT);
+            textR -= 30;
+        }
+        if (author)
+        {
+            UiTextFit(UI_REGULAR, 15, 220, author, fit, sizeof(fit));
+            UiText(UI_REGULAR, 15, textR, cy, pack >= 0 ? UI_COL_TEXT2 : UI_COL_TEXT3, fit, UI_RIGHT);
+            textR -= UiTextWidth(UI_REGULAR, 15, fit) + 18;
+        }
+        if (pack < 0) _snprintf(name, sizeof(name) - 1, "%s", Tr(T_OFF));
+        else
+        {
+            // The pack's file name without ".hts".
+            const char *p = HiresPackName(pack);
+            size_t len = strlen(p);
+            if (len > 4 && !_stricmp(p + len - 4, ".hts")) len -= 4;
+            if (len >= sizeof(name)) len = sizeof(name) - 1;
+            memcpy(name, p, len);
+            name[len] = 0;
+        }
+        name[sizeof(name) - 1] = 0;
+        UiTextFit(sel || active ? UI_BOLD : UI_REGULAR, 19, textR - lx - 10, name, fit, sizeof(fit));
+        UiText(sel || active ? UI_BOLD : UI_REGULAR, 19, lx + 6, cy, sel || active || pack >= 0 ? UI_COL_TEXT : UI_COL_TEXT2, fit, UI_LEFT);
+    }
+    if (n > TEX_ROWS)
+    {
+        // The bar: where the rows shown are in the list.
+        float tx = x + w - 18, ty = y + 98, th = TEX_ROWS * rowH - 4, hh = th * TEX_ROWS / n;
+        float yy = ty + (th - hh) * s_texTop / (float)(n - TEX_ROWS);
+        UiRoundRect(tx, ty, 4, th, 2, D3DCOLOR_ARGB(20, 255, 255, 255), D3DCOLOR_ARGB(20, 255, 255, 255));
+        UiRoundRect(tx, yy, 4, hh, 2, D3DCOLOR_ARGB(150, 255, 255, 255), D3DCOLOR_ARGB(110, 255, 255, 255));
+    }
+    if (!packs) UiText(UI_REGULAR, 18, x + w * 0.5f, y + 96 + 2 * rowH, UI_COL_TEXT2, Tr(T_HIRES_PAGE_NONE), UI_CENTER);
+    UiRect(lx, y + h - 56, lw, 1, UI_COL_LINE);
+    UiFooter(lx, y + h - 28, Tr(packs ? T_FOOT_HIRES_PAGE : T_FOOT_BACK_ONLY));
+}
+
+// Its input: 1 closes it, 2 a pack was chosen (or turned off), 3 Y asks for a preview.
+static int TexturesInput(WORD down, Config *c)
+{
+    const int n = HiresPackCount() + 1;
+    if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) return 1;
+    if (n < 2) return 0;
+    if (down & XINPUT_GAMEPAD_DPAD_UP) { s_texSel = (s_texSel + n - 1) % n; xb_audio_ui_sound(XB_SFX_MOVE); }
+    if (down & XINPUT_GAMEPAD_DPAD_DOWN) { s_texSel = (s_texSel + 1) % n; xb_audio_ui_sound(XB_SFX_MOVE); }
+    if (down & XINPUT_GAMEPAD_LEFT_SHOULDER) { s_texSel = s_texSel > TEX_ROWS ? s_texSel - TEX_ROWS : 0; xb_audio_ui_sound(XB_SFX_PAGE); }
+    if (down & XINPUT_GAMEPAD_RIGHT_SHOULDER) { s_texSel = s_texSel + TEX_ROWS < n ? s_texSel + TEX_ROWS : n - 1; xb_audio_ui_sound(XB_SFX_PAGE); }
+    if (s_texSel < s_texTop) s_texTop = s_texSel;
+    if (s_texSel >= s_texTop + TEX_ROWS) s_texTop = s_texSel - TEX_ROWS + 1;
+    if ((down & XINPUT_GAMEPAD_Y) && s_texSel > 0) return 3;
+    if ((down & XINPUT_GAMEPAD_A) && s_texSel - 1 != s_texActive)
+    {
+        HiresSelect(c, s_texSel - 1);
+        s_texActive = s_texSel - 1;
+        xb_audio_ui_sound(s_texActive >= 0 ? XB_SFX_VALUE_UP : XB_SFX_VALUE_DOWN);
+        return 2;
+    }
+    return 0;
+}
+
+// The pause menu's HD textures row: the pack in use, or "Off".
+static void TexturesRowValue(const Config *c, char *out, size_t size)
+{
+    int a = HiresActiveIndex(c);
+    const char *p = a >= 0 ? HiresPackName(a) : Tr(T_OFF);
+    size_t len = strlen(p);
+    char name[128];
+    if (a >= 0 && len > 4 && !_stricmp(p + len - 4, ".hts")) len -= 4;
+    if (len >= sizeof(name)) len = sizeof(name) - 1;
+    memcpy(name, p, len);
+    name[len] = 0;
+    UiTextFit(UI_REGULAR, 21, 300, name, out, (int)size);
+}
+
 // The pause menu's Cheats row: how many are on.
 static void CheatsRowValue(char *out, size_t size)
 {
@@ -1261,6 +1380,7 @@ static void OverlayHook(void *, IDirect3DDevice9 *dev)
     if (s_menuOpen && s_hiresPreviewOpen) HiresPreviewDraw(dev);
     else if (s_menuOpen && s_aboutOpen) AboutDraw();
     else if (s_menuOpen && s_cheatsOpen) CheatsDraw();
+    else if (s_menuOpen && s_texOpen) TexturesDraw();
     else if (s_menuOpen)
     {
         UiMenuDraw(&s_menu);
@@ -1371,25 +1491,30 @@ static void LoadStateNow(H64System *sys)
 // margin, smoothing, FPS) or at the next start (CPU, RSP); they are saved
 // for all games (config\settings.ini) or for this game (config\<game>.ini).
 enum { RG_DASHBOARD = 0, RG_BROWSER, RG_CONTINUE };
-enum { M_RESUME = 0, M_STATES, M_CHEATS, M_SETTINGS, M_RESET, M_ROMS, M_DASHBOARD };   // X opens About
+enum { M_RESUME = 0, M_STATES, M_CHEATS, M_TEXTURES, M_SETTINGS, M_RESET, M_ROMS, M_DASHBOARD };   // X opens About
 enum { ST_SLOT = 0, ST_LOAD, ST_SAVE };   // the States page, opened from M_STATES; B goes back, no row for it
 static char s_settingsPath[160];    // <drive>:\config\settings.ini ("" when the menu files are not used)
 static char s_profilePath[160];     // <drive>:\config\<game>.ini
 
+static const Config *s_menuCfg;   // the settings the open menu shows (its HD textures row)
+
 static void BuildGameMenu(void)
 {
-    char cheats[64];
+    char cheats[64], tex[160];
     UiMenuClear(&s_menu, Tr(T_PAUSED), Tr(T_FOOT_PAUSED));
     UiMenuAdd(&s_menu, Tr(T_RESUME), "");
     UiMenuAdd(&s_menu, Tr(T_STATES), "");
     CheatsRowValue(cheats, sizeof(cheats));
     UiMenuAdd(&s_menu, Tr(T_CHEATS), cheats);
+    if (s_menuCfg) TexturesRowValue(s_menuCfg, tex, sizeof(tex));
+    else tex[0] = 0;
+    UiMenuAdd(&s_menu, Tr(T_HIRESTEX), tex);
     UiMenuAdd(&s_menu, Tr(T_SETTINGS), "");
     UiMenuAdd(&s_menu, Tr(T_RESET_GAME), "");
     UiMenuAdd(&s_menu, Tr(T_BACK_TO_LIST), "");
     UiMenuAdd(&s_menu, Tr(T_QUIT_DASHBOARD), "");
     {
-        static const unsigned char icons[] = { UI_ICON_PLAY, UI_ICON_STATES, UI_ICON_SLIDERS, UI_ICON_GEAR, UI_ICON_RESET, UI_ICON_LIST, UI_ICON_POWER };
+        static const unsigned char icons[] = { UI_ICON_PLAY, UI_ICON_STATES, UI_ICON_SLIDERS, UI_ICON_HD, UI_ICON_GEAR, UI_ICON_RESET, UI_ICON_LIST, UI_ICON_POWER };
         UiMenuIcons(&s_menu, icons, sizeof(icons));
     }
 }
@@ -1439,6 +1564,7 @@ static int GameMenu(H64System *sys, H64Renderer *renderer, Config *c)
     strncpy(hiTexFileApplied, c->hiTexFile, sizeof(hiTexFileApplied) - 1);
     hiTexFileApplied[sizeof(hiTexFileApplied) - 1] = 0;
     if (s_gfxQ.thread) WorkWaitAll(NULL);   // the device is this thread's while the menu shows
+    s_menuCfg = c;
     BuildGameMenu();
     if (!s_npTitle[0] && s_romNow[0])
     {
@@ -1452,7 +1578,7 @@ static int GameMenu(H64System *sys, H64Renderer *renderer, Config *c)
     {
         WORD down = UiInputPoll(&in);
         s_reservedSlot = c->padLoss == PADLOSS_SAVE ? c->autoSaveSlot : 0;   // Settings > System may change it from here
-        if (!settings && !s_aboutOpen && !s_hiresPreviewOpen && !s_confirmOpen && !s_cheatsOpen && (down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT)))
+        if (!settings && !s_aboutOpen && !s_hiresPreviewOpen && !s_confirmOpen && !s_cheatsOpen && !s_texOpen && (down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT)))
             UiMenuPress();   // the pause menu's and the States page's rows show the press (Settings does it itself)
         if (s_confirmOpen)
         {
@@ -1482,6 +1608,36 @@ static int GameMenu(H64System *sys, H64Renderer *renderer, Config *c)
         else if (s_hiresPreviewOpen)
         {
             if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_X)) s_hiresPreviewOpen = 0;
+        }
+        else if (s_texOpen)
+        {
+            int r = TexturesInput(down, c);
+            if (r == 1)
+            {
+                s_texOpen = 0;
+                BuildGameMenu();   // its row: the pack in use now
+                s_menu.sel = M_TEXTURES;
+            }
+            else if (r == 2)
+            {
+                // Another pack (or off): loaded now.
+                ApplyGraphics(sys, renderer, c);
+                HiresOpen(sys, renderer, c);
+                hiTexApplied = c->hiTex;
+                strncpy(hiTexFileApplied, c->hiTexFile, sizeof(hiTexFileApplied) - 1);
+                hiTexFileApplied[sizeof(hiTexFileApplied) - 1] = 0;
+                s_texActive = HiresActiveIndex(c);
+            }
+            else if (r == 3)
+            {
+                // Y: a texture of the selected pack (closed by B, A or X; back on this page).
+                Config look = *c;
+                look.hiTex = 1;
+                strncpy(look.hiTexFile, HiresPackName(s_texSel - 1), sizeof(look.hiTexFile) - 1);
+                look.hiTexFile[sizeof(look.hiTexFile) - 1] = 0;
+                HiresPreviewOpen(&look);
+                s_hiresPreviewOpen = 1;
+            }
         }
         else if (s_cheatsOpen)
         {
@@ -1568,6 +1724,7 @@ static int GameMenu(H64System *sys, H64Renderer *renderer, Config *c)
                 case M_RESUME: result = RG_CONTINUE; break;
                 case M_STATES: states = 1; BuildStatesMenu(); break;
                 case M_CHEATS: s_cheatsOpen = 1; s_cheatSel = s_cheatTop = 0; break;
+                case M_TEXTURES: TexturesOpen(c); break;
                 case M_SETTINGS: settings = 1; SettingsBuild(&s_menu, c, s_profilePath[0] != 0); break;
                 case M_RESET: s_confirmOpen = CONFIRM_RESET; break;      // asked first (above)
                 case M_ROMS: s_confirmOpen = CONFIRM_LIST; break;        // asked first (above)
@@ -1576,12 +1733,14 @@ static int GameMenu(H64System *sys, H64Renderer *renderer, Config *c)
             }
         }
         s_statesOpen = states;   // the overlay shows the slot's picture under the rows
-        s_pauseMain = !states && !settings && !s_aboutOpen && !s_hiresPreviewOpen && !s_cheatsOpen;   // ... or the game's, on the main page
+        s_pauseMain = !states && !settings && !s_aboutOpen && !s_hiresPreviewOpen && !s_cheatsOpen && !s_texOpen;   // ... or the game's, on the main page
         h64_xenos_present(renderer);   // the frozen frame, the menu (overlay) on top
         Sleep(16);
     }
     if (s_cheatsOpen) h64_cheats_save_state(&s_cheats, s_cheatState);
     s_cheatsOpen = 0;
+    s_texOpen = 0;
+    s_menuCfg = NULL;
     s_statesOpen = 0;
     s_pauseMain = 0;
     s_menuOpen = 0;
@@ -1821,10 +1980,10 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
     DWORD hpackAt = GetTickCount() + 1000;
     for (;;)
     {
-        if (hpackWas && GetTickCount() >= hpackAt)
+        if ((hpackWas || HiresQueueStatus(NULL, NULL, NULL, NULL)) && GetTickCount() >= hpackAt)
         {
             hpackAt = GetTickCount() + 1000;
-            if (!HiresPackBusy())
+            if (hpackWas && !HiresPackBusy())
             {
                 unsigned kb[2];
                 int err = HPERR_NONE, st = HiresPackStatus(&kb[0], &kb[1], &err, NULL, 0);
@@ -1842,6 +2001,7 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
                 else if (st == HPACK_DONE) OsdT(T_HIRES_BG_DONE, 0);
                 else if (st == HPACK_FAILED && err != HPERR_CANCELLED) OsdT(T_HIRES_BG_FAILED, 0);
             }
+            if (HiresQueueTick()) hpackWas = 1;   // "Download all": the next pack (slower while playing)
         }
         if (c->artBackground && c->artDownload && GetTickCount() >= artAt)
         {

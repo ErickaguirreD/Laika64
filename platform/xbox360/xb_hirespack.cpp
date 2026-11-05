@@ -877,10 +877,35 @@ static void png_scan(const char *dir, std::vector<std::string> &files, u64 *byte
     FindClose(h);
 }
 
+// Whether a PNG is in dir or `levels` folders below: stops at the first one
+// (png_scan listed them all: thousands of files in a big pack, for one answer).
+static int png_any(const char *dir, int levels)
+{
+    char pattern[300];
+    WIN32_FIND_DATAA fd;
+    HANDLE h;
+    int found = 0;
+    _snprintf(pattern, sizeof(pattern) - 1, "%s\\*", dir);
+    pattern[sizeof(pattern) - 1] = 0;
+    h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do
+    {
+        size_t n = strlen(fd.cFileName);
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+        {
+            if (levels > 0 && strcmp(fd.cFileName, ".") && strcmp(fd.cFileName, ".."))
+                found = png_any((std::string(dir) + "\\" + fd.cFileName).c_str(), levels - 1);
+        }
+        else if (n > 4 && !_stricmp(fd.cFileName + n - 4, ".png"))
+            found = 1;
+    } while (!found && FindNextFileA(h, &fd));
+    FindClose(h);
+    return found;
+}
+
 int HiresPngPresent(const char *dir)
 {
-    std::vector<std::string> files;
-    u64 bytes = 0;
     char pattern[300];
     WIN32_FIND_DATAA fd;
     HANDLE h;
@@ -889,8 +914,7 @@ int HiresPngPresent(const char *dir)
     pattern[sizeof(pattern) - 1] = 0;
     h = FindFirstFileA(pattern, &fd);
     if (h != INVALID_HANDLE_VALUE) { FindClose(h); return 1; }
-    png_scan(dir, files, &bytes, 2);   // two levels below at most here (cheap: the menu asks it)
-    return !files.empty();
+    return png_any(dir, 2);   // two levels below at most here (the menu asks it)
 }
 
 // The folder's PNG pack converted into <dest>\<name>.
@@ -1483,6 +1507,8 @@ void HiresActiveWrite(const char *dir, const char *file)
     fclose(f);
 }
 
+static int s_jobQueued;   // the job is one of "Download all"'s (HiresQueueTick)
+
 // The .hts just made (s_file in s_dest) renamed after its pack, and made the one in use.
 static void install_name(void)
 {
@@ -1497,7 +1523,8 @@ static void install_name(void)
         DeleteFileA(to);   // an older copy of the same pack
         if (MoveFileA(from, to)) { strncpy(s_file, want, sizeof(s_file) - 1); s_file[sizeof(s_file) - 1] = 0; }
     }
-    HiresActiveWrite(s_dest, s_file);
+    // From "Download all" (s_jobQueued) the game's choice stays when it has one.
+    if (!s_jobQueued || HiresActiveRead(s_dest, want, sizeof(want)) == 0) HiresActiveWrite(s_dest, s_file);
 }
 
 // ---- The worker ----
@@ -1589,10 +1616,11 @@ static DWORD WINAPI pack_thread(LPVOID)
     return 0;
 }
 
-void HiresPackStart(const HiresPackEntry *e, const char *destDir)
+static void pack_start(const HiresPackEntry *e, const char *destDir, int queued)
 {
     HANDLE t;
     if (!e || HiresPackBusy()) return;
+    s_jobQueued = queued;
     s_job = *e;
     strncpy(s_dest, destDir, sizeof(s_dest) - 1);
     s_dest[sizeof(s_dest) - 1] = 0;
@@ -1612,6 +1640,8 @@ void HiresPackStart(const HiresPackEntry *e, const char *destDir)
     ResumeThread(t);
     CloseHandle(t);
 }
+
+void HiresPackStart(const HiresPackEntry *e, const char *destDir) { pack_start(e, destDir, 0); }
 
 const HiresPackEntry *HiresPackJob(void)
 {
@@ -1724,6 +1754,63 @@ void HiresPngStart(const char *romName, const char *destDir)
 void HiresPackCancel(void)
 {
     InterlockedExchange(&s_cancel, 1);
+}
+
+// ---- "Download all" (Settings > HD textures): the packs not installed, one after another ----
+// The queue moves on wherever HiresQueueTick is called: its screen, the ROM list, a game.
+static std::vector<int> s_queue;      // catalog indices
+static std::string s_queueDir;        // the textures folder (each pack into its game's)
+static int s_queuePos, s_queueOk, s_queueFailed, s_queueCounted = 1;
+
+void HiresQueueSet(const int *packs, int n, const char *texturesDir)
+{
+    s_queue.assign(packs, packs + (n > 0 ? n : 0));
+    s_queueDir = texturesDir;
+    s_queuePos = s_queueOk = s_queueFailed = 0;
+    s_queueCounted = 1;
+    HiresQueueTick();
+}
+
+int HiresQueueTick(void)
+{
+    if (s_queue.empty() || HiresPackBusy()) return 0;
+    if (!s_queueCounted && s_jobQueued)
+    {
+        // The last one ended: counted once.
+        if (s_state == HPACK_DONE) s_queueOk++;
+        else if (s_state == HPACK_FAILED && s_error != HPERR_CANCELLED) s_queueFailed++;
+        s_queueCounted = 1;
+    }
+    if (s_queuePos >= (int)s_queue.size()) return 0;
+    {
+        const HiresPackEntry *e = HiresPackAt(s_queue[s_queuePos++]);
+        char folder[64], dest[256];
+        if (!e) return 0;
+        HiresFolderName(e->romName, folder, sizeof(folder));
+        _snprintf(dest, sizeof(dest) - 1, "%s\\%s", s_queueDir.c_str(), folder);
+        dest[sizeof(dest) - 1] = 0;
+        CreateDirectoryA(s_queueDir.c_str(), NULL);
+        pack_start(e, dest, 1);
+        s_queueCounted = 0;
+        H64_INFO("[hirespack] download all: %d of %d, %s", s_queuePos, (int)s_queue.size(), e->title);
+        return 1;
+    }
+}
+
+int HiresQueueStatus(int *pos, int *total, int *ok, int *failed)
+{
+    if (pos) *pos = s_queuePos;
+    if (total) *total = (int)s_queue.size();
+    if (ok) *ok = s_queueOk;
+    if (failed) *failed = s_queueFailed;
+    return !s_queue.empty() && (s_queuePos < (int)s_queue.size() || (s_jobQueued && HiresPackBusy()));
+}
+
+void HiresQueueCancel(void)
+{
+    if (s_queue.empty()) return;
+    s_queue.resize(s_queuePos);   // nothing more starts
+    if (s_jobQueued && HiresPackBusy()) HiresPackCancel();
 }
 
 int HiresPackStatus(unsigned *doneKb, unsigned *totalKb, int *error, char *file, size_t fileSize)
