@@ -47,6 +47,13 @@ void HiresQueueSet(const int *packs, int n, const char *texturesDir);
 int HiresQueueTick(void);
 int HiresQueueStatus(int *pos, int *total, int *ok, int *failed);
 void HiresQueueCancel(void);
+// The queue's next pack downloading (or downloaded) while the one before is made a .hts:
+// 1 with its title and KB so far / in all.
+int HiresPrefetchStatus(const char **title, unsigned *doneKb, unsigned *totalKb);
+
+// A game runs (main.cpp, round RunGame): conversions to DXT then use one hardware thread
+// only, the others the game's (otherwise four: the pack's and three workers).
+void HiresSetPlaying(int on);
 
 enum { HPACK_IDLE = 0, HPACK_LOOKUP, HPACK_DOWNLOAD, HPACK_UNPACK, HPACK_DONE, HPACK_FAILED, HPACK_CONVERT };
 enum { HPERR_NONE = 0, HPERR_NETWORK, HPERR_NOPACK, HPERR_SPACE, HPERR_TOOBIG, HPERR_ARCHIVE, HPERR_FILE, HPERR_CANCELLED, HPERR_NOPNG };

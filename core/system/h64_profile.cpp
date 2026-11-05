@@ -38,7 +38,7 @@ static const GameProfile s_profiles[] = {
     // grey courses. Keeps its course picture in a full-size image and copies the
     // frame into narrow strips: copying those strips back garbled the HUD,
     // and no copy back at all left the course black once the camera stops.
-    { "NMF", "Mario Golf", H64_GP_OTHERMODE_INIT | H64_GP_COPY_BACK_FULL },
+    { "NMF", "Mario Golf", H64_GP_OTHERMODE_INIT | H64_GP_COPY_BACK_FULL | H64_GP_FRAME_TO_RDRAM },
     // Missing players and net with copy backs; right without. Also: what it
     // draws into its depth image (0x400) as colour is left out (Xenos
     // colour_is_depth): ~100 changes of image a frame in matches, 20-33 VI/s.
@@ -248,7 +248,9 @@ static const GameProfile s_profiles[] = {
 };
 
 // Options with no bit left in the flags above, set by h64_apply_game_profile.
-enum { H64_GX_SOFT_TINY = 1, H64_GX_TALL_SCISSOR = 2, H64_GX_SOFT_SMALL = 4, H64_GX_COPY_LATE = 8 };   // options.gfxSoftTiny, gfxTallScissor, gfxSoftSmall, gfxCopyBackLate
+enum { H64_GX_SOFT_TINY = 1, H64_GX_TALL_SCISSOR = 2, H64_GX_SOFT_SMALL = 4, H64_GX_COPY_LATE = 8, H64_GX_COPY_SYNC = 16,
+       H64_GX_DEPTH_DROP = 32, H64_GX_FILL_RAM = 64 };   // options.gfxSoftTiny, gfxTallScissor, gfxSoftSmall, gfxCopyBackLate,
+                                                       // gfxCopyBackSync, gfxDepthDrawDrop, gfxFillOnlyRam
 struct GameExtra { const char *code; u32 extra; };
 static const GameExtra s_extras[] = {
     // Each character's shaded palette is drawn into a 16x1 image, then loaded
@@ -273,6 +275,14 @@ static const GameExtra s_extras[] = {
     // 16 ms a frame for it; with every image under 320 wide, its intro screens
     // too, ~139 ms a frame.)
     { "NFU", H64_GX_COPY_LATE },
+    // Mario Golf keeps its course's background as a picture and its depth
+    // (at 2EA000), and copies both in strips each frame: the depth into its
+    // depth image, which waited for the GPU every frame for nothing (our depth
+    // is the GPU's; ~40 VI/s while aiming). At a swing the CPU copies the
+    // frame shown into the depth picture's memory, in 64x32 blocks, and turns it
+    // over as a card: the GPU's copy of that image, only ever cleared, made the
+    // card white. The frame shown goes to RDRAM (FRAME_TO_RDRAM above).
+    { "NMF", H64_GX_DEPTH_DROP | H64_GX_FILL_RAM },
 };
 
 static void apply_idle_yield(H64System *sys);
@@ -303,6 +313,9 @@ void h64_apply_game_profile(H64System *sys)
     sys->options.gfxTallScissor = (extra & H64_GX_TALL_SCISSOR) != 0;
     sys->options.gfxSoftSmall = (extra & H64_GX_SOFT_SMALL) != 0;
     sys->options.gfxCopyBackLate = (extra & H64_GX_COPY_LATE) != 0;
+    sys->options.gfxCopyBackSync = (extra & H64_GX_COPY_SYNC) != 0;   // no copy of the frame before even when copied every frame
+    sys->options.gfxDepthDrawDrop = (extra & H64_GX_DEPTH_DROP) != 0;
+    sys->options.gfxFillOnlyRam = (extra & H64_GX_FILL_RAM) != 0;
     if (name) H64_INFO("[profile] %s: flags %X%s", name, f, extra ? " (+ extra options)" : "");
 }
 

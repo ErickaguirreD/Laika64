@@ -44,6 +44,12 @@ void h64_rdp_hle_full_sync(H64System *sys);
 
 // One complete command (1 to 22 big-endian 64-bit words), h64_rdp_render.cpp.
 void h64_rdp_command(H64System *sys, const u64 *words, u32 count);
+// 1 when the command would leave the RDP state as it is: a setter of the tile, its size, the
+// texture image or a colour to the values they have, or a LOAD_TLUT of the palette TMEM holds
+// (h64_rdp_tlut_same). The GPU renderer then keeps its batch and texture memos (Cruis'n USA
+// loads ~320 palettes a frame between draws, most the same again).
+int h64_rdp_command_noop(H64System *sys, const u64 *words);
+int h64_rdp_tlut_same(H64System *sys, u32 tileIndex, u32 sl, u32 tl, u32 sh, u32 th);
 // Frees what running DPC commands on the graphics worker uses (h64_rdp.cpp).
 void h64_rdp_async_free(H64System *sys);
 

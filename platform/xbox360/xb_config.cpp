@@ -167,6 +167,7 @@ void ConfigDefaults(Config *c)
     c->zoom = 100;
     c->offsetX = c->offsetY = 0;
     c->devMode = c->gfxLog = 0;
+    c->audioCheck = 0;
     c->texR3 = 1;   // R3 x2: the HD textures on and off in game
     ConfigHotkeyDefaults(c);
     c->stretch = 0;
@@ -208,6 +209,7 @@ int ConfigParseFile(Config *c, const char *path)
         *eq = 0;
         // Outside the chain below: it is at the compiler's limit of nested else-ifs.
         if (!strcmp(line, "devmode")) c->devMode = atoi(eq + 1);
+        if (!strcmp(line, "audiocheck")) c->audioCheck = atoi(eq + 1);
         if (!strcmp(line, "gfxlog")) c->gfxLog = atoi(eq + 1);
         if (!strcmp(line, "texr3")) c->texR3 = atoi(eq + 1);
         if (!strcmp(line, "artextras")) c->artExtras = atoi(eq + 1);

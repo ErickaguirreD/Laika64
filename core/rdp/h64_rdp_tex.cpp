@@ -44,6 +44,29 @@ static u8 rd8(H64System *sys, u32 a)
 }
 
 static void load_body(H64System *sys, u32 tileIndex, u32 sl, u32 tl, u32 sh, u32 th, int mode);
+
+int h64_rdp_tlut_same(H64System *sys, u32 tileIndex, u32 sl, u32 tl, u32 sh, u32 th)
+{
+    H64RdpState *st = sys->rdpState;
+    const H64RdpTile *tile = &st->tiles[tileIndex & 7];
+    u32 count = ((sh >> 2) - (sl >> 2) + 1) & 0xFFF, i, k, src, h;
+    if (!st->texSize || tile->slo != sl || tile->shi != sh || tile->tlo != tl || tile->thi != th) return 0;
+    src = st->texAddr + (((tl >> 2) * st->texWidth + (sl >> 2)) << (st->texSize - 1));
+    h = (tile->offset >> 1) & 0x7FF;
+    if (count > 256) count = 256;
+    for (i = 0; i < count; i++)
+    {
+        u8 hi = rd8(sys, src + i * 2), lo = rd8(sys, src + i * 2 + 1);
+        for (k = 0; k < 4; k++)
+        {
+            u32 a = ((h + i * 4 + k) & 0x7FF) * 2;
+            if (st->tmem[a] != hi || st->tmem[a + 1] != lo) return 0;
+        }
+        if (tile->offset >= 0x800 && st->tlutEntries[((tile->offset - 0x800) / 8 + i) & 0xFF] != (u16)(hi << 8 | lo)) return 0;
+    }
+    return 1;
+}
+
 void h64_rdp_load(H64System *sys, u32 tileIndex, u32 sl, u32 tl, u32 sh, u32 th, int mode)
 {
     u64 t0 = h64_prof_now(sys);

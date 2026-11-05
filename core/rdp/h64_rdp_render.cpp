@@ -1430,6 +1430,44 @@ void h64_rdp_command(H64System *sys, const u64 *words, u32 count)
     }
 }
 
+int h64_rdp_command_noop(H64System *sys, const u64 *words)
+{
+    const H64RdpState *st = sys->rdpState;
+    u32 w0 = (u32)(words[0] >> 32), w1 = (u32)words[0], op = (w0 >> 24) & 0x3F;
+    switch (op)
+    {
+    case 0x30: return h64_rdp_tlut_same(sys, (w1 >> 24) & 7, (w0 >> 12) & 0xFFF, w0 & 0xFFF, (w1 >> 12) & 0xFFF, w1 & 0xFFF);
+    case 0x32:
+    {
+        const H64RdpTile *t = &st->tiles[(w1 >> 24) & 7];
+        return t->slo == ((w0 >> 12) & 0xFFF) && t->tlo == (w0 & 0xFFF) && t->shi == ((w1 >> 12) & 0xFFF) && t->thi == (w1 & 0xFFF);
+    }
+    case 0x35:
+    {
+        // As case 0x35 of h64_rdp_command would set it.
+        const H64RdpTile *t = &st->tiles[(w1 >> 24) & 7];
+        u32 maskS = (w1 >> 4) & 15, maskT = (w1 >> 14) & 15, flags = 0;
+        if (w1 & (1 << 8)) flags |= TILE_MIRROR_S;
+        if (w1 & (1 << 9)) flags |= TILE_CLAMP_S;
+        if (w1 & (1 << 18)) flags |= TILE_MIRROR_T;
+        if (w1 & (1 << 19)) flags |= TILE_CLAMP_T;
+        if (maskS > 10) maskS = 10; else if (maskS == 0) flags |= TILE_CLAMP_S;
+        if (maskT > 10) maskT = 10; else if (maskT == 0) flags |= TILE_CLAMP_T;
+        return t->offset == ((w0 & 511) << 3) && t->stride == (((w0 >> 9) & 511) << 3) && t->size == ((w0 >> 19) & 3) &&
+               t->fmt == ((w0 >> 21) & 7) && t->palette == ((w1 >> 20) & 15) && t->shiftS == (w1 & 15) && t->maskS == maskS &&
+               t->shiftT == ((w1 >> 10) & 15) && t->maskT == maskT && (u32)t->flags == flags;
+    }
+    case 0x37: return st->fillColor == w1;
+    case 0x38: return st->fogColor == w1;
+    case 0x39: return st->blendColor == w1;
+    case 0x3A: return st->primMinLevel == ((w0 >> 8) & 31) && st->primLodFrac == (w0 & 0xFF) && st->primColor == w1;
+    case 0x3B: return st->envColor == w1;
+    case 0x3D:
+        return st->texFmt == ((w0 >> 21) & 7) && st->texSize == ((w0 >> 19) & 3) && st->texWidth == (w0 & 0x3FF) + 1 && st->texAddr == (w1 & 0xFFFFFF);
+    }
+    return 0;
+}
+
 void h64_rdp_free(H64System *sys)
 {
     h64_rdp_async_free(sys);

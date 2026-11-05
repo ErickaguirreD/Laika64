@@ -1871,6 +1871,8 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
     if (c->lateParse >= 0) sys->options.gfxLateParse = c->lateParse;
     if (sys->options.gfxLateParse) H64_INFO("[main] late display list parse on");
     sys->options.hleAudio = c->hle;
+    sys->options.hleAudioCheck = c->audioCheck;   // audiocheck=1: the LLE plays, the HLE is compared with it
+    if (c->audioCheck) H64_INFO("[main] audio check: LLE RSP audio, HLE compared");
     sys->padHook = PadHook;
     s_padMaps = c->padMap;
     // Rumble Paks in the controllers of the games that support one (on port 1
@@ -2594,7 +2596,9 @@ int __cdecl main()
             s_settingsPath[0] = s_profilePath[0] = 0;
             ChooseLanguage(dev, &cfg, menuFile, 0);
             SettingsSetLangFile("");
+            HiresSetPlaying(1);
             RunGame(dev, &cfg, NULL);
+            HiresSetPlaying(0);
         }
         else
         {
@@ -2642,7 +2646,11 @@ int __cdecl main()
                     s_profilePath[sizeof(s_profilePath) - 1] = 0;
                     if (ConfigParseFile(&game, s_profilePath)) H64_INFO("[main] game profile %s", s_profilePath);
                 }
-                if (RunGame(dev, &game, path) == RG_DASHBOARD) break;
+                int rg;
+                HiresSetPlaying(1);   // a pack converting meanwhile: one thread only
+                rg = RunGame(dev, &game, path);
+                HiresSetPlaying(0);
+                if (rg == RG_DASHBOARD) break;
             }
         }
     }

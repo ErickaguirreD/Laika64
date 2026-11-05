@@ -6100,7 +6100,43 @@ static void news_screen(IDirect3DDevice9 *dev)
 // the emulator (version, engine, licence), the credits (who made it, what is new
 // in LAIKA 64) and the acknowledgements. In the menus' language; names and
 // projects as they are.
-static int s_aboutTab;   // 0 About, 1 Credits, 2 Acknowledgements
+static int s_aboutTab;   // 0 About, 1 Credits, 2 Acknowledgements, 3 Donate
+#define ABOUT_TABS 4
+#define DONATE_URL "paypal.me/ErickAbrahamA"
+// The donation page's QR code of https://paypal.me/ErickAbrahamA (version 3, level M; made on a
+// PC with Python's qrcode): the console has no browser, a phone scans it.
+static const char *const s_donateQr[29] = {
+    "11111110000010100111001111111",
+    "10000010000100001000101000001",
+    "10111010010010110101001011101",
+    "10111010001001001111001011101",
+    "10111010010010000010001011101",
+    "10000010111100011001001000001",
+    "11111110101010101010101111111",
+    "00000000011111011110000000000",
+    "10010110110000101001010100000",
+    "11001000101001011100111001001",
+    "10011010111101110111100011110",
+    "10010001110011001000100000110",
+    "11001011000100110100011101011",
+    "00000100101101111111110000000",
+    "11111010101001100010110011111",
+    "11100000101000010101110111010",
+    "00010110010001000101100100010",
+    "00001100000011111001011101001",
+    "10000111101100111010010110011",
+    "00110100100110100111110100011",
+    "10001010011110011001111110100",
+    "00000000111110110001100010111",
+    "11111110010110001010101010010",
+    "10000010110010110001100011101",
+    "10111010010100001100111110010",
+    "10111010111000010101001111101",
+    "10111010001101100111000011101",
+    "10000010001100111111101100010",
+    "11111110110001110100110010010"
+};
+
 static IDirect3DTexture9 *s_profileTex;   // ErickaguirreD's picture (xb_profile.h, from luna.jpg)
 static int s_profileTried;
 
@@ -6108,12 +6144,12 @@ int AboutInput(WORD down)
 {
     if (down & (XINPUT_GAMEPAD_LEFT_SHOULDER | XINPUT_GAMEPAD_DPAD_LEFT))
     {
-        s_aboutTab = (s_aboutTab + 2) % 3;
+        s_aboutTab = (s_aboutTab + ABOUT_TABS - 1) % ABOUT_TABS;
         xb_audio_ui_sound(XB_SFX_TAB);
     }
     if (down & (XINPUT_GAMEPAD_RIGHT_SHOULDER | XINPUT_GAMEPAD_DPAD_RIGHT))
     {
-        s_aboutTab = (s_aboutTab + 1) % 3;
+        s_aboutTab = (s_aboutTab + 1) % ABOUT_TABS;
         xb_audio_ui_sound(XB_SFX_TAB);
     }
     if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_START | XINPUT_GAMEPAD_BACK)) { s_aboutTab = 0; return 1; }
@@ -6144,9 +6180,9 @@ void AboutDraw(void)
     UiText(UI_REGULAR, 16, x + w - 52, y + 88, UI_COL_TEXT3, __DATE__, UI_RIGHT);
     // The tabs.
     tx = cx;
-    for (i = 0; i < 3; i++)
+    for (i = 0; i < ABOUT_TABS; i++)
     {
-        const char *t = Tr(i == 2 ? T_CR_THANKS_TAB : i ? T_CREDITS : T_ABOUT);
+        const char *t = Tr(i == 3 ? T_DONATE_TAB : i == 2 ? T_CR_THANKS_TAB : i ? T_CREDITS : T_ABOUT);
         float tw = UiTextWidth(UI_BOLD, 20, t) + 36;
         if (i == s_aboutTab) UiRoundRect(tx, y + 122, tw, 36, 18, SEL_HI(255), SEL_HI(220));
         else UiRoundRing(tx, y + 122, tw, 36, 18, 1.0f, UI_COL_LINE);
@@ -6193,6 +6229,21 @@ void AboutDraw(void)
             UiCircle(bx + 4, by, 3.5f, UI_COL_ACCENT_HI);
             UiText(UI_REGULAR, 18, bx + 18, by, UI_COL_TEXT2, Tr(T_CR_NEW_1 + i), UI_LEFT);
         }
+    }
+    else if (s_aboutTab == 3)
+    {
+        // Donate: a few words, the PayPal link, and its QR code on white (with its quiet zone).
+        const int n = (int)(sizeof(s_donateQr) / sizeof(s_donateQr[0]));
+        const float mod = 7.0f, quiet = 4 * mod, qs = n * mod + 2 * quiet, qx = x + w - 52 - qs, qy = ty - 6;
+        int r, c;
+        heading(cx, ty, Tr(T_DONATE_TITLE));
+        paragraph(UI_REGULAR, 19, cx, ty + 16, qx - cx - 40, 6, UI_COL_TEXT2, Tr(T_DONATE_TEXT));
+        UiText(UI_REGULAR, 17, cx, ty + 200, UI_COL_TEXT3, Tr(T_DONATE_SCAN), UI_LEFT);
+        UiText(UI_BOLD, 26, cx, ty + 236, UI_COL_ACCENT_HI, DONATE_URL, UI_LEFT);
+        UiRoundRect(qx, qy, qs, qs, 12, 0xFFFFFFFF, 0xFFFFFFFF);
+        for (r = 0; r < n; r++)
+            for (c = 0; s_donateQr[r][c]; c++)
+                if (s_donateQr[r][c] == '1') UiRect(qx + quiet + c * mod, qy + quiet + r * mod, mod, mod, D3DCOLOR_ARGB(255, 0, 0, 0));
     }
     else
     {
@@ -7795,27 +7846,6 @@ static int catedit_input(UiMenu *m, Config *c, WORD down)
     return SET_NONE;
 }
 
-// The tab bar: "LT  Favourites (12)  RT", centred on `x` (the covers and the
-// carousel, at the top) or starting at it (the list, under the logo: a lower
-// pill, just around the LT/RT glyphs, so it sits closer over the list).
-static void browser_tabs(float x, float cy, int centred, float maxW)
-{
-    const float h = centred ? 34.0f : 28.0f;
-    char name[160], full[200], label[200];
-    float w;
-    tab_name(s_tab, name, sizeof(name));
-    _snprintf(full, sizeof(full) - 1, "%s (%d)", name, s_tabGames);
-    full[sizeof(full) - 1] = 0;
-    UiTextFit(UI_BOLD, 19, maxW - 128, full, label, sizeof(label));
-    w = UiTextWidth(UI_BOLD, 19, label);
-    x = centred ? x - w * 0.5f : x + 64;
-    UiRoundRect(x - 64, cy - h * 0.5f, w + 128, h, h * 0.5f, D3DCOLOR_ARGB(150, 30, 34, 46), D3DCOLOR_ARGB(150, 24, 27, 37));
-    UiRoundRing(x - 64, cy - h * 0.5f, w + 128, h, h * 0.5f, 1.5f, SEL_HI(120));
-    UiFooter(x - 58, cy, "LT");
-    UiText(UI_BOLD, 19, x, cy, UI_COL_TEXT, label, UI_LEFT);
-    UiFooter(x + w + 58 - UiFooterWidth("RT"), cy, "RT");
-}
-
 // ---- ROM files (plain or zipped) ----
 static u32 handle_read(void *user, u32 offset, void *buf, u32 len)
 {
@@ -8341,6 +8371,30 @@ static void packs_kv(float x, float y, float w, const char *label, const char *v
 // What the Packs screen knows of each pack on the drive, read when it opens and after a
 // change (not every frame): its file there, its size, whether it is the game's pack in use.
 
+// Whether a .hts named `base` (lower case, without ".hts") in the game's folder is catalog pack
+// i under a name earlier versions gave: "<ROM>_<title>" (cut to 38), the same with underscores
+// for spaces, or "<ROM>_HIRESTEXTURES" with underscores (the game's first GitHub pack).
+static int pack_legacy_name(int i, const char *folder, const std::string &base)
+{
+    const HiresPackEntry *e = HiresPackAt(i);
+    char title[96];
+    std::string byRom, byRomU, firstU;
+    size_t j;
+    int k;
+    HiresFolderName(e->title, title, sizeof(title));
+    byRom = lower_str(folder) + "_" + lower_str(title);
+    byRomU = byRom;
+    for (j = 0; j < byRomU.size(); j++) if (byRomU[j] == ' ') byRomU[j] = '_';
+    if (base == byRom || base == byRomU) return 1;
+    if (base.size() >= 30 && (!byRom.compare(0, base.size(), base) || !byRomU.compare(0, base.size(), base))) return 1;
+    if (!e->owner[0]) return 0;
+    for (k = 0; k < i; k++)
+        if (HiresPackAt(k)->owner[0] && !strcmp(HiresPackAt(k)->romName, e->romName)) return 0;   // not its first GitHub pack
+    firstU = lower_str(folder);
+    for (j = 0; j < firstU.size(); j++) if (firstU[j] == ' ') firstU[j] = '_';
+    return base == firstU + "_hirestextures";
+}
+
 static void packs_here(int i, PackHere *ph)
 {
     const HiresPackEntry *e = HiresPackAt(i);
@@ -8368,6 +8422,42 @@ static void packs_here(int i, PackHere *ph)
             _snprintf(path, sizeof(path) - 1, "%s\\%s", dir, ph->file);
             path[sizeof(path) - 1] = 0;
             ph->installed = GetFileAttributesExA(path, GetFileExInfoStandard, &fa) != 0;
+        }
+    }
+    if (!ph->installed)
+    {
+        // Other names earlier versions gave it (pack_legacy_name). A file goes to one pack only:
+        // not when another of the game's packs has it as its own name, nor when an earlier one
+        // matches it too (Super Mario 64 has four "Retexture" packs: one file made all four
+        // installed and "in use", green).
+        char pattern[208], own[64];
+        WIN32_FIND_DATAA fd;
+        HANDLE h;
+        _snprintf(pattern, sizeof(pattern) - 1, "%s\\*.hts", dir);
+        pattern[sizeof(pattern) - 1] = 0;
+        h = FindFirstFileA(pattern, &fd);
+        if (h != INVALID_HANDLE_VALUE)
+        {
+            do
+            {
+                std::string base = lower_str(fd.cFileName);
+                int taken = 0, n = HiresPackTotal();
+                if (base.size() > 4) base.resize(base.size() - 4);   // ".hts"
+                if (!pack_legacy_name(i, folder, base)) continue;
+                for (k = 0; k < n && !taken; k++)
+                {
+                    if (k == i || strcmp(HiresPackAt(k)->romName, e->romName)) continue;
+                    HiresPackFileName(HiresPackAt(k), own, sizeof(own));
+                    taken = !_stricmp(own, fd.cFileName) || (k < i && pack_legacy_name(k, folder, base));
+                }
+                if (taken) continue;
+                strncpy(ph->file, fd.cFileName, sizeof(ph->file) - 1);
+                ph->file[sizeof(ph->file) - 1] = 0;
+                fa.nFileSizeLow = fd.nFileSizeLow;
+                ph->installed = 1;
+                break;
+            } while (FindNextFileA(h, &fd));
+            FindClose(h);
         }
     }
     if (!ph->installed) return;
@@ -9246,6 +9336,18 @@ static void hires_download_all_screen(IDirect3DDevice9 *dev, Config *c)
                 line[sizeof(line) - 1] = 0;
                 UiText(UI_REGULAR, 15, cx, y + 204, UI_COL_TEXT3, line, UI_CENTER);
             }
+            {
+                // The next pack, coming down meanwhile (while this one is made a .hts).
+                const char *nt = NULL;
+                unsigned nd = 0, ntot = 0;
+                if ((st == HPACK_CONVERT || st == HPACK_UNPACK) && HiresPrefetchStatus(&nt, &nd, &ntot) && nt)
+                {
+                    _snprintf(line, sizeof(line) - 1, Tr(T_DLALL_NEXT), nt, ntot ? (int)(nd * 100.0 / ntot) : 0);
+                    line[sizeof(line) - 1] = 0;
+                    UiTextFit(UI_REGULAR, 15, bw, line, fit, sizeof(fit));
+                    UiText(UI_REGULAR, 15, cx, y + 250, UI_COL_ACCENT_HI, fit, UI_CENTER);
+                }
+            }
             // The whole queue: the packs ended, and the one at work's share.
             fa = total ? ((float)(pos > 0 ? pos - 1 : 0) + f) / (float)total : 0.0f;
             shown = anim_step_rate(&all, fa, !all.live, 6.0f, 0.001f);
@@ -10028,7 +10130,152 @@ static int flag_draw(float x, float y, float w, float h, const char *english, fl
     return 1;
 }
 
-// A chip with a small symbol before its text: the genre (a grid of four), the players
+// The genre's symbol, about 12 pixels, its left edge at gx: from words in the game
+// information's genre (English: "Sports", "Racing", "Action / Platform"...), the first
+// family found; a grid of four for the others.
+static int genre_has(const char *genre, const char *const *words)
+{
+    char low[64];
+    size_t i;
+    for (i = 0; genre[i] && i < sizeof(low) - 1; i++) low[i] = (char)tolower((unsigned char)genre[i]);
+    low[i] = 0;
+    for (i = 0; words[i]; i++)
+        if (strstr(low, words[i])) return 1;
+    return 0;
+}
+
+static void genre_icon(const char *genre, float gx, float cy, D3DCOLOR g, D3DCOLOR acc)
+{
+    static const char *const racing[] = { "racing", "driving", "race", "kart", NULL };
+    static const char *const sports[] = { "sport", "soccer", "football", "golf", "tennis", "baseball", "basket", "hockey", "skat",
+                                          "snowboard", "ski", "bowling", "olympic", NULL };
+    static const char *const fighting[] = { "fight", "boxing", "wrestl", "beat", "brawl", NULL };
+    static const char *const shooter[] = { "shoot", "gun", "fps", NULL };
+    static const char *const platform[] = { "platform", NULL };
+    static const char *const puzzle[] = { "puzzle", "quiz", "trivia", NULL };
+    static const char *const rpg[] = { "role", "rpg", NULL };
+    static const char *const strategy[] = { "strateg", "tactic", "war", NULL };
+    static const char *const music[] = { "music", "rhythm", "danc", NULL };
+    static const char *const party[] = { "party", "board", "card", "casino", "pinball", NULL };
+    static const char *const flight[] = { "flight", "space", "air", "pilot", NULL };
+    static const char *const sim[] = { "simulat", "sim ", "life", "pet", "fishing", "hunting", NULL };
+    static const char *const adventure[] = { "adventure", NULL };
+    static const char *const action[] = { "action", NULL };
+    const float cx = gx + 6;
+    if (genre_has(genre, racing))
+    {
+        // A chequered flag.
+        int r, c;
+        UiRect(gx, cy - 6, 1.5f, 13, g);
+        for (r = 0; r < 3; r++)
+            for (c = 0; c < 3; c++)
+                UiRect(gx + 2 + c * 3.4f, cy - 6 + r * 2.8f, 3.4f, 2.8f, (r + c) & 1 ? g : acc);
+    }
+    else if (genre_has(genre, sports))
+    {
+        // A ball and its seam.
+        UiCircle(cx, cy, 6, g);
+        UiLine(cx - 6, cy, cx + 6, cy, 1.4f, acc);
+        UiLine(cx, cy - 6, cx, cy + 6, 1.4f, acc);
+    }
+    else if (genre_has(genre, fighting))
+    {
+        // A fist: knuckles over a palm.
+        UiRoundRect(gx + 1, cy - 2, 10, 8, 2.5f, g, g);
+        UiRoundRect(gx + 1, cy - 6, 3.2f, 5, 1.5f, g, g);
+        UiRoundRect(gx + 4.4f, cy - 6.5f, 3.2f, 5, 1.5f, g, g);
+        UiRoundRect(gx + 7.8f, cy - 6, 3.2f, 5, 1.5f, acc, acc);
+    }
+    else if (genre_has(genre, shooter))
+    {
+        // A crosshair.
+        UiRoundRing(gx, cy - 6, 12, 12, 6, 1.5f, g);
+        UiRect(cx - 0.75f, cy - 8, 1.5f, 5, g);
+        UiRect(cx - 0.75f, cy + 3, 1.5f, 5, g);
+        UiRect(gx - 2, cy - 0.75f, 5, 1.5f, g);
+        UiRect(gx + 9, cy - 0.75f, 5, 1.5f, g);
+        UiCircle(cx, cy, 1.6f, acc);
+    }
+    else if (genre_has(genre, platform))
+    {
+        // Steps.
+        UiRect(gx, cy + 2, 4, 4, g);
+        UiRect(gx + 4, cy - 2, 4, 8, g);
+        UiRect(gx + 8, cy - 6, 4, 12, acc);
+    }
+    else if (genre_has(genre, puzzle))
+    {
+        // Falling blocks.
+        UiRect(gx, cy + 1, 4, 4, g);
+        UiRect(gx + 4, cy + 1, 4, 4, g);
+        UiRect(gx + 8, cy + 1, 4, 4, g);
+        UiRect(gx + 4, cy - 3.5f, 4, 4, acc);
+    }
+    else if (genre_has(genre, rpg))
+    {
+        // A sword.
+        UiLine(gx + 2, cy + 6, gx + 11, cy - 5, 2.0f, g);
+        UiLine(gx + 1, cy + 1, gx + 6, cy + 6, 2.0f, acc);
+    }
+    else if (genre_has(genre, strategy))
+    {
+        // A flag on its pole.
+        UiRect(gx + 1, cy - 6, 1.5f, 13, g);
+        icon_tri(gx + 7, cy - 3, 9, 1, acc);
+    }
+    else if (genre_has(genre, music))
+    {
+        // A note.
+        UiCircle(gx + 3.5f, cy + 4, 3, g);
+        UiRect(gx + 5.5f, cy - 6, 1.6f, 10, g);
+        UiRect(gx + 5.5f, cy - 6, 6, 1.8f, acc);
+    }
+    else if (genre_has(genre, party))
+    {
+        // A die.
+        UiRoundRect(gx, cy - 6, 12, 12, 2.5f, g, g);
+        UiCircle(gx + 3, cy - 3, 1.3f, acc);
+        UiCircle(cx, cy, 1.3f, acc);
+        UiCircle(gx + 9, cy + 3, 1.3f, acc);
+    }
+    else if (genre_has(genre, flight))
+    {
+        // A plane seen from above.
+        UiRect(cx - 1, cy - 6, 2, 12, g);
+        UiRect(gx, cy - 1, 12, 2.5f, g);
+        UiRect(cx - 3, cy + 4, 6, 1.6f, acc);
+    }
+    else if (genre_has(genre, sim))
+    {
+        // A gauge.
+        UiRoundRing(gx, cy - 6, 12, 12, 6, 1.5f, g);
+        UiLine(cx, cy, cx + 3.5f, cy - 3.5f, 1.6f, acc);
+        UiCircle(cx, cy, 1.4f, g);
+    }
+    else if (genre_has(genre, adventure))
+    {
+        // A compass needle.
+        UiRoundRing(gx, cy - 6, 12, 12, 6, 1.4f, g);
+        icon_tri(cx, cy - 2, 6, 0, acc);
+        icon_tri(cx, cy + 2, 6, 2, g);
+    }
+    else if (genre_has(genre, action))
+    {
+        // A bolt.
+        UiLine(gx + 8, cy - 6, gx + 3, cy + 1, 2.0f, acc);
+        UiLine(gx + 3, cy + 1, gx + 9, cy - 1, 2.0f, acc);
+        UiLine(gx + 9, cy - 1, gx + 4, cy + 6, 2.0f, acc);
+    }
+    else
+    {
+        UiRoundRect(gx, cy - 6, 5, 5, 1.2f, g, g);
+        UiRoundRect(gx + 7, cy - 6, 5, 5, 1.2f, g, g);
+        UiRoundRect(gx, cy + 1, 5, 5, 1.2f, g, g);
+        UiRoundRect(gx + 7, cy + 1, 5, 5, 1.2f, acc, acc);
+    }
+}
+
+// A chip with a small symbol before its text: the genre (genre_icon), the players
 // (a figure) or the region (its flag, english: its English name; text only without one).
 enum { CHIP_GENRE = 1, CHIP_PLAYERS, CHIP_REGION };
 static float chip_width(const char *text, int kind, const char *english)
@@ -10043,13 +10290,7 @@ static float chip_icon(float x, float cy, const char *text, int kind, const char
     D3DCOLOR g = UiAlpha(UI_COL_TEXT2, a);
     UiRoundRect(x, cy - h * 0.5f, w, h, h * 0.5f, UiAlpha(D3DCOLOR_ARGB(255, 50, 53, 68), a), UiAlpha(D3DCOLOR_ARGB(255, 42, 45, 58), a));
     UiRoundRing(x, cy - h * 0.5f, w, h, h * 0.5f, 1.0f, UiAlpha(D3DCOLOR_ARGB(34, 255, 255, 255), a));
-    if (kind == CHIP_GENRE)
-    {
-        UiRoundRect(gx, cy - 6, 5, 5, 1.2f, g, g);
-        UiRoundRect(gx + 7, cy - 6, 5, 5, 1.2f, g, g);
-        UiRoundRect(gx, cy + 1, 5, 5, 1.2f, g, g);
-        UiRoundRect(gx + 7, cy + 1, 5, 5, 1.2f, UiAlpha(UI_COL_ACCENT_HI, a), UiAlpha(UI_COL_ACCENT, a));
-    }
+    if (kind == CHIP_GENRE) genre_icon(text, gx, cy, g, UiAlpha(UI_COL_ACCENT_HI, a));
     else if (kind == CHIP_PLAYERS)
     {
         UiCircle(gx + 6, cy - 3.5f, 3.2f, g);
@@ -11246,15 +11487,10 @@ static void browser_draw(const std::vector<RomEntry> &roms, int sel, int top, in
             UiTextFit(s ? UI_BOLD : UI_REGULAR, 21, textW, roms[top + i].shown.c_str(), buf, sizeof(buf));
             UiText(s ? UI_BOLD : UI_REGULAR, 21, thx + tw + 16, cy, s ? UI_COL_TEXT : UI_COL_TEXT2, buf, UI_LEFT);
             {
-                // At the right: the year, and before it "HD" when the game has HD textures (filled:
-                // installed; outlined: to download or convert).
+                // At the right: "HD" when the game has HD textures (filled: installed; outlined: to
+                // download or convert). No year (it is on the card).
                 float right = listX + listW - (n > rows ? 32 : 20);
                 int hd = hd_of_file(roms[top + i].file);
-                if (rv && rv->hasInfo && rv->info.year[0])
-                {
-                    UiText(UI_REGULAR, 16, right, cy, s ? UI_COL_TEXT2 : UI_COL_TEXT3, rv->info.year, UI_RIGHT);
-                    right -= UiTextWidth(UI_REGULAR, 16, rv->info.year) + 10;
-                }
                 if (hd)
                 {
                     float pw = UiTextWidth(UI_BOLD, 13, "HD") + 14, ph = 18;
@@ -11329,7 +11565,6 @@ static void browser_draw_covers(const std::vector<RomEntry> &roms, int sel, int 
     browser_effect();
     if (!roms.empty()) game_backdrop(roms[sel].file, 0);   // Interface > Background images
     UiBrand(UI_SAFE_X, 72, BRAND_SIZE);   // the logo alone (the version is on the About page)
-    browser_tabs(UI_WIDTH * 0.5f, 72, 1, 520);
     // n == 0 never reaches here - the caller (RomBrowser) falls back to browser_draw
     // for that (one tested "no ROMs" screen instead of two).
     sprintf(buf, "%d / %d", sel + 1, n);
@@ -11413,7 +11648,6 @@ static void browser_draw_carousel(const std::vector<RomEntry> &roms, int sel)
     browser_effect();
     if (!roms.empty()) game_backdrop(roms[sel].file, 0);   // Interface > Background images
     UiBrand(UI_SAFE_X, 72, BRAND_SIZE);
-    browser_tabs(UI_WIDTH * 0.5f, 72, 1, 520);
     sprintf(buf, "%d / %d", sel + 1, n);
     UiText(UI_REGULAR, 19, UI_WIDTH - UI_SAFE_X, 64, UI_COL_TEXT2, buf, UI_RIGHT);
     // The row glides; only a long jump (round the end of the list) cuts straight there.
@@ -11522,7 +11756,6 @@ static void browser_draw_spotlight(const std::vector<RomEntry> &roms, int sel)
     browser_effect();
     if (!roms.empty()) game_backdrop(roms[sel].file, 0);   // Interface > Background images
     UiBrand(UI_SAFE_X, 72, BRAND_SIZE);
-    browser_tabs(UI_WIDTH * 0.5f, 72, 1, 520);
     sprintf(buf, "%d / %d", sel + 1, n);
     UiText(UI_REGULAR, 19, UI_WIDTH - UI_SAFE_X, 64, UI_COL_TEXT2, buf, UI_RIGHT);
     if (!n) { UiScreenFooter(Tr(T_FOOT_BROWSER)); return; }
@@ -11636,7 +11869,6 @@ static void browser_draw_cartridges(const std::vector<RomEntry> &roms, int sel)
     browser_effect();
     if (!roms.empty()) game_backdrop(roms[sel].file, 0);   // Interface > Background images
     UiBrand(UI_SAFE_X, 72, BRAND_SIZE);
-    browser_tabs(UI_WIDTH * 0.5f, 72, 1, 520);
     sprintf(buf, "%d / %d", sel + 1, n);
     UiText(UI_REGULAR, 19, UI_WIDTH - UI_SAFE_X, 64, UI_COL_TEXT2, buf, UI_RIGHT);
     if (!n) { UiScreenFooter(Tr(T_FOOT_BROWSER)); return; }
@@ -11896,7 +12128,6 @@ static void browser_draw_cinema(const std::vector<RomEntry> &roms, int sel)
     fade = smooth01((now - changedAt) / 0.25f);
     mine = game_pics(roms[sel].file, GPIC_LOGO);
     if (mine) f = smooth01((now - s_cine.at) / CINE_FADE);
-    browser_tabs(UI_WIDTH * 0.5f, 72, 1, 520);
     sprintf(buf, "%d / %d", sel + 1, n);
     UiText(UI_REGULAR, 19, UI_WIDTH - UI_SAFE_X, 64, UI_COL_TEXT2, buf, UI_RIGHT);
     // The logo big at the bottom left (its own proportions, up to 460 x 150), or the name.

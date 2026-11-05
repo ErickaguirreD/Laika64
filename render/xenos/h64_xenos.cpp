@@ -100,6 +100,9 @@ struct FbSlot
     u32 lateW[LATE_USES];
     int lateValid[LATE_USES];
     u32 lateUse, lateUseAt;                  // copy backs of it in the present lateUseAt
+    u32 copyRun, copyRunAt;                  // presents in a row it was copied back in (the last: copyRunAt)
+    int lateTold;                            // its switch to the frame before's copy was logged
+    int fillOnly;                            // only fills drew into it since it took this image (gfxFillOnlyRam)
     u32 cleanLo, cleanHi;   // while gpuDirty: the lines copied back since (a copy back of part of the image)
     int cleanSnap;          // they went into the RDRAM snapshot of job cleanGen only (not RDRAM)
     u32 cleanGen;
@@ -2091,6 +2094,9 @@ static void select_framebuffer(Xenos *x)
         s->drawnH = 0;
         memset(s->latePending, 0, sizeof(s->latePending));   // another image: no copy of the frame before
         memset(s->lateValid, 0, sizeof(s->lateValid));
+        s->copyRun = 0;
+        s->lateTold = 0;
+        s->fillOnly = 1;
         x->dev->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);   // Clear() keeps to the scissor
         x->stateDirty = 1;
         x->dev->Clear(0, NULL, D3DCLEAR_TARGET, x->debug == 1 ? 0xFF0000FF : 0xFF000000, 1.0f, 0);
@@ -2200,8 +2206,28 @@ static void copy_back_rows(Xenos *x, int slot, u32 r0, u32 r1)
         RECT ur;
         D3DPOINT dp;
         POINT up;
-        int late = x->sys->options.gfxCopyBackLate && w < 320, k = 0;
+        int late, k = 0;
         const u32 *from;
+        // Copied back in every frame for half a second (a shadow, an effect drawn each frame):
+        // from then on as it was a frame before, without waiting for the GPU - every game
+        // (Conker: ~4 ms a copy back), unless its profile says not (gfxCopyBackSync).
+        // In a row: at most one present apart (games running at 30 frames a second - Mario
+        // Kart 64, Mario Golf - copy once every two presents: the run never grew).
+        if (s->copyRunAt != x->presentCount)
+        {
+            s->copyRun = s->copyRunAt + 2 >= x->presentCount ? s->copyRun + 1 : 1;
+            s->copyRunAt = x->presentCount;
+        }
+        // Small images only: a whole frame copied back is a picture of the moment (Mario Golf's
+        // swing turns its frame over as a card: a frame-old copy of a triple-buffered frame, white).
+        late = w < 320 && (x->sys->options.gfxCopyBackLate || (!x->sys->options.gfxCopyBackSync && s->copyRun >= 30));
+        if (late && !s->lateTold && !x->sys->options.gfxCopyBackLate)
+        {
+            static int s_lateLogged;
+            s->lateTold = 1;
+            if (s_lateLogged++ < 8)
+                H64_INFO("[xenos] image %06X (%u wide) copied back every frame: the frame before's copy now, no GPU wait", s->addr, w);
+        }
         if (y2 > ha) y2 = ha;
         if (late)
         {
@@ -2866,7 +2892,8 @@ static void xenos_rdp(void *user, const u64 *words, u32 count);   // below
 static int colour_is_depth(const Xenos *x)
 {
     const H64RdpState *st = x->st;
-    return x->sys->options.gfxNoCopyBack && (st->colorAddr & 0xFFFFFF) == (st->depthAddr & 0xFFFFFF);
+    return (x->sys->options.gfxNoCopyBack || x->sys->options.gfxDepthDrawDrop) &&
+           (st->colorAddr & 0xFFFFFF) == (st->depthAddr & 0xFFFFFF);
 }
 
 static void xenos_triangle(void *user, const H64RenderVertex *a, const H64RenderVertex *b, const H64RenderVertex *c,
@@ -2922,6 +2949,7 @@ static void xenos_triangle(void *user, const H64RenderVertex *a, const H64Render
         if (x->staleCount && (tile_reads_stale(x, tile) || tile_reads_stale(x, tile + 1)))
             resolve_loads(x);
         select_framebuffer(x);
+        if (x->curSlot >= 0) x->fb[x->curSlot].fillOnly = 0;
         setup_combined(x, (flags & H64_TRI_ZBUFFER) != 0, &x->batchTb0, &x->batchTb1, tile, (flags & TRI_ZOUT) != 0);
         x->batchFlags = flags;
         x->batchTile = tile;
@@ -3306,6 +3334,7 @@ static void tex_rect(Xenos *x, const u32 *w, int flip)
     }
     if (xh <= xl || yh <= yl) return;
     select_framebuffer(x);
+    if (x->curSlot >= 0) x->fb[x->curSlot].fillOnly = 0;
     x->win.active = 0;
     fbSrc = fb_rect_source(x, t0, flip, s, t, dsdx, dtdy, xh - xl, yh - yl, fbMap);
     if (!fbSrc && x->staleCount && (tile_reads_stale(x, tile) || tile_reads_stale(x, tile + 1)))
@@ -3462,6 +3491,15 @@ static void xenos_rdp(void *user, const u64 *words, u32 count)
         w[i * 2 + 1] = (u32)words[i];
     }
     op = (w[0] >> 24) & 0x3F;
+    // A command that changes nothing (the same tile, image, colour, combiner, or the palette
+    // TMEM holds again, not from an image the GPU drew): the batch and the memos stay.
+    if ((op == 0x3C && words[0] == x->combineRaw) ||
+        (((op >= 0x32 && op <= 0x3D && op != 0x33 && op != 0x34 && op != 0x36 && op != 0x3C) ||
+          (op == 0x30 && !x->staleCount && find_texture_slot(x) < 0)) && h64_rdp_command_noop(x->sys, words)))
+    {
+        x->stats.tRdp += h64_prof_now(x->sys) - tStart;
+        return;
+    }
     if (op != 0x26 && op != 0x27 && op != 0x28 && op != 0x29 && op != 0x00)
     {
         flush_batch(x);
@@ -3485,6 +3523,11 @@ static void xenos_rdp(void *user, const u64 *words, u32 count)
         // Profile: only loads as wide as the image read its picture (Vigilante
         // 8 keeps fonts and palettes in memory once drawn into).
         if (slot >= 0 && x->sys->options.gfxCopyBackSameWidth && x->st->texWidth != x->fb[slot].width) slot = -1;
+        // Profile: what is drawn into the depth image is left out (colour_is_depth): its
+        // textures need no copy back.
+        if (slot >= 0 && x->sys->options.gfxDepthDrawDrop && colour_is_depth(x)) slot = -1;
+        // Profile: an image the GPU only filled is read as the CPU left it in RDRAM.
+        if (slot >= 0 && x->sys->options.gfxFillOnlyRam && x->fb[slot].fillOnly) slot = -1;
         x->tmemDataGen++;
         x->fbLoad.valid = 0;
         if (op != 0x30) fb_load(x, w, op == 0x33);

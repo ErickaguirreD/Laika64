@@ -748,42 +748,6 @@ static int png_out_begin(PngOut *o, FILE *out)
     return png_out_write(o, hdr, 16);
 }
 
-// One picture (RGBA, decoded) as a record; a key already there is left as it was.
-static int png_out_add(PngOut *o, const PngName *pn, u8 *rgba, u32 w, u32 h)
-{
-    u8 rec[23], e[16], *px = rgba, *small = NULL;
-    u32 i, alpha = 0, size;
-    if (o->seen.count(pn->key)) return 1;
-    if (w > PNG_MAX_SIDE || h > PNG_MAX_SIDE)
-    {
-        int sw, sh;
-        h64_image_fit((int)w, (int)h, PNG_MAX_SIDE, PNG_MAX_SIDE, &sw, &sh);
-        small = h64_image_scale(rgba, (int)w, (int)h, sw, sh);
-        if (!small) return 1;
-        px = small; w = (u32)sw; h = (u32)sh;
-    }
-    for (i = 3; i < w * h * 4 && !alpha; i += 4) alpha = px[i] != 255;
-    size = ((w + 3) / 4) * ((h + 3) / 4) * (alpha ? 16 : 8);
-    o->dxt.resize(size);
-    dxt_encode(px, w, h, alpha, &o->dxt[0]);
-    free(small);
-    wr32le(rec, w);
-    wr32le(rec + 4, h);
-    wr32le(rec + 8, alpha ? HTS_DXT5 : HTS_DXT1);
-    wr16le(rec + 12, HTS_RGBA);
-    wr16le(rec + 14, HTS_UBYTE);
-    rec[16] = 1;   // a hi-res texture
-    wr16le(rec + 17, pn->formatSize);
-    wr32le(rec + 19, size);
-    wr64le(e, pn->key);
-    wr64le(e + 8, o->written);
-    if (!png_out_write(o, rec, 23) || !png_out_write(o, &o->dxt[0], size)) return 0;
-    o->index.insert(o->index.end(), e, e + 16);
-    o->seen.insert(pn->key);
-    o->count++;
-    return 1;
-}
-
 static int png_out_finish(PngOut *o)
 {
     u8 n[4], pos[8];
@@ -793,21 +757,200 @@ static int png_out_finish(PngOut *o)
     return !fseek(o->out, 8, SEEK_SET) && fwrite(pos, 1, 8, o->out) == 8;
 }
 
-// A picture from its file's bytes (and its alpha file's, for an "_rgb" one) into the .hts.
-static int png_take(PngOut *o, const PngName *pn, const u8 *data, u32 size, const u8 *alphaData, u32 alphaSize)
+// ---- The conversion on several hardware threads ----
+// The files are read in batches (one thread: the zip or the folder), their pictures decoded,
+// scaled and made DXT on the worker threads beside this one, then written in their order (the
+// same .hts as one thread makes: the first of a key wins). One thread only while a game runs
+// (HiresSetPlaying). Paper Mario HD's 3267 PNG files took ~49 s on one.
+struct PngJob
 {
-    int w = 0, h = 0, aw = 0, ah = 0, ok;
-    u8 *rgba = h64_png_decode(data, size, &w, &h, PNG_MAX_PIXELS), *a;
-    if (!rgba) return 1;   // not a PNG it can read: skipped
-    if (pn->rgb)
+    PngName pn;
+    u8 *data, *adata;          // the file's bytes (and its alpha file's): freed once decoded
+    u32 size, asize;
+    u32 usize, ausize;         // their sizes inflated, when deflated (a zip's): inflated on the worker
+    int deflated, adeflated;
+    std::vector<u8> dxt;       // the record's pixels; empty: skipped (not a picture it can read)
+    u32 w, h;
+    int alpha;
+};
+
+static voidpf pj_zalloc(voidpf, uInt items, uInt size) { return malloc((size_t)items * size); }
+static void pj_zfree(voidpf, voidpf p) { free(p); }
+
+// A zip entry's deflated bytes inflated (NULL when they do not inflate to `usize`).
+static u8 *pj_inflate(const u8 *c, u32 csize, u32 usize)
+{
+    z_stream z;
+    u8 *d = (u8 *)malloc(usize ? usize : 1);
+    memset(&z, 0, sizeof(z));
+    z.zalloc = pj_zalloc;
+    z.zfree = pj_zfree;
+    if (!d || inflateInit2(&z, -15) != Z_OK) { free(d); return NULL; }
+    z.next_in = (Bytef *)c; z.avail_in = csize;
+    z.next_out = d; z.avail_out = usize;
+    if (inflate(&z, Z_FINISH) != Z_STREAM_END) { inflateEnd(&z); free(d); return NULL; }
+    inflateEnd(&z);
+    return d;
+}
+
+static volatile LONG s_playing;
+void HiresSetPlaying(int on) { InterlockedExchange(&s_playing, on ? 1 : 0); }
+
+#define PNG_BATCH 32
+#define PNG_BATCH_BYTES (24u << 20)   // the files' bytes held at once
+#define PNG_WORKERS 3                 // beside the pack's own thread (3): hardware threads 1, 4 and 5
+static const DWORD s_pngHw[PNG_WORKERS] = { 1, 4, 5 };
+
+static void png_encode(PngJob *j)
+{
+    int w = 0, h = 0, aw = 0, ah = 0;
+    u8 *rgba, *a, *px, *small = NULL;
+    u32 i, size;
+    if (j->deflated)
     {
-        u32 i;
-        a = alphaData ? h64_png_decode(alphaData, alphaSize, &aw, &ah, PNG_MAX_PIXELS) : NULL;
+        // Inflated here, beside the other workers (the reading thread only reads).
+        u8 *d = pj_inflate(j->data, j->size, j->usize);
+        free(j->data);
+        j->data = d;
+        j->size = d ? j->usize : 0;
+        j->deflated = 0;
+        if (!d) { free(j->adata); j->adata = NULL; return; }
+    }
+    if (j->adata && j->adeflated)
+    {
+        u8 *d = pj_inflate(j->adata, j->asize, j->ausize);
+        free(j->adata);
+        j->adata = d;
+        j->asize = d ? j->ausize : 0;
+        j->adeflated = 0;
+    }
+    rgba = h64_png_decode(j->data, j->size, &w, &h, PNG_MAX_PIXELS);
+    free(j->data);
+    j->data = NULL;
+    if (!rgba) { free(j->adata); j->adata = NULL; return; }
+    if (j->pn.rgb)
+    {
+        a = j->adata ? h64_png_decode(j->adata, j->asize, &aw, &ah, PNG_MAX_PIXELS) : NULL;
         for (i = 0; i < (u32)w * h; i++) rgba[i * 4 + 3] = a && aw == w && ah == h ? a[i * 4] : 255;
         free(a);
     }
-    ok = png_out_add(o, pn, rgba, (u32)w, (u32)h);
+    free(j->adata);
+    j->adata = NULL;
+    px = rgba;
+    if ((u32)w > PNG_MAX_SIDE || (u32)h > PNG_MAX_SIDE)
+    {
+        int sw, sh;
+        h64_image_fit(w, h, PNG_MAX_SIDE, PNG_MAX_SIDE, &sw, &sh);
+        small = h64_image_scale(rgba, w, h, sw, sh);
+        if (!small) { free(rgba); return; }
+        px = small; w = sw; h = sh;
+    }
+    j->alpha = 0;
+    for (i = 3; i < (u32)w * h * 4 && !j->alpha; i += 4) j->alpha = px[i] != 255;
+    size = ((w + 3) / 4) * ((h + 3) / 4) * (j->alpha ? 16 : 8);
+    j->dxt.resize(size);
+    dxt_encode(px, (u32)w, (u32)h, j->alpha, &j->dxt[0]);
+    j->w = (u32)w;
+    j->h = (u32)h;
+    free(small);
     free(rgba);
+}
+
+struct PngBatch { PngJob *jobs; LONG n; volatile LONG next; };
+
+static DWORD WINAPI png_worker(LPVOID arg)
+{
+    PngBatch *b = (PngBatch *)arg;
+    LONG k;
+    while ((k = InterlockedIncrement(&b->next) - 1) < b->n) png_encode(&b->jobs[k]);
+    return 0;
+}
+
+// A batch at work: its jobs, the worker threads on them. Two take turns: the workers make one
+// DXT while this thread reads the next, then helps finish it and writes it.
+struct PngRun
+{
+    std::vector<PngJob> jobs;
+    PngBatch b;
+    HANDLE t[PNG_WORKERS];
+    int nt, active;
+};
+
+static void png_jobs_free(std::vector<PngJob> &jobs)
+{
+    size_t k;
+    for (k = 0; k < jobs.size(); k++) { free(jobs[k].data); free(jobs[k].adata); }
+    jobs.clear();
+}
+
+// Starts the workers on r->jobs (none while a game runs: png_batch_finish does it all).
+static void png_batch_start(PngRun *r)
+{
+    int k;
+    r->nt = 0;
+    r->active = !r->jobs.empty();
+    if (!r->active) return;
+    r->b.jobs = &r->jobs[0];
+    r->b.n = (LONG)r->jobs.size();
+    r->b.next = 0;
+    if (s_playing) return;
+    for (k = 0; k < PNG_WORKERS && k < (int)r->jobs.size(); k++)
+    {
+        HANDLE h = CreateThread(NULL, 256 * 1024, png_worker, &r->b, CREATE_SUSPENDED, NULL);
+        if (!h) break;
+        XSetThreadProcessor(h, s_pngHw[k]);
+        SetThreadPriority(h, THREAD_PRIORITY_BELOW_NORMAL);
+        ResumeThread(h);
+        r->t[r->nt++] = h;
+    }
+}
+
+// This thread helps with what is left, waits for the workers, then (write) puts the records
+// into the .hts in their order. 0: a write failed.
+static int png_batch_finish(PngOut *o, PngRun *r, int write)
+{
+    int k, ok = 1;
+    if (!r->active) return 1;
+    png_worker(&r->b);
+    if (r->nt) WaitForMultipleObjects((DWORD)r->nt, r->t, TRUE, INFINITE);
+    for (k = 0; k < r->nt; k++) CloseHandle(r->t[k]);
+    r->nt = 0;
+    r->active = 0;
+    for (k = 0; write && k < (int)r->jobs.size() && ok; k++)
+    {
+        PngJob *j = &r->jobs[k];
+        u8 rec[23], e[16];
+        u32 size = (u32)j->dxt.size();
+        if (!size || o->seen.count(j->pn.key)) continue;
+        wr32le(rec, j->w);
+        wr32le(rec + 4, j->h);
+        wr32le(rec + 8, j->alpha ? HTS_DXT5 : HTS_DXT1);
+        wr16le(rec + 12, HTS_RGBA);
+        wr16le(rec + 14, HTS_UBYTE);
+        rec[16] = 1;   // a hi-res texture
+        wr16le(rec + 17, j->pn.formatSize);
+        wr32le(rec + 19, size);
+        wr64le(e, j->pn.key);
+        wr64le(e + 8, o->written);
+        if (!png_out_write(o, rec, 23) || !png_out_write(o, &j->dxt[0], size)) ok = 0;
+        else
+        {
+            o->index.insert(o->index.end(), e, e + 16);
+            o->seen.insert(j->pn.key);
+            o->count++;
+        }
+    }
+    png_jobs_free(r->jobs);
+    return ok;
+}
+
+// A full batch read: the one before written (done meanwhile), this one started.
+static int png_batch_turn(PngOut *o, PngRun run[2], int *cur, std::vector<PngJob> &jobs)
+{
+    int ok = png_batch_finish(o, &run[*cur ^ 1], 1);
+    run[*cur].jobs.swap(jobs);
+    png_batch_start(&run[*cur]);
+    *cur ^= 1;
     return ok;
 }
 
@@ -942,31 +1085,52 @@ static int png_convert_folder(const char *scan, const char *dest, char *name, si
     f = png_open(dest, name, part, sizeof(part));
     if (!f) return fail(HPERR_FILE);
     ok = png_out_begin(&o, f);
-    for (i = 0; ok && i < files.size(); i++)
     {
-        PngName pn;
-        u32 size = 0, asize = 0;
-        u8 *data, *adata = NULL;
-        if (s_cancel) { png_close(f, part, 0); return fail(HPERR_CANCELLED); }
-        if (png_name(files[i].c_str(), &pn) && (data = read_whole(files[i].c_str(), &size)) != NULL)
+        std::vector<PngJob> jobs;
+        PngRun run[2];
+        int cur = 0;
+        u32 held = 0;
+        run[0].active = run[1].active = 0;
+        run[0].nt = run[1].nt = 0;
+        for (i = 0; ok && i < files.size(); i++)
         {
-            if (pn.rgb)
+            PngJob j;
+            if (s_cancel)
             {
-                // Its alpha: the same name, "_a" for "_rgb".
-                std::string a = files[i].substr(0, files[i].size() - 8) + "_a.png", al = a;
-                size_t k;
-                for (k = 0; k < al.size(); k++) al[k] = (char)tolower((unsigned char)al[k]);
-                if (lower.count(al)) adata = read_whole(a.c_str(), &asize);
+                png_batch_finish(&o, &run[0], 0); png_batch_finish(&o, &run[1], 0); png_jobs_free(jobs);
+                png_close(f, part, 0);
+                return fail(HPERR_CANCELLED);
             }
-            ok = png_take(&o, &pn, data, size, adata, asize);
-            free(data);
-            free(adata);
+            j.data = j.adata = NULL;
+            j.size = j.asize = j.usize = j.ausize = 0;
+            j.deflated = j.adeflated = 0;
+            if (png_name(files[i].c_str(), &j.pn) && (j.data = read_whole(files[i].c_str(), &j.size)) != NULL)
+            {
+                if (j.pn.rgb)
+                {
+                    // Its alpha: the same name, "_a" for "_rgb".
+                    std::string a = files[i].substr(0, files[i].size() - 8) + "_a.png", al = a;
+                    size_t k;
+                    for (k = 0; k < al.size(); k++) al[k] = (char)tolower((unsigned char)al[k]);
+                    if (lower.count(al)) j.adata = read_whole(a.c_str(), &j.asize);
+                }
+                held += j.size + j.asize;
+                jobs.push_back(j);
+            }
+            {
+                WIN32_FILE_ATTRIBUTE_DATA fa;
+                if (GetFileAttributesExA(files[i].c_str(), GetFileExInfoStandard, &fa)) done += fa.nFileSizeLow;
+            }
+            if (jobs.size() >= PNG_BATCH || held >= PNG_BATCH_BYTES || i + 1 == files.size())
+            {
+                ok = png_batch_turn(&o, run, &cur, jobs);
+                held = 0;
+                InterlockedExchange(&s_doneKb, (LONG)(done >> 10));
+            }
         }
-        {
-            WIN32_FILE_ATTRIBUTE_DATA fa;
-            if (GetFileAttributesExA(files[i].c_str(), GetFileExInfoStandard, &fa)) done += fa.nFileSizeLow;
-        }
-        InterlockedExchange(&s_doneKb, (LONG)(done >> 10));
+        if (!png_batch_finish(&o, &run[cur ^ 1], ok)) ok = 0;   // the last one
+        png_batch_finish(&o, &run[cur], 0);
+        png_jobs_free(jobs);   // stopped early: freed
     }
     if (ok) ok = png_out_finish(&o);
     H64_INFO("[hirespack] %s: %u of %u PNG files made %s (%u KB)", dest, o.count, (u32)files.size(), name, (u32)(o.written >> 10));
@@ -1013,33 +1177,20 @@ static int zip_list(FILE *f, std::vector<ZipEntry> &out)
     return 1;
 }
 
-static voidpf zip_zalloc(voidpf, uInt items, uInt size) { return malloc((size_t)items * size); }
-static void zip_zfree(voidpf, voidpf p) { free(p); }
-
-// An entry's bytes, inflated (deflate) or as stored.
-static u8 *zip_read(FILE *f, const ZipEntry *e, u32 *size)
+// An entry's bytes as stored in the zip (*deflated: still to inflate, on a worker).
+static u8 *zip_read_raw(FILE *f, const ZipEntry *e, u32 *size, int *deflated)
 {
-    u8 lh[30], *c, *d;
-    z_stream z;
+    u8 lh[30], *c;
     *size = 0;
+    *deflated = 0;
     if ((e->method != 0 && e->method != 8) || e->usize > (64u << 20) || e->csize > (64u << 20)) return NULL;
     if (fseek(f, (long)e->local, SEEK_SET) || fread(lh, 1, 30, f) != 30 || rd32le(lh) != 0x04034B50u) return NULL;
     if (fseek(f, (long)(e->local + 30 + rd16le(lh + 26) + rd16le(lh + 28)), SEEK_SET)) return NULL;
     c = (u8 *)malloc(e->csize ? e->csize : 1);
     if (!c || fread(c, 1, e->csize, f) != e->csize) { free(c); return NULL; }
-    if (e->method == 0) { *size = e->csize; return c; }
-    d = (u8 *)malloc(e->usize ? e->usize : 1);
-    memset(&z, 0, sizeof(z));
-    z.zalloc = zip_zalloc;
-    z.zfree = zip_zfree;
-    if (!d || inflateInit2(&z, -15) != Z_OK) { free(c); free(d); return NULL; }
-    z.next_in = c; z.avail_in = e->csize;
-    z.next_out = d; z.avail_out = e->usize;
-    if (inflate(&z, Z_FINISH) != Z_STREAM_END) { inflateEnd(&z); free(c); free(d); return NULL; }
-    inflateEnd(&z);
-    free(c);
-    *size = e->usize;
-    return d;
+    *size = e->csize;
+    *deflated = e->method == 8;
+    return c;
 }
 
 // A .hts stored or deflated in a .zip, made DXT as it is read (the shrink, as for a .7z).
@@ -1168,28 +1319,55 @@ static int png_convert_zip(const char *archive, const char *dest, char *name, si
     f = png_open(dest, name, part, sizeof(part));
     if (!f) { fclose(in); return fail(HPERR_FILE); }
     ok = png_out_begin(&o, f);
-    for (i = 0; ok && i < list.size(); i++)
     {
-        PngName pn;
-        u32 size = 0, asize = 0;
-        u8 *data, *adata = NULL;
-        if (s_cancel) { fclose(in); png_close(f, part, 0); return fail(HPERR_CANCELLED); }
-        if (png_name(list[i].name.c_str(), &pn) && (data = zip_read(in, &list[i], &size)) != NULL)
+        std::vector<PngJob> jobs;
+        PngRun run[2];
+        int cur = 0;
+        u32 held = 0;
+        run[0].active = run[1].active = 0;
+        run[0].nt = run[1].nt = 0;
+        for (i = 0; ok && i < list.size(); i++)
         {
-            if (pn.rgb)
+            PngJob j;
+            if (s_cancel)
             {
-                std::string a = list[i].name.substr(0, list[i].name.size() - 8) + "_a.png";
-                std::map<std::string, size_t>::const_iterator it;
-                size_t k;
-                for (k = 0; k < a.size(); k++) a[k] = (char)tolower((unsigned char)a[k]);
-                if ((it = byName.find(a)) != byName.end()) adata = zip_read(in, &list[it->second], &asize);
+                png_batch_finish(&o, &run[0], 0); png_batch_finish(&o, &run[1], 0); png_jobs_free(jobs);
+                fclose(in);
+                png_close(f, part, 0);
+                return fail(HPERR_CANCELLED);
             }
-            ok = png_take(&o, &pn, data, size, adata, asize);
-            free(data);
-            free(adata);
+            j.data = j.adata = NULL;
+            j.size = j.asize = j.usize = j.ausize = 0;
+            j.deflated = j.adeflated = 0;
+            if (png_name(list[i].name.c_str(), &j.pn) && (j.data = zip_read_raw(in, &list[i], &j.size, &j.deflated)) != NULL)
+            {
+                j.usize = list[i].usize;
+                if (j.pn.rgb)
+                {
+                    std::string a = list[i].name.substr(0, list[i].name.size() - 8) + "_a.png";
+                    std::map<std::string, size_t>::const_iterator it;
+                    size_t k;
+                    for (k = 0; k < a.size(); k++) a[k] = (char)tolower((unsigned char)a[k]);
+                    if ((it = byName.find(a)) != byName.end())
+                    {
+                        j.adata = zip_read_raw(in, &list[it->second], &j.asize, &j.adeflated);
+                        j.ausize = list[it->second].usize;
+                    }
+                }
+                held += j.size + j.asize;
+                jobs.push_back(j);
+            }
+            done += list[i].csize;
+            if (jobs.size() >= PNG_BATCH || held >= PNG_BATCH_BYTES || i + 1 == list.size())
+            {
+                ok = png_batch_turn(&o, run, &cur, jobs);
+                held = 0;
+                InterlockedExchange(&s_doneKb, (LONG)(done >> 10));
+            }
         }
-        done += list[i].csize;
-        InterlockedExchange(&s_doneKb, (LONG)(done >> 10));
+        if (!png_batch_finish(&o, &run[cur ^ 1], ok)) ok = 0;   // the last one
+        png_batch_finish(&o, &run[cur], 0);
+        png_jobs_free(jobs);   // stopped early: freed
     }
     fclose(in);
     if (ok) ok = png_out_finish(&o);
@@ -1528,75 +1706,194 @@ static void install_name(void)
 }
 
 // ---- The worker ----
-static DWORD WINAPI pack_thread(LPVOID)
+// Downloads pack e into `archive` (in `dest`): its URL found (GitHub's latest release, or the
+// catalog's direct one), the room checked, the file fetched. 1 when whole; else *err (HPERR_*).
+// `state` (the pack's own download, not a prefetch): set to HPACK_DOWNLOAD as the bytes come.
+static int pack_fetch(const HiresPackEntry *e, const char *dest, const char *archive, char *url, size_t urlSize, NetProgress *net,
+                      volatile LONG *cancel, volatile LONG *state, int *err, u32 *gotLen)
 {
-    char path[160], url[1024], archive[256];
+    char path[160], host[128];
     u8 *json = NULL;
     u32 len = 0;
     unsigned size = 0;
     int st;
     FILE *f;
-    DWORD t0, t1;
-    if (!NetStart(0)) return fail(HPERR_NETWORK);
-    if (!s_job.owner[0])
+    *gotLen = 0;
+    if (!e->owner[0])
     {
         // A direct download (Emulation King, n64textures.com): its URL and size are the catalog's.
-        strncpy(url, s_job.repo, sizeof(url) - 1);
-        url[sizeof(url) - 1] = 0;
-        size = s_job.size;
+        strncpy(url, e->repo, urlSize - 1);
+        url[urlSize - 1] = 0;
+        size = e->size;
     }
     else
     {
-        _snprintf(path, sizeof(path) - 1, "/repos/%s/%s/releases/latest", s_job.owner, s_job.repo);
+        _snprintf(path, sizeof(path) - 1, "/repos/%s/%s/releases/latest", e->owner, e->repo);
         path[sizeof(path) - 1] = 0;
         st = NetGet("api.github.com", path, 1, &json, &len, 2u << 20, NULL, 0);
         if (st != 200 || !json)
         {
-            H64_INFO("[hirespack] %s: release not found (HTTP %d)", s_job.repo, st);
+            H64_INFO("[hirespack] %s: release not found (HTTP %d)", e->repo, st);
             free(json);
-            return fail(st ? HPERR_NOPACK : HPERR_NETWORK);
+            *err = st ? HPERR_NOPACK : HPERR_NETWORK;
+            return 0;
         }
-        if (!find_asset((const char *)json, s_job.asset, url, sizeof(url), &size))
+        if (!find_asset((const char *)json, e->asset, url, urlSize, &size))
         {
-            H64_INFO("[hirespack] %s: no .hts in its latest release", s_job.repo);
+            H64_INFO("[hirespack] %s: no .hts in its latest release", e->repo);
             free(json);
-            return fail(HPERR_NOPACK);
+            *err = HPERR_NOPACK;
+            return 0;
         }
     }
     free(json);
-    if (strncmp(url, "https://", 8) || !strchr(url + 8, '/')) return fail(HPERR_NOPACK);
-    if (!space_for(s_dest, size)) return fail(HPERR_SPACE);
-    H64_INFO("[hirespack] %s: %s (%u bytes)", s_job.repo, url, size);
+    if (strncmp(url, "https://", 8) || !strchr(url + 8, '/')) { *err = HPERR_NOPACK; return 0; }
+    if (!space_for(dest, size)) { *err = HPERR_SPACE; return 0; }
+    H64_INFO("[hirespack] %s: %s (%u bytes)", e->repo, url, size);
     // Downloaded beside where it goes, unpacked, then dropped.
-    CreateDirectoryA(s_dest, NULL);
-    _snprintf(archive, sizeof(archive) - 1, "%s\\download.part", s_dest);
-    archive[sizeof(archive) - 1] = 0;
+    CreateDirectoryA(dest, NULL);
     f = fopen(archive, "wb");
-    if (!f) return fail(HPERR_FILE);
-    s_dlNet.got = 0;
-    s_dlNet.total = (long)size;
-    InterlockedExchange(&s_state, HPACK_DOWNLOAD);
-    t0 = GetTickCount();
+    if (!f) { *err = HPERR_FILE; return 0; }
+    net->got = 0;
+    net->total = (long)size;
+    if (state) InterlockedExchange(state, HPACK_DOWNLOAD);
     {
-        char host[128];
         const char *h = url + 8, *slash = strchr(h, '/');
         size_t hl = (size_t)(slash - h);
-        if (hl >= sizeof(host)) { fclose(f); DeleteFileA(archive); return fail(HPERR_NOPACK); }
+        if (hl >= sizeof(host)) { fclose(f); DeleteFileA(archive); *err = HPERR_NOPACK; return 0; }
         memcpy(host, h, hl);
         host[hl] = 0;
-        st = NetDownload(host, slash, f, &len, &s_dlNet, &s_cancel);
+        st = NetDownload(host, slash, f, &len, net, cancel);
     }
     if (fclose(f)) st = 0;
     if (st != 200)
     {
         DeleteFileA(archive);
-        if (s_cancel) return fail(HPERR_CANCELLED);
-        return fail(st ? HPERR_NOPACK : HPERR_NETWORK);
+        *err = *cancel ? HPERR_CANCELLED : st ? HPERR_NOPACK : HPERR_NETWORK;
+        return 0;
+    }
+    *gotLen = len;
+    return 1;
+}
+
+// ---- "Download all": the next pack downloaded while this one is made a .hts ----
+// Into <its folder>\download.next, on a thread of its own (the network and the conversion's
+// threads do not compete). When its turn comes, pack_thread takes the file (waiting for it to
+// end if it must) and goes straight to the conversion.
+struct PackPrefetch
+{
+    HiresPackEntry e;
+    char dest[256], archive[256], url[1024];
+    NetProgress net;
+    volatile LONG state;   // 0 none, 1 downloading, 2 done, 3 failed
+    volatile LONG cancel;
+    HANDLE thread;
+    u32 len;
+};
+static PackPrefetch s_pf;
+
+static DWORD WINAPI prefetch_thread(LPVOID)
+{
+    int err = HPERR_NONE, ok;
+    DWORD t0 = GetTickCount(), ms;
+    ok = NetStart(0) && pack_fetch(&s_pf.e, s_pf.dest, s_pf.archive, s_pf.url, sizeof(s_pf.url), &s_pf.net, &s_pf.cancel, NULL, &err, &s_pf.len);
+    ms = GetTickCount() - t0;
+    if (ok)
+        H64_INFO("[hirespack] downloaded %u KB in %.1f s (%.2f MB/s), beside the conversion", s_pf.len >> 10, ms / 1000.0f,
+                 ms ? s_pf.len / 1048576.0f / (ms / 1000.0f) : 0.0f);
+    InterlockedExchange(&s_pf.state, ok ? 2 : 3);
+    return 0;
+}
+
+static void prefetch_start(const HiresPackEntry *e, const char *dest)
+{
+    HANDLE h;
+    if (s_pf.state == 1) return;
+    if (s_pf.thread) { CloseHandle(s_pf.thread); s_pf.thread = NULL; }
+    s_pf.e = *e;
+    strncpy(s_pf.dest, dest, sizeof(s_pf.dest) - 1);
+    s_pf.dest[sizeof(s_pf.dest) - 1] = 0;
+    _snprintf(s_pf.archive, sizeof(s_pf.archive) - 1, "%s\\download.next", dest);
+    s_pf.archive[sizeof(s_pf.archive) - 1] = 0;
+    s_pf.net.got = s_pf.net.total = 0;
+    s_pf.len = 0;
+    InterlockedExchange(&s_pf.cancel, 0);
+    InterlockedExchange(&s_pf.state, 1);
+    h = CreateThread(NULL, 256 * 1024, prefetch_thread, NULL, CREATE_SUSPENDED, NULL);
+    if (!h) { InterlockedExchange(&s_pf.state, 0); return; }
+    XSetThreadProcessor(h, 3);
+    SetThreadPriority(h, THREAD_PRIORITY_BELOW_NORMAL);
+    ResumeThread(h);
+    s_pf.thread = h;
+}
+
+// Its file for pack e in dest, when it was prefetched: 1 (archive and url set), 0 (to download
+// as usual), -1 (cancelled while waiting for it). Its bytes count as this pack's meanwhile.
+static int prefetch_take(const HiresPackEntry *e, const char *dest, char *archive, size_t archiveSize, char *url, size_t urlSize)
+{
+    if (!s_pf.state || s_pf.e.repo != e->repo || s_pf.e.title != e->title || _stricmp(s_pf.dest, dest)) return 0;
+    InterlockedExchange(&s_state, HPACK_DOWNLOAD);
+    while (s_pf.state == 1)
+    {
+        s_dlNet.got = s_pf.net.got;
+        s_dlNet.total = s_pf.net.total;
+        if (s_cancel) InterlockedExchange(&s_pf.cancel, 1);
+        Sleep(100);
+    }
+    if (s_pf.thread) { WaitForSingleObject(s_pf.thread, INFINITE); CloseHandle(s_pf.thread); s_pf.thread = NULL; }
+    if (s_cancel) { DeleteFileA(s_pf.archive); InterlockedExchange(&s_pf.state, 0); return -1; }
+    if (s_pf.state != 2) { InterlockedExchange(&s_pf.state, 0); return 0; }
+    strncpy(archive, s_pf.archive, archiveSize - 1);
+    archive[archiveSize - 1] = 0;
+    strncpy(url, s_pf.url, urlSize - 1);
+    url[urlSize - 1] = 0;
+    s_dlNet.got = s_dlNet.total = (long)s_pf.len;
+    InterlockedExchange(&s_pf.state, 0);
+    return 1;
+}
+
+int HiresPrefetchStatus(const char **title, unsigned *doneKb, unsigned *totalKb)
+{
+    if (s_pf.state != 1 && s_pf.state != 2) return 0;
+    if (title) *title = s_pf.e.title;
+    if (doneKb) *doneKb = (unsigned)((unsigned long)s_pf.net.got >> 10);
+    if (totalKb) *totalKb = (unsigned)((unsigned long)s_pf.net.total >> 10);
+    return 1;
+}
+
+static const HiresPackEntry *queue_peek(char *dest, size_t destSize);   // the queue's next pack (below)
+
+static DWORD WINAPI pack_thread(LPVOID)
+{
+    char url[1024], archive[256];
+    u32 len = 0;
+    int st, err = HPERR_NONE, have = 0;
+    DWORD t0, t1;
+    if (s_jobQueued)
+    {
+        have = prefetch_take(&s_job, s_dest, archive, sizeof(archive), url, sizeof(url));
+        if (have < 0) return fail(HPERR_CANCELLED);
+    }
+    if (!have)
+    {
+        if (!NetStart(0)) return fail(HPERR_NETWORK);
+        _snprintf(archive, sizeof(archive) - 1, "%s\\download.part", s_dest);
+        archive[sizeof(archive) - 1] = 0;
+        t0 = GetTickCount();
+        if (!pack_fetch(&s_job, s_dest, archive, url, sizeof(url), &s_dlNet, &s_cancel, &s_state, &err, &len)) return fail(err);
+        t1 = GetTickCount();
+        // How long each part took (what to make faster next).
+        H64_INFO("[hirespack] downloaded %u KB in %.1f s (%.2f MB/s)", len >> 10, (t1 - t0) / 1000.0f,
+                 t1 > t0 ? len / 1048576.0f / ((t1 - t0) / 1000.0f) : 0.0f);
     }
     t1 = GetTickCount();
-    // How long each part took (what to make faster next).
-    H64_INFO("[hirespack] downloaded %u KB in %.1f s (%.2f MB/s)", len >> 10, (t1 - t0) / 1000.0f,
-             t1 > t0 ? len / 1048576.0f / ((t1 - t0) / 1000.0f) : 0.0f);
+    if (s_jobQueued)
+    {
+        // "Download all": the next pack comes down while this one is made a .hts.
+        char next[256];
+        const HiresPackEntry *n = queue_peek(next, sizeof(next));
+        if (n) prefetch_start(n, next);
+    }
     {
         size_t ul = strlen(url);
         int zip = ul > 4 && !_stricmp(url + ul - 4, ".zip");
@@ -1797,6 +2094,17 @@ int HiresQueueTick(void)
     }
 }
 
+static const HiresPackEntry *queue_peek(char *dest, size_t destSize)
+{
+    const HiresPackEntry *e;
+    char folder[64];
+    if (s_queuePos >= (int)s_queue.size() || !(e = HiresPackAt(s_queue[s_queuePos]))) return NULL;
+    HiresFolderName(e->romName, folder, sizeof(folder));
+    _snprintf(dest, destSize - 1, "%s\\%s", s_queueDir.c_str(), folder);
+    dest[destSize - 1] = 0;
+    return e;
+}
+
 int HiresQueueStatus(int *pos, int *total, int *ok, int *failed)
 {
     if (pos) *pos = s_queuePos;
@@ -1811,6 +2119,9 @@ void HiresQueueCancel(void)
     if (s_queue.empty()) return;
     s_queue.resize(s_queuePos);   // nothing more starts
     if (s_jobQueued && HiresPackBusy()) HiresPackCancel();
+    // A pack downloaded ahead for nothing now: stopped, its file dropped.
+    if (s_pf.state == 1) InterlockedExchange(&s_pf.cancel, 1);
+    else if (s_pf.state == 2) { DeleteFileA(s_pf.archive); InterlockedExchange(&s_pf.state, 0); }
 }
 
 int HiresPackStatus(unsigned *doneKb, unsigned *totalKb, int *error, char *file, size_t fileSize)

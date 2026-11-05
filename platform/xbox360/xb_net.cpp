@@ -247,6 +247,21 @@ static int request(const char *host, const char *path, u8 **body, u32 *bodyLen, 
     setsockopt(s, SOL_SOCKET, SO_MARKINSECURE, (const char *)&one, sizeof(one));
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout, sizeof(timeout));
     setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char *)&timeout, sizeof(timeout));
+    {
+        // A big receive window (set before connect: it is offered in the handshake). With
+        // the default one a far server (GitHub's) sent ~0.7 MB/s, waiting for each window's
+        // acknowledgement. The largest the system takes, from 1 MB down; told once.
+        static int s_rcvLogged;
+        int want, got = 0, gl = sizeof(got);
+        for (want = 1 << 20; want >= 64 << 10; want >>= 1)
+            if (setsockopt(s, SOL_SOCKET, SO_RCVBUF, (const char *)&want, sizeof(want)) == 0) break;
+        if (!s_rcvLogged)
+        {
+            s_rcvLogged = 1;
+            getsockopt(s, SOL_SOCKET, SO_RCVBUF, (char *)&got, &gl);
+            H64_INFO("[net] receive window %d KB", got >> 10);
+        }
+    }
     memset(&sa, 0, sizeof(sa));
     sa.sin_family = AF_INET;
     sa.sin_port = htons(443);

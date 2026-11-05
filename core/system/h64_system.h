@@ -124,6 +124,12 @@ struct H64Options
     int gfxSoft8bit;        // GPU renderer (game profile): drawing into 8-bit colour images done by the software RDP
     int gfxSoftSmall;       // GPU renderer (game profile): drawing into 16-bit colour images narrower than 320 done by the
                             // software RDP, in RDRAM (the CPU reads them)
+    int gfxCopyBackSync;    // GPU renderer (game profile): never the frame before's copy of a small image copied back
+                            // every frame (by default it switches to it after 30 frames in a row, see copy_back_rows)
+    int gfxDepthDrawDrop;   // GPU renderer (game profile): triangles and rectangles drawn into the depth image left
+                            // out, and the GPU images they read not copied back for them (Mario Golf)
+    int gfxFillOnlyRam;     // GPU renderer (game profile): loads from an image the GPU only filled read RDRAM
+                            // (the CPU writes there; Mario Golf's swing card)
     int gfxCopyBackLate;    // GPU renderer (game profile): an image narrower than 320 is copied back as it was a frame
                             // before (read without waiting for the GPU), the copy of now read at the next one
     int gfxSoftTiny;        // GPU renderer (game profile): drawing into colour images at most 16 pixels wide done by the

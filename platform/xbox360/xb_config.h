@@ -56,6 +56,8 @@ struct Config
     int zoom;           // zoom=N: picture size in percent (default 100)
     int offsetX, offsetY;   // posx=, posy=: picture position in output pixels (default 0)
     int devMode;        // devmode=1: the developer options show (Settings > System > Developer mode)
+    int audioCheck;     // audiocheck=1 (diagnosis, e.g. in a game's profile): audio tasks on the LLE RSP, the HLE
+                        // run beside on a copy and the two compared in the log (HLE audio that sounds wrong)
     int gfxLog;         // gfxlog=1: with devmode, the renderer logs what it draws with and what it cannot match (graphics errors)
     int texR3;          // texr3=1 (default): a double click of the right stick (R3) turns the HD textures on or off in game
     u32 hotkey[HK_COUNT];   // hk_save= hk_load= hk_slotprev= hk_slotnext= hk_shot= (hex): the in-game shortcuts (HK_*), XInput button
