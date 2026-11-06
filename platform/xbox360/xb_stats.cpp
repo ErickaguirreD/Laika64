@@ -136,7 +136,7 @@ void StatsPendingWrite(const char *drive, const StatsSession *s)
     static char path[2048];
     char file[96];
     FILE *f;
-    build_path(s, "colgado", "", "", path, sizeof(path));
+    build_path(s, "sin cerrar", "", "", path, sizeof(path));   // a freeze, or the game left by the Guide button: one cannot tell
     config_file(drive, "stats_pending.txt", file, sizeof(file));
     if ((f = fopen(file, "w")) != NULL)
     {
@@ -165,7 +165,7 @@ void StatsPendingFlush(const char *drive, int send)
     DeleteFileA(file);
     if (send && !strncmp(path, STATS_PATH, strlen(STATS_PATH)))
     {
-        H64_INFO("[stats] the last session never ended: sent as frozen");
+        H64_INFO("[stats] the last session never ended (a freeze, or left by the Guide button): sent");
         send_path(path);
     }
 }

@@ -9573,7 +9573,118 @@ struct RomInfo
     char name[24], code[8], size[16], save[128], folder[64], region[32];
 };
 
+// Every move in the ROM list comes here. A ROM's header read from the drive on this thread
+// (11-70 ms, more while the downloads use the drive) held the list at every move, so each one
+// is read once, kept, and read ahead for the whole list by a thread of its own
+// (details_prefetch). The texts kept are in the menus' language: another one reads again.
+static void rom_details_read(const char *path, RomInfo *info);
+static CRITICAL_SECTION s_detailsLock;
+static std::map<std::string, RomInfo> s_detailsMemo;   // under s_detailsLock
+static int s_detailsLang = -1;
+static std::vector<std::string> s_detailsQueue;       // under s_detailsLock: the ROMs to read ahead
+static HANDLE s_detailsEvent;
+
+static int details_find(const char *path, RomInfo *info)
+{
+    std::map<std::string, RomInfo>::const_iterator it;
+    int found;
+    EnterCriticalSection(&s_detailsLock);
+    if (s_detailsLang != LangGet()) { s_detailsMemo.clear(); s_detailsLang = LangGet(); }
+    it = s_detailsMemo.find(path);
+    found = it != s_detailsMemo.end();
+    if (found) *info = it->second;
+    LeaveCriticalSection(&s_detailsLock);
+    return found;
+}
+
+// Kept unless the language changed while it was read.
+static void details_keep(const std::string &path, const RomInfo *info, int lang)
+{
+    EnterCriticalSection(&s_detailsLock);
+    if (s_detailsLang == lang) s_detailsMemo[path] = *info;
+    LeaveCriticalSection(&s_detailsLock);
+}
+
+static DWORD WINAPI details_thread(LPVOID)
+{
+    for (;;)
+    {
+        std::string path;
+        RomInfo r;
+        int lang;
+        WaitForSingleObject(s_detailsEvent, INFINITE);
+        for (;;)
+        {
+            EnterCriticalSection(&s_detailsLock);
+            if (s_detailsQueue.empty()) { LeaveCriticalSection(&s_detailsLock); break; }
+            path = s_detailsQueue.back();
+            s_detailsQueue.pop_back();
+            lang = s_detailsLang;
+            LeaveCriticalSection(&s_detailsLock);
+            if (details_find(path.c_str(), &r)) continue;
+            rom_details_read(path.c_str(), &r);
+            details_keep(path, &r, lang);
+        }
+    }
+}
+
+// Reads the list's headers ahead, the ROMs nearest `sel` first (the ones the user moves to).
+static void details_prefetch(const std::vector<RomEntry> &roms, int sel)
+{
+    static int started;
+    int n = (int)roms.size(), k;
+    if (!started)
+    {
+        HANDLE h;
+        started = 1;
+        InitializeCriticalSection(&s_detailsLock);
+        s_detailsEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+        // Hardware thread 1: the emulated CPU's core, idle in the ROM list.
+        h = s_detailsEvent ? CreateThread(NULL, 64 * 1024, details_thread, NULL, CREATE_SUSPENDED, NULL) : NULL;
+        if (h)
+        {
+            XSetThreadProcessor(h, 1);
+            SetThreadPriority(h, THREAD_PRIORITY_BELOW_NORMAL);
+            ResumeThread(h);
+            CloseHandle(h);
+        }
+        else started = -1;
+    }
+    if (started < 0) return;
+    EnterCriticalSection(&s_detailsLock);
+    s_detailsQueue.clear();
+    // Taken from the back: the farthest first in the vector, the nearest last.
+    for (k = n; k >= 1; k--)
+    {
+        if (sel + k < n) s_detailsQueue.push_back(roms[sel + k].file);
+        if (sel - k >= 0) s_detailsQueue.push_back(roms[sel - k].file);
+    }
+    LeaveCriticalSection(&s_detailsLock);
+    SetEvent(s_detailsEvent);
+}
+
 static void rom_details(const char *path, RomInfo *info)
+{
+    if (!s_detailsEvent || !details_find(path, info))
+    {
+        int lang = LangGet();
+        rom_details_read(path, info);   // not read ahead yet: here (the first move of a session)
+        if (s_detailsEvent) details_keep(path, info, lang);
+    }
+    if (!info->ok) return;
+    // Keeps the Graphics settings' pack picker matching this ROM. A game whose folder holds
+    // no .hts (known from the folders looked at once) costs no look at the drive.
+    if (hd_dir_state(info->name) == 2) HiresScanPacks(info->name);
+    else
+    {
+        HiresScanPacks("");
+        strncpy(s_hiresRom, info->name, sizeof(s_hiresRom) - 1);   // still this game's (download, PNG rows)
+        s_hiresRom[sizeof(s_hiresRom) - 1] = 0;
+    }
+    info->hd = HiresPackCount() ? 2 : hd_dir_state(info->name) == 3 ? 3 : HiresPackCountFor(info->name) ? 1 : 0;
+}
+
+static void rom_details_read(const char *path, RomInfo *info)
 {
     H64Rom rom;
     u32 len = read_header(path, &rom);
@@ -9593,17 +9704,6 @@ static void rom_details(const char *path, RomInfo *info)
     strncpy(info->region, h64_gameinfo_region_name(rom.gameCode[3]), sizeof(info->region) - 1);
     info->size[sizeof(info->size) - 1] = 0;
     info->save[sizeof(info->save) - 1] = 0;
-    // Keeps the Graphics settings' pack picker matching this ROM. Every move in the ROM list
-    // comes here: a game whose folder holds no .hts (known from the folders looked at once)
-    // costs no look at the USB.
-    if (hd_dir_state(rom.name) == 2) HiresScanPacks(rom.name);
-    else
-    {
-        HiresScanPacks("");
-        strncpy(s_hiresRom, rom.name, sizeof(s_hiresRom) - 1);   // still this game's (download, PNG rows)
-        s_hiresRom[sizeof(s_hiresRom) - 1] = 0;
-    }
-    info->hd = HiresPackCount() ? 2 : hd_dir_state(rom.name) == 3 ? 3 : HiresPackCountFor(rom.name) ? 1 : 0;
     h64_rom_free(&rom);
 }
 
@@ -12791,7 +12891,7 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
                 if (down & XINPUT_GAMEPAD_A)
                 {
                     // Its HD pack offered first, when there is one to download.
-                    if (detailsFor != sel) { rom_details(roms[sel].file.c_str(), &details); detailsFor = sel; }
+                    if (detailsFor != sel) { details_prefetch(roms, sel); rom_details(roms[sel].file.c_str(), &details); detailsFor = sel; }
                     hires_offer(dev, c, details.name, details.ok ? details.hd : 0);
                     strncpy(path, roms[sel].file.c_str(), pathSize - 1);
                     path[pathSize - 1] = 0;
@@ -12807,7 +12907,7 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
                 }
                 if (sel < top) top = sel;
                 if (sel >= top + rows) top = sel - rows + 1;
-                if (detailsFor != sel) { rom_details(roms[sel].file.c_str(), &details); detailsFor = sel; }
+                if (detailsFor != sel) { details_prefetch(roms, sel); rom_details(roms[sel].file.c_str(), &details); detailsFor = sel; }
                 if (sel != lastSel)
                 {
                     // The selection first, then every row shown (each has its small cover now),
@@ -12859,7 +12959,7 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
                 {
                     if (cover_detail_screen(dev, roms, sel, page, c->browserDesign))
                     {
-                        if (detailsFor != sel) { rom_details(roms[sel].file.c_str(), &details); detailsFor = sel; }
+                        if (detailsFor != sel) { details_prefetch(roms, sel); rom_details(roms[sel].file.c_str(), &details); detailsFor = sel; }
                         hires_offer(dev, c, details.name, details.ok ? details.hd : 0);   // as the list's A press
                         strncpy(path, roms[sel].file.c_str(), pathSize - 1);
                         path[pathSize - 1] = 0;
@@ -12873,7 +12973,7 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
                     }
                     UiInputInit(&in);
                 }
-                if (detailsFor != sel) { rom_details(roms[sel].file.c_str(), &details); detailsFor = sel; }
+                if (detailsFor != sel) { details_prefetch(roms, sel); rom_details(roms[sel].file.c_str(), &details); detailsFor = sel; }
                 if (sel != lastSel)
                 {
                     // A grid: the whole visible page at once (it shows them all

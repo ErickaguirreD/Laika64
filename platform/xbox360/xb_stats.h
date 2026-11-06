@@ -7,8 +7,9 @@
 // (no file names, saves or accounts). A Google Form takes a plain GET of its
 // formResponse address, so no key or token ships in the executable.
 //
-// A session that never returns (a freeze) leaves its summary in
-// <drive>:\config\stats_pending.txt, sent as "colgado" at the next start.
+// A session that never returns leaves its summary in <drive>:\config\stats_pending.txt,
+// sent as "sin cerrar" at the next start: a freeze, or a game left by the Guide button
+// (the two cannot be told apart).
 #ifndef XB_STATS_H
 #define XB_STATS_H
 

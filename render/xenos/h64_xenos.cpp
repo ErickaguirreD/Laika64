@@ -812,9 +812,11 @@ static void resolve_loads(Xenos *x);
 // Reading and unpacking a pack texture takes a while (disk, zlib), and a scene change
 // asks for hundreds at once: a long stall. Each frame may load only so many pixels
 // of them; a texture that finds the budget spent is shown as the N64 picture for now
-// (marked htsDeferred) and replaced by the pack's one in a later frame.
+// (marked htsDeferred) and replaced by the pack's one in a later frame. 150K pixels
+// (~1 ms): with 500K, Smash Remix's graphics worker, already near 16.7 ms a frame,
+// spent 3-6 ms on new pack textures and fell to 47-54 FPS when they appeared.
 #ifndef HTS_PIXELS_PER_FRAME
-#define HTS_PIXELS_PER_FRAME 500000
+#define HTS_PIXELS_PER_FRAME 150000
 #endif
 static int hts_budget_ok(Xenos *x)
 {
@@ -4087,10 +4089,12 @@ void h64_xenos_present_vi(H64Renderer *r, const u32 *vi)
     if (x->vsyncSet != x->vsync)
     {
         // V-Sync: a frame on time waits for the TV's refresh (no tearing); a
-        // late one goes at once (adaptive: a tear on that frame only - games
-        // that are often late still tore). Aggressive (vsync=2): every frame
-        // waits for the refresh, never a tear, but a game a little under 60
-        // can drop to 30 (Mario Tennis's busy moments 27-43 VI/s).
+        // late one goes at once (adaptive: a tear on that frame only). The
+        // front end paces frames on the TV's refreshes, so few are late (on
+        // its clock, out of step with the TV, many were, and every present
+        // waited). Aggressive (vsync=2): every frame waits for the refresh,
+        // never a tear, but a game a little under 60 can drop to 30 (Mario
+        // Tennis's busy moments 27-43 VI/s).
         x->dev->SetRenderState(D3DRS_PRESENTINTERVAL, x->vsync ? D3DPRESENT_INTERVAL_ONE : D3DPRESENT_INTERVAL_IMMEDIATE);
         x->dev->SetRenderState(D3DRS_PRESENTIMMEDIATETHRESHOLD, x->vsync == 2 ? 0 : 100);
         x->vsyncSet = x->vsync;

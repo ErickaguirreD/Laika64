@@ -840,7 +840,7 @@ static void ApplyGraphics(H64System *sys, H64Renderer *renderer, const Config *c
         o.brightPower = lv >= 50 ? 1.0f - 0.4f * (lv - 50) / 50.0f : 1.0f + 0.6f * (50 - lv) / 50.0f;
     }
     o.colorStyle = c->colorStyle;
-    o.vsync = c->vsync;
+    o.vsync = c->vsync ? 1 : 0;   // adaptive: a late picture shown at once (RunGame paces frames on the TV's refreshes)
     o.deflicker = c->deflicker;
     o.zoom = c->zoom;
     o.offsetX = c->offsetX;
@@ -1825,6 +1825,42 @@ static double QpcMs(void)
     return (double)t.QuadPart * 1000.0 / (double)freq.QuadPart;
 }
 
+// ---- V-Sync: the TV's refreshes (RunGame's adaptive V-Sync pacing) ----
+static volatile LONG s_vblanks;         // counted by the GPU's vertical blank interrupt (VBlankCallback)
+static volatile LONGLONG s_vblankAt;    // the QPC of the last one
+static LONGLONG s_vblankTicks;          // a refresh's length in QPC ticks (measured once; 0: not yet)
+static LONG s_paceVblank;               // the refresh the last frame started at
+static LONG s_rateVblank0 = -1;         // the refresh (and its QPC) the measure started from
+static LONGLONG s_rateAt0;
+
+static void WINAPI VBlankCallback(D3DVBLANKDATA *)
+{
+    LARGE_INTEGER t;
+    QueryPerformanceCounter(&t);
+    s_vblankAt = t.QuadPart;
+    InterlockedIncrement(&s_vblanks);
+}
+
+// Frames paced on the TV's refreshes: V-Sync on, the TV's rate measured (its first second of
+// refreshes), and the game's rate within 1.5 % of it - a 50 Hz game on a 60 Hz TV stays on the clock.
+static int VBlankPacing(const Config *c, const H64System *sys, const LARGE_INTEGER *freq)
+{
+    LONG n = s_vblanks;
+    double tv, game;
+    if (!c->vsync || c->xenia || !sys->vi.frameCycles) return 0;
+    if (!s_vblankTicks)
+    {
+        if (s_rateVblank0 < 0 || n - s_rateVblank0 < 0) { s_rateVblank0 = n; s_rateAt0 = s_vblankAt; return 0; }
+        if (n - s_rateVblank0 < 60) return 0;   // no refreshes counted (no interrupt): the clock, always
+        s_vblankTicks = (s_vblankAt - s_rateAt0) / (n - s_rateVblank0);
+        H64_INFO("[main] TV refresh %.3f Hz", (double)freq->QuadPart / (double)s_vblankTicks);
+        if (s_vblankTicks <= 0) return 0;
+    }
+    tv = (double)freq->QuadPart / (double)s_vblankTicks;
+    game = 93750000.0 / (double)sys->vi.frameCycles;
+    return fabs(game - tv) < tv * 0.015;
+}
+
 // The menu with a crash guard: an exception there is logged (and the log
 // flushed) instead of DashLaunch's crash notice and a silent return to Aurora.
 static int GameMenuSafe(H64System *sys, H64Renderer *renderer, Config *c)
@@ -2418,6 +2454,36 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
         // to 1 %, and stops the clock if it ran far over the target.
         QueryPerformanceCounter(&t0);
         queued = xb_audio_queued_ms();
+        if (VBlankPacing(c, sys, &freq))
+        {
+            // Adaptive V-Sync (Settings > Screen > V-Sync): each frame starts at a TV refresh,
+            // so its picture is ready for the next one and the GPU's wait for it is short (on
+            // the clock, out of step with the TV, each present waited up to a whole refresh
+            // and held the graphics worker: Smash Remix 52-57 FPS, 60 without V-Sync). A frame
+            // that missed its refresh starts at once (no catching up); the renderer shows a late
+            // picture at once (a tear on that frame) instead of waiting for the next refresh.
+            // The game runs at the TV's rate (59.94 Hz for 60.1): XAudio2's rate control keeps
+            // the sound in step.
+            LONG want = s_paceVblank + 1;
+            int target = xb_audio_target_ms();
+            while (s_vblanks - want < 0)
+            {
+                LONGLONG left;
+                QueryPerformanceCounter(&now);
+                if (now.QuadPart - t0.QuadPart > freq.QuadPart / 20) break;   // no refresh in 50 ms: never wait for good
+                left = s_vblankAt + s_vblankTicks - now.QuadPart;
+                if (left > freq.QuadPart / 500) Sleep(1);   // more than 2 ms to the refresh: sleep, then spin
+            }
+            s_paceVblank = s_vblanks;
+            QueryPerformanceCounter(&frameStart);   // the clock's pacing goes on from here if V-Sync is turned off
+            if (queued > 2 * target && target > 0)
+            {
+                while (xb_audio_queued_ms() > target) Sleep(1);
+                s_paceVblank = s_vblanks;
+                QueryPerformanceCounter(&frameStart);
+            }
+        }
+        else
         {
             LONGLONG frameTicks = freq.QuadPart * sys->vi.frameCycles / 93750000;
             int target = xb_audio_target_ms();
@@ -2694,6 +2760,7 @@ int __cdecl main()
         H64_ERROR("[main] CreateDevice failed");
         dev = NULL;
     }
+    if (dev) dev->SetVerticalBlankCallback(VBlankCallback);   // the TV's refreshes, for the adaptive V-Sync
 
     if (failures)
         MessageScreen(dev, "Unit tests failed", status, D3DCOLOR_XRGB(240, 60, 60));
