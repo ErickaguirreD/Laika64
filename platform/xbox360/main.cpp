@@ -43,6 +43,7 @@
 #include "xb_audio.h"
 #include "xb_art.h"
 #include "xb_hirespack.h"
+#include "xb_stats.h"
 #include "../../core/cheat/h64_cheat.h"
 
 // ---- Recompiler code memory (M0.3 result: only an image section linked
@@ -293,6 +294,66 @@ static void MessageScreen(IDirect3DDevice9 *dev, const char *title, const char *
         if (XInputGetState(0, &in) != ERROR_SUCCESS || !(in.Gamepad.wButtons & XINPUT_GAMEPAD_BACK)) break;
         Sleep(16);
     }
+}
+
+// A question with a few answers in a list: D-pad (or the left stick) up/down, A picks one; B
+// returns -1 when `canSkip` (else B does nothing). `text` may be "" (no paragraph).
+static int ChoiceScreen(IDirect3DDevice9 *dev, const char *title, const char *text, const char *const *labels, int n, int sel,
+                        const char *footer, int canSkip)
+{
+    static char wrapped[2048];
+    const float w = UI_WIDTH - 2 * UI_SAFE_X - 200, x = (UI_WIDTH - w) * 0.5f, rowH = 50, rowGap = 10;
+    int lines = text[0] ? UiTextWrap(UI_REGULAR, 21, w - 104, 8, text, wrapped, sizeof(wrapped)) : 0;
+    float h = 104 + lines * 21 * 1.35f + (lines ? 24 : 0) + n * (rowH + rowGap) + 24, y = (UI_HEIGHT - h) * 0.5f + 20;
+    WORD prev = 0xFFFF;   // buttons held from before (the game's exit) fire nothing until released
+    SHORT prevY = 0;
+    if (!dev) return canSkip ? -1 : sel;
+    for (;;)
+    {
+        XINPUT_STATE in;
+        WORD b = 0, down;
+        SHORT ly = 0;
+        int i;
+        if (XInputGetState(0, &in) == ERROR_SUCCESS) { b = in.Gamepad.wButtons; ly = in.Gamepad.sThumbLY; }
+        down = (WORD)(b & ~prev);
+        prev = prev == 0xFFFF && b ? 0xFFFF : b;   // 0xFFFF until every button is up once
+        if ((down & XINPUT_GAMEPAD_DPAD_UP) || (ly > 16000 && prevY <= 16000)) sel = (sel + n - 1) % n;
+        if ((down & XINPUT_GAMEPAD_DPAD_DOWN) || (ly < -16000 && prevY >= -16000)) sel = (sel + 1) % n;
+        prevY = ly;
+        if (down & XINPUT_GAMEPAD_A) break;
+        if ((down & XINPUT_GAMEPAD_B) && canSkip) { sel = -1; break; }
+        dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
+        UiBegin(dev);
+        UiBackdrop();
+        UiBrand(UI_SAFE_X, 72, 34);
+        UiPanel(x, y, w, h, 22);
+        UiRoundRect(x + 28, y + 34, 5, 40, 2.5f, UI_COL_ACCENT, UI_COL_ACCENT);
+        UiText(UI_BOLD, 30, x + 52, y + 54, UI_COL_TEXT, title, UI_LEFT);
+        if (lines) UiText(UI_REGULAR, 21, x + 52, y + 104 + 10, UI_COL_TEXT2, wrapped, UI_LEFT);
+        for (i = 0; i < n; i++)
+        {
+            float rx = x + 52, rw = w - 104, ry = y + 104 + lines * 21 * 1.35f + (lines ? 24 : 0) + i * (rowH + rowGap);
+            if (i == sel)
+            {
+                UiRoundRect(rx, ry, rw, rowH, 14, UI_COL_SELECT, UI_COL_SELECT);
+                UiRoundRing(rx, ry, rw, rowH, 14, 2.0f, UI_COL_ACCENT);
+            }
+            else UiRoundRing(rx, ry, rw, rowH, 14, 1.0f, UI_COL_LINE);
+            UiText(UI_BOLD, 22, rx + 24, ry + rowH * 0.5f, i == sel ? UI_COL_TEXT : UI_COL_TEXT2, labels[i], UI_LEFT);
+        }
+        UiScreenFooter(footer);
+        UiEnd();
+        dev->Present(NULL, NULL, NULL, NULL);
+        Sleep(16);
+    }
+    for (;;)
+    {
+        // Released before going on: the next screen must not see this press.
+        XINPUT_STATE in;
+        if (XInputGetState(0, &in) != ERROR_SUCCESS || !(in.Gamepad.wButtons & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B))) break;
+        Sleep(16);
+    }
+    return sel;
 }
 
 // ---- ROM files ----
@@ -1829,6 +1890,10 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
     LONGLONG profRun = 0, profPresent = 0, profWait = 0;
     u64 jitBlocks = 0, jitInval = 0, jitFlush = 0, jitHelper = 0, jitRun = 0, jitIdle = 0, jitSteps = 0, insnsPrev = 0;
     u64 instrAtPerf = 0;
+    // Settings > System > Anonymous statistics: this session's numbers (xb_stats.cpp), sent on leaving.
+    static StatsSession stats;
+    int statsOn = s_settingsPath[0] && c->statsShare > 0 && !c->xenia, statsSkip = 1;
+    DWORD statsSaveAt = GetTickCount() + 60000;
 
     s_crashed = 0;
     s_showFps = c->perfItems;
@@ -1858,6 +1923,17 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
     free(data);
     if (!sys) { MessageScreen(dev, Tr(T_NOT_N64), rom, D3DCOLOR_XRGB(240, 60, 60)); return RG_BROWSER; }
     gfxProfAt = sys->prof[H64_PROF_GFX_HLE];
+    if (statsOn)
+    {
+        u32 rw, rh;
+        int wide;
+        StatsSessionStart(&stats);
+        strncpy(stats.game, sys->rom.name, sizeof(stats.game) - 1);
+        _snprintf(stats.code, sizeof(stats.code) - 1, "%s / %08X", sys->rom.gameCode, sys->rom.crc1);
+        ConfigResCurrent(c, &rw, &rh, &wide);
+        _snprintf(stats.settings, sizeof(stats.settings) - 1, "%ux%u vsync%d hd%d%s%s", rw, rh, c->vsync ? 1 : 0, c->hiTex ? 1 : 0,
+                  h64_rom_tv_type(&sys->rom) == 0 ? " 50hz" : "", strcmp(c->cpu, "interp") ? "" : " interp");
+    }
     sys->options.hleGfx = c->hle;
     sys->options.gfxTiming = c->gfxTiming;
     sys->options.strictCpu = c->strict;
@@ -2190,6 +2266,7 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
             result = GameMenuSafe(sys, renderer, c);
             if (result != RG_CONTINUE) break;
             result = RG_DASHBOARD;
+            statsSkip = 1;   // the second with the pause in it is not the game's speed
             QueryPerformanceCounter(&frameStart);   // no catching up for the paused time
             prevButtons = 0;
             hkPrev = 0xFFFFFFFFu;   // buttons still held from the menu fire nothing
@@ -2276,6 +2353,24 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
                             }
                 }
                 memcpy(s_fpsText, s_fpsBuild, sizeof(s_fpsText));   // the whole new text at once
+            }
+            if (statsOn)
+            {
+                // A sample a second, after the first 10 s (the boot); "low": under 92 % of the game's refresh rate.
+                double fps = fpsFrames * 1000.0 / (nowMs - fpsStart), rate = 93750000.0 / sys->vi.frameCycles;
+                if (statsSkip) statsSkip = 0;
+                else if (GetTickCount() - stats.startTick >= 10000)
+                {
+                    stats.fpsSum += fps;
+                    stats.seconds++;
+                    if (fps < stats.fpsMin) stats.fpsMin = fps;
+                    if (fps < rate * 0.92) stats.below++;
+                }
+                if (GetTickCount() >= statsSaveAt)
+                {
+                    StatsPendingWrite(s_logDrive, &stats);   // what is sent if this session never ends (a freeze)
+                    statsSaveAt = GetTickCount() + 60000;
+                }
             }
             busyTicks = 0;
             gfxProfAt = sys->prof[H64_PROF_GFX_HLE];
@@ -2455,6 +2550,15 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
                          xs.tRdp * k, xs.tState * k, xs.tTexture * k, xs.tHash * k, xs.tDecode * k, xs.tCreate * k, xs.tLock * k,
                          xs.tFill * k, xs.texelsDecoded / framesSincePerf, xs.retires, xs.arenaTextures, xs.arenaEvictions, xs.htsDxt, xs.fbTexRects, xs.tDraw * k, xs.draws / (framesSincePerf ? framesSincePerf : 1), xs.tCopyBack * k, xs.tCopyBackWait * k, xs.tLoads * k, xs.loadResolves, xs.resolveCopyBacks, xs.cpuWrittenLoads, xs.cpuSprites);
             }
+            if (statsOn)
+            {
+                double k = 1000.0 / (double)freq.QuadPart;
+                stats.runMs += profRun * k;
+                stats.gfxMs += sys->prof[H64_PROF_GFX_HLE] * k;
+                stats.texMs += xs.tTexture * k;
+                stats.copyMs += xs.tCopyBack * k;
+                stats.frames += framesSincePerf;
+            }
             memset(sys->prof, 0, sizeof(sys->prof));
             profRun = profPresent = profWait = 0;
             perfStart = perfNow;   // the next period starts now, the time spent logging included
@@ -2481,6 +2585,38 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
     FreeSystem(sys);
     H64_INFO("[main] game ended: %s", result == RG_BROWSER ? "ROM list" : "dashboard");
     LogFlush();
+    if (statsOn)
+    {
+        // The summary; back in the ROM list after 3 minutes or more, the game's one-time vote
+        // goes with it (B skips it - asked once all the same).
+        StatsPendingClear(s_logDrive);
+        if (StatsSessionWorth(&stats))
+        {
+            static const char *const votes[2] = { "bien", "mal" }, *const reasons[5] = { "graficos", "lento", "sonido", "controles", "otro" };
+            const char *vote = "", *reason = "";
+            if (!s_crashed && result == RG_BROWSER && StatsSessionMinutes(&stats) >= 3 && !StatsVoted(s_logDrive, stats.code))
+            {
+                const char *labels[5];
+                int v;
+                StatsMarkVoted(s_logDrive, stats.code);
+                labels[0] = Tr(T_VOTE_GOOD);
+                labels[1] = Tr(T_VOTE_BAD);
+                v = ChoiceScreen(dev, Tr(T_VOTE_TITLE), s_npTitle[0] ? s_npTitle : stats.game, labels, 2, 0, Tr(T_FOOT_VOTE), 1);
+                if (v >= 0) vote = votes[v];
+                if (v == 1)
+                {
+                    labels[0] = Tr(T_GRAPHICS);
+                    labels[1] = Tr(T_WHY_SLOW);
+                    labels[2] = Tr(T_SOUND);
+                    labels[3] = Tr(T_CONTROLS);
+                    labels[4] = Tr(T_WHY_OTHER);
+                    v = ChoiceScreen(dev, Tr(T_VOTE_WHY), "", labels, 5, 0, Tr(T_FOOT_VOTE), 1);
+                    if (v >= 0) reason = reasons[v];
+                }
+            }
+            StatsSend(&stats, s_crashed ? "error" : "normal", vote, reason);
+        }
+    }
     if (s_crashed) MessageScreen(dev, Tr(T_CRASHED), s_crashText, D3DCOLOR_XRGB(240, 60, 60));
     return result;
 }
@@ -2627,6 +2763,23 @@ int __cdecl main()
                 else ChooseLanguage(dev, &cfg, s_settingsPath, !checks);
             }
             SettingsSetLangFile(s_settingsPath);
+            {
+                // Anonymous statistics: asked once (after the welcome on a new install; at the next start
+                // after an update), then Settings > System. A summary a frozen session left is sent now.
+                static Config menu;
+                menu = cfg;
+                ConfigParseFile(&menu, s_settingsPath);
+                if (menu.statsShare < 0 && !checks && !cfg.xenia)
+                {
+                    const char *labels[2];
+                    labels[0] = Tr(T_STATS_YES);
+                    labels[1] = Tr(T_STATS_NO);
+                    menu.statsShare = ChoiceScreen(dev, Tr(T_STATS_ASK_TITLE), Tr(T_STATS_ASK_TEXT), labels, 2, 0, Tr(T_FOOT_ASK), 0) == 0;
+                    H64_INFO("[stats] anonymous statistics %s", menu.statsShare ? "accepted" : "declined");
+                    if (!ConfigWriteMenuKeys(&menu, s_settingsPath, 1)) H64_WARN("[main] cannot write %s", s_settingsPath);
+                }
+                StatsPendingFlush(s_logDrive, menu.statsShare > 0 && !cfg.xenia);
+            }
             xb_audio_init();   // the engine must be up before the browser's music (game:\music\); a game's own call then does nothing
             for (;;)
             {
@@ -2657,6 +2810,7 @@ int __cdecl main()
 
     // Leaving (from the ROM list or the pause menu): the goodbye animation first.
     if (dev && !cfg.xenia) OutroScreen(dev);
+    StatsWaitSent(5000);   // the last game's summary, still on its way
     if (s_logThread)
     {
         s_logQuit = 1;

@@ -257,6 +257,8 @@ static const RomId *rom_id(const std::string &path)
 // it again at every page. Under s_namesLock (the UI thread reads it too).
 struct InfoMemo { int ok; H64GameInfo info; };
 static std::map<std::string, InfoMemo> s_infoMemo;
+static volatile LONG s_scoresReady;          // the critics' scores file is read (score_for, below)
+static int score_for(const char *key);
 
 static int info_read(const char *key, H64GameInfo *info)
 {
@@ -270,7 +272,11 @@ static int info_read(const char *key, H64GameInfo *info)
     if (it != s_infoMemo.end()) *info = it->second.info;
     m.ok = it != s_infoMemo.end() ? it->second.ok : -1;
     LeaveCriticalSection(&s_namesLock);
-    if (m.ok >= 0) return m.ok;
+    if (m.ok >= 0)
+    {
+        if (s_scoresReady) info->score = score_for(key);
+        return m.ok;
+    }
     h64_gameinfo_clear(&m.info);
     art_path(key, "txt", path, sizeof(path));
     m.ok = 0;
@@ -283,6 +289,7 @@ static int info_read(const char *key, H64GameInfo *info)
     s_infoMemo[key] = m;
     LeaveCriticalSection(&s_namesLock);
     *info = m.info;
+    if (s_scoresReady) info->score = score_for(key);
     return m.ok;
 }
 
@@ -432,6 +439,51 @@ static int fetch_wiki(H64GameInfo *info)
         if (netFail) break;
     }
     return netFail ? -1 : 0;
+}
+
+// ---- The critics' scores (the stars in the lists) ----
+// One file for every game, data/ratings.txt of the repository (made on a PC by
+// tools/gen_ratings.py from Wikipedia's review boxes): "<game code without its
+// region letter> <score>" lines. Kept in db\ratings.txt, downloaded again after a
+// week; every game's score comes from it at once - no request per game.
+#define RATINGS_HOST "raw.githubusercontent.com"
+#define RATINGS_PATH "/ErickaguirreD/Laika64/main/data/ratings.txt"
+#define RATINGS_MAX (256u << 10)
+static std::map<std::string, int> s_scores;   // under s_namesLock
+static int s_scoresTried;                     // the worker's: downloaded (or tried) this session
+
+static int scores_parse(const char *text, u32 len)
+{
+    std::map<std::string, int> m;
+    const char *p = text, *end = text + len;
+    while (p < end)
+    {
+        const char *eol = (const char *)memchr(p, '\n', end - p);
+        char code[8];
+        int v;
+        if (!eol) eol = end;
+        if (*p != '#' && eol - p < 32 && sscanf(p, "%7s %d", code, &v) == 2 && v >= 1 && v <= 100) m[code] = v;
+        p = eol + 1;
+    }
+    if (m.empty()) return 0;
+    EnterCriticalSection(&s_namesLock);
+    s_scores.swap(m);
+    LeaveCriticalSection(&s_namesLock);
+    InterlockedExchange(&s_scoresReady, 1);
+    return (int)s_scores.size();
+}
+
+// A game's score from the file (0: none), for its cache key: the game code when it has one.
+static int score_for(const char *key)
+{
+    std::map<std::string, int>::const_iterator it;
+    int v = 0;
+    if (strlen(key) != 4 || key[0] == 'X') return 0;
+    EnterCriticalSection(&s_namesLock);
+    it = s_scores.find(std::string(key, 3));
+    if (it != s_scores.end()) v = it->second;
+    LeaveCriticalSection(&s_namesLock);
+    return v;
 }
 
 static void set_busy(const std::string &path);
@@ -1068,6 +1120,24 @@ static void deliver(const std::string &path)
     LeaveCriticalSection(&s_lock);
 }
 
+// Only a ROM's information to the browser (deliver without its pictures): the
+// critics' score that came after its pictures were shown.
+static void deliver_info(const std::string &path)
+{
+    const RomId *id = rom_id(path);
+    ArtResult r;
+    if (!id->ok) return;
+    memset(&r, 0, sizeof(r));
+    strncpy(r.path, path.c_str(), sizeof(r.path) - 1);
+    strcpy(r.key, id->key);
+    r.infoOnly = 1;
+    r.hasInfo = load_info(id, &r.info);
+    if (r.hasInfo) desc_for_lang(id->key, &r.info);
+    EnterCriticalSection(&s_lock);
+    if (s_results.size() < ART_MAX_RESULTS) s_results.push_back(r);
+    LeaveCriticalSection(&s_lock);
+}
+
 // ---- Worker ----
 static void set_busy(const std::string &path)
 {
@@ -1124,7 +1194,8 @@ static int step_wants(void)
             s_tried.insert(wants[0]);
             changed = download_missing(wants[0], 0, ArtKindFor(wants[0].c_str()));
             set_busy("");
-            if (changed)
+            if (changed == 2) deliver_info(wants[0]);
+            else if (changed)
             {
                 EnterCriticalSection(&s_lock);
                 if (s_wantGen == gen || std::find(s_wants.begin(), s_wants.end(), wants[0]) != s_wants.end()) s_delivered.erase(wants[0]);
@@ -1141,7 +1212,8 @@ static int step_wants(void)
             for (k = 0; k < ART_KIND_COUNT; k++) changed |= download_missing(wants[0], 0, k);
             changed |= download_desc(wants[0]);
             set_busy("");
-            if (changed)
+            if (changed == 2) deliver_info(wants[0]);
+            else if (changed)
             {
                 EnterCriticalSection(&s_lock);
                 s_delivered.erase(wants[0]);
@@ -1157,7 +1229,8 @@ static int step_wants(void)
             s_tried.insert(wants[i]);
             changed = download_missing(wants[i], 0, ArtKindFor(wants[i].c_str()));
             set_busy("");
-            if (changed)
+            if (changed == 2) deliver_info(wants[i]);
+            else if (changed)
             {
                 EnterCriticalSection(&s_lock);
                 if (std::find(s_wants.begin(), s_wants.end(), wants[i]) != s_wants.end()) s_delivered.erase(wants[i]);
@@ -1292,6 +1365,54 @@ static int step_bulk(void)
     return 1;
 }
 
+// The critics' scores file (score_for): read from the drive first, then downloaded when it is
+// missing or a week old (once a session, when downloads are allowed). Every game shown so far
+// gets its score at once, its pictures untouched.
+static void scores_redeliver(void)
+{
+    std::set<std::string> shown;
+    std::set<std::string>::const_iterator it;
+    EnterCriticalSection(&s_lock);
+    shown = s_delivered;
+    LeaveCriticalSection(&s_lock);
+    for (it = shown.begin(); it != shown.end(); ++it) deliver_info(*it);
+}
+
+static void step_scores(void)
+{
+    static int readFile;
+    char path[128];
+    u8 *data = NULL;
+    u32 len = 0;
+    int n;
+    if (s_scoresTried) return;
+    _snprintf(path, sizeof(path) - 1, "%s\\db\\ratings.txt", s_dir);
+    path[sizeof(path) - 1] = 0;
+    if (!readFile)
+    {
+        readFile = 1;
+        if (file_read(path, &data, &len, RATINGS_MAX) && (n = scores_parse((const char *)data, len)) > 0)
+        {
+            H64_INFO("[art] critics' scores: %d games", n);
+            scores_redeliver();
+        }
+        free(data);
+        data = NULL;
+    }
+    if (s_scoresReady && file_age_days(path) < 7) { s_scoresTried = 1; return; }
+    if (!s_netAllowed) return;   // tried again once downloads are allowed
+    s_scoresTried = 1;
+    if (!NetStart(0)) return;
+    if (NetGet(RATINGS_HOST, RATINGS_PATH, 1, &data, &len, RATINGS_MAX, NULL, 0) == 200 && data &&
+        (n = scores_parse((const char *)data, len)) > 0)
+    {
+        if (!file_write(path, data, len)) H64_WARN("[art] cannot write %s", path);
+        H64_INFO("[art] critics' scores downloaded: %d games", n);
+        scores_redeliver();
+    }
+    free(data);
+}
+
 static DWORD WINAPI art_thread(LPVOID)
 {
     // First the folder's names and the covers' index (until then: looked up on
@@ -1303,6 +1424,7 @@ static DWORD WINAPI art_thread(LPVOID)
     for (;;)
     {
         WaitForSingleObject(s_event, 100);
+        step_scores();
         while (s_paused != 1 && ((!s_paused && step_wants()) || step_bulk())) ;   // 2: the downloads only
     }
 }

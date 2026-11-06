@@ -40,6 +40,7 @@ void h64_gameinfo_clear(H64GameInfo *info)
     memset(info, 0, sizeof(*info));
     info->cover = -1;
     info->wiki = -1;
+    info->score = -1;
 }
 
 void h64_gameinfo_key(const char *gameCode, u32 crc1, char *out)
@@ -165,6 +166,12 @@ int h64_gameinfo_format(const H64GameInfo *info, char *out, int outSize)
     s += info->found ? "found=1\r\n" : "found=0\r\n";
     s += info->cover > 0 ? "cover=yes\r\n" : info->cover == 0 ? "cover=none\r\n" : "cover=unknown\r\n";
     if (info->wiki >= 0) s += info->wiki > 0 ? "wiki=yes\r\n" : "wiki=none\r\n";
+    if (info->score >= 0)
+    {
+        char sc[24];
+        sprintf(sc, "score=%d\r\n", info->score);
+        s += sc;
+    }
     for (i = 0; i < H64_ARRAY_COUNT(s_fields); i++)
     {
         const char *v = (const char *)info + s_fields[i].offset;
@@ -198,6 +205,7 @@ int h64_gameinfo_parse(H64GameInfo *info, const char *text, u32 len)
             if (key == "found") { info->found = atoi(value.c_str()) != 0; sawFound = 1; }
             else if (key == "cover") info->cover = value == "yes" ? 1 : value == "none" ? 0 : -1;
             else if (key == "wiki") info->wiki = value == "yes" ? 1 : value == "none" ? 0 : -1;
+            else if (key == "score") info->score = atoi(value.c_str());
             else
                 for (i = 0; i < H64_ARRAY_COUNT(s_fields); i++)
                     // "???" (unknown in libretro-database): left out here too, for

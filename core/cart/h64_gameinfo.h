@@ -27,6 +27,7 @@ struct H64GameInfo
     int found;              // 1: the game is in a database (else only the cover may be known)
     int cover;              // 1: box art in the cache, 0: none could be found, -1: not tried yet
     int wiki;               // 1: description from Wikipedia, 0: none found, -1: not tried yet
+    int score;              // critics' score 1-100 (Wikipedia's review box: Metacritic, else GameRankings), 0: none, -1: not tried yet
     char name[128];         // No-Intro name, "Super Mario 64 (USA)" (the box art's name)
     char title[96];         // shown title, "The Legend of Zelda: Ocarina of Time"
     char year[8];           // "1996"

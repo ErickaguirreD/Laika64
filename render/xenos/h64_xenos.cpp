@@ -219,6 +219,12 @@ struct Xenos
         u32 sl, tl, cols, rows;   // LoadTile: first texel and size of the area loaded
         u32 dxt;
     } fbLoad;
+    // The last LOAD_TILE from an RDRAM image of 8-bit texels (ram_load, ram_rect_source).
+    struct
+    {
+        int valid;
+        u32 dataGen, addr, width, sl, tl, cols, rows, tmemOff, stride;
+    } ramLoad;
     // Loads from a GPU image whose texels only rectangles sampling the image
     // itself use (fb_rect_source) need no copy back: they are logged with the
     // loads after them, and replayed after the copy back only if a texture
@@ -3260,6 +3266,116 @@ static int fb_rect_source(Xenos *x, const H64RdpTile *t, int flip, float s, floa
     return 1;
 }
 
+// The LOAD_TILE just made, when it reads an RDRAM image of 8-bit texels (ram_rect_source).
+static void ram_load(Xenos *x, const u32 *w)
+{
+    const H64RdpState *st = x->st;
+    const H64RdpTile *lt = &st->tiles[(w[1] >> 24) & 7];
+    u32 sl = ((w[0] >> 12) & 0xFFF) >> 2, tl = (w[0] & 0xFFF) >> 2, sh = ((w[1] >> 12) & 0xFFF) >> 2, th = (w[1] & 0xFFF) >> 2;
+    if (st->texSize != 1 || !st->texWidth || sh < sl || th < tl || x->debug == 5) return;
+    x->ramLoad.addr = st->texAddr & 0xFFFFFF;
+    x->ramLoad.width = st->texWidth;
+    x->ramLoad.sl = sl;
+    x->ramLoad.tl = tl;
+    x->ramLoad.cols = sh - sl + 1;
+    x->ramLoad.rows = th - tl + 1;
+    x->ramLoad.tmemOff = lt->offset;
+    x->ramLoad.stride = lt->stride;
+    x->ramLoad.dataGen = x->tmemDataGen;
+    x->ramLoad.valid = 1;
+}
+
+// As fb_rect_source for the last ram_load: a CI8 rectangle (RGBA16 palette) showing only
+// texels of that load, mapped straight onto the image (no flip, shift or wrap), samples
+// the band of image rows the load read, at the image's whole width, from a texture kept
+// in the texture cache by those rows' bytes and the palette. A background drawn in strips
+// whose first column moves as it scrolls sideways (Yoshi's Story: ~40 CI8 strips of 322x6
+// a frame from one 336-wide image) then finds its strips again instead of decoding them.
+static int ram_rect_source(Xenos *x, const H64RdpTile *t, int flip, float s, float tc, float dsdx, float dtdy, float spanX,
+                           float spanY, float *map)
+{
+    const H64RdpState *st = x->st;
+    const u8 *mem = st->loadRam ? st->loadRam : x->sys->rdram;
+    float s0, s1, t0, t1;
+    s32 rel, rb, row, b, ls, r, c, xb, yb;
+    u32 y, k, pal[256], width = x->ramLoad.width, rows = x->ramLoad.rows, pitch, offset, kk[4];
+    u64 key;
+    int single;
+    const u8 *band;
+    std::map<u64, TexEntry>::iterator it;
+    if (!x->ramLoad.valid || x->ramLoad.dataGen != x->tmemDataGen || flip || dsdx <= 0.0f || dtdy < 0.0f) return 0;
+    if (t->fmt != 2 || t->size != 1 || !(st->rasterFlags & RS_TLUT) || (st->rasterFlags & RS_TLUT_TYPE) || t->shiftS || t->shiftT) return 0;
+    s0 = s / 32.0f - t->slo / 4.0f;
+    t0 = tc / 32.0f - t->tlo / 4.0f;
+    s1 = s0 + spanX * dsdx;
+    t1 = t0 + spanY * dtdy;
+    if (s0 < 0.0f || t0 < 0.0f) return 0;
+    if (t->maskS && s1 > (float)(1 << t->maskS)) return 0;
+    if (t->maskT && t1 > (float)(1 << t->maskT)) return 0;
+    row = (s32)floorf(t0);
+    single = (s32)floorf(t1 - 0.001f) == row;
+    rel = (s32)t->offset - (s32)x->ramLoad.tmemOff;
+    ls = (s32)x->ramLoad.stride;
+    if (rel < 0 || !ls || (!single && t->stride != (u32)ls)) return 0;
+    rb = single ? row : 0;
+    b = rel + rb * (s32)t->stride;
+    r = b / ls;   // the load's row at tile row rb
+    c = b % ls;   // and its column (8-bit texels: a byte each)
+    if (((r ^ rb) & 1) || c + (s32)ceilf(s1) > (s32)x->ramLoad.cols || r + (single ? 1 : (s32)ceilf(t1)) > (s32)rows) return 0;
+    xb = (s32)x->ramLoad.sl + c;   // the image column of tile column 0
+    yb = r - rb;                   // the band row of tile row 0
+    if (xb + s1 > (float)width + 0.001f) return 0;
+    if (x->ramLoad.addr + (x->ramLoad.tl + rows) * width > H64_RDRAM_SIZE || width > 1024 || rows > 256) return 0;
+    if (!h64_rdp_ci_palette(st, t, 0, pal)) return 0;
+    band = mem + x->ramLoad.addr + x->ramLoad.tl * width;
+    kk[0] = 0x52414D42u;   // "RAMB": apart from the TMEM keys
+    kk[1] = width;
+    kk[2] = rows;
+    kk[3] = 0;
+    key = mem_hash(0xCBF29CE484222325ull, (const u8 *)kk, sizeof(kk));
+    key = mem_hash(key, band, rows * width);
+    key = mem_hash(key, (const u8 *)pal, sizeof(pal));
+    it = x->textures.find(key);
+    if (it == x->textures.end() || !it->second.tex)
+    {
+        // Decoded once: the band at the whole image width, through the palette.
+        TexEntry e;
+        IDirect3DTexture9 *t9;
+        u8 *dst;
+        pitch = (width * 4 + 255) & ~255u;
+        if (x->decodeBuf.size() < width * rows) x->decodeBuf.resize(width * rows);
+        for (y = 0; y < rows; y++)
+            for (k = 0; k < width; k++) x->decodeBuf[y * width + k] = pal[band[y * width + k]];
+        if (!arena_alloc(x, pitch * rows, &offset)) return 0;
+        t9 = new D3DTexture;
+        dst = x->arena + offset;
+        XGSetTextureHeader(width, rows, 1, 0, D3DFMT_LIN_A8R8G8B8, (D3DPOOL)0, 0, XGHEADER_CONTIGUOUS_MIP_OFFSET, pitch, t9, NULL, NULL);
+        XGOffsetResourceAddress(t9, dst);
+        for (y = 0; y < rows; y++) memcpy(dst + y * pitch, &x->decodeBuf[y * width], width * 4);
+        __sync();
+        memset(&e, 0, sizeof(e));
+        e.tex = t9;
+        e.w = width;
+        e.h = rows;
+        e.chunk = (int)(offset / ARENA_CHUNK);
+        x->arenaKeys[e.chunk].push_back(key);
+        x->arenaHeaders[e.chunk].push_back(t9);
+        x->textures[key] = e;
+        x->stats.textureUploads++;
+        x->stats.texelsDecoded += width * rows;
+        it = x->textures.find(key);
+    }
+    if (it->second.chunk >= 0) x->arenaUse[it->second.chunk] = x->presentCount;
+    map[0] = (float)xb;
+    map[1] = (float)yb;
+    map[2] = 1.0f / (float)width;
+    map[3] = 1.0f / (float)rows;
+    x->fbTex = it->second.tex;
+    x->fbTexels[0] = (float)width;
+    x->fbTexels[1] = (float)rows;
+    return 1;
+}
+
 // Profile gfxRdramCopy: a copy-mode rectangle drawing 16-bit texels 1:1 into
 // a 16-bit image moves memory, as the RDP does: from the texture image
 // (SETTIMG; the load used the same coordinates) to the colour image, in the
@@ -3352,6 +3468,7 @@ static void tex_rect(Xenos *x, const u32 *w, int flip)
     if (x->curSlot >= 0) x->fb[x->curSlot].fillOnly = 0;
     x->win.active = 0;
     fbSrc = fb_rect_source(x, t0, flip, s, t, dsdx, dtdy, xh - xl, yh - yl, fbMap);
+    if (!fbSrc && !x->staleCount) fbSrc = ram_rect_source(x, t0, flip, s, t, dsdx, dtdy, xh - xl, yh - yl, fbMap);
     if (!fbSrc && x->staleCount && (tile_reads_stale(x, tile) || tile_reads_stale(x, tile + 1)))
     {
         // Texels decoded from TMEM: the copy backs put off happen now, and
@@ -3546,6 +3663,8 @@ static void xenos_rdp(void *user, const u64 *words, u32 count)
         x->tmemDataGen++;
         x->fbLoad.valid = 0;
         if (op != 0x30) fb_load(x, w, op == 0x33);
+        x->ramLoad.valid = 0;
+        if (op == 0x34 && slot < 0 && !x->fbLoad.valid) ram_load(x, w);
         u32 lo, n;
         load_range(x->st, w, op, &lo, &n);
         if (!x->loadLog.empty() && (x->st->loadRam != x->logRam || x->st->loadRamGen != x->logGen))
@@ -4018,6 +4137,7 @@ H64Renderer *h64_xenos_create(H64System *sys, IDirect3DDevice9 *dev)
     int i;
     memset(x->arenaUse, 0, sizeof(x->arenaUse));
     memset(x->presentFence, 0, sizeof(x->presentFence));
+    memset(&x->ramLoad, 0, sizeof(x->ramLoad));
     x->api.user = x;
     x->api.rdp = xenos_rdp;
     x->api.triangle = xenos_triangle;

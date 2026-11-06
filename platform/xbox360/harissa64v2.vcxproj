@@ -121,6 +121,7 @@
       <AdditionalIncludeDirectories>..\..\third_party\bearssl\inc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <ClCompile Include="xb_update.cpp" />
+    <ClCompile Include="xb_stats.cpp" />
     <!-- LZMA SDK 19.00 (public domain): the .7z of the HD texture packs downloaded, read by
          xb_hirespack.cpp; compiled as C, big-endian, no multithreading. -->
     <ClCompile Include="..\..\third_party\lzma\*.c">

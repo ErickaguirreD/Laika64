@@ -124,6 +124,7 @@ void ConfigDefaults(Config *c)
     c->panelOpacity = 30;
     c->panelColor = 0;
     c->intro = 1;
+    c->statsShare = -1;
     c->settingsView = 1;   // big icons
     c->brightLevel = -1;
     c->sharpLevel = c->blurLevel = -1;
@@ -216,6 +217,7 @@ int ConfigParseFile(Config *c, const char *path)
         if (!strcmp(line, "artbg")) c->artBackground = atoi(eq + 1);
         if (!strcmp(line, "panelcolor")) c->panelColor = atoi(eq + 1);
         if (!strcmp(line, "intro")) c->intro = atoi(eq + 1);
+        if (!strcmp(line, "statsshare")) c->statsShare = atoi(eq + 1) > 0 ? 1 : atoi(eq + 1) < 0 ? -1 : 0;
         if (!strcmp(line, "setview")) c->settingsView = atoi(eq + 1);
         if (!strcmp(line, "brightlevel")) c->brightLevel = atoi(eq + 1);
         if (!strcmp(line, "sharplevel")) c->sharpLevel = atoi(eq + 1);
@@ -498,6 +500,7 @@ int ConfigWriteMenuKeys(const Config *c, const char *path, int withLastRom)
         fprintf(f, "wallfit=%d\nwallshuffle=%d\nbordercolor=%d\nborderopacity=%d\nborderwidth=%d\nborderglow=%d\npanelopacity=%d\npanelround=%d\n",
                 c->wallFit, c->wallShuffle, c->borderColor, c->borderOpacity, c->borderWidth, c->borderGlow, c->panelOpacity, c->panelRound);
     if (withLastRom && c->skinName[0]) fprintf(f, "skin=%s\n", c->skinName);
+    if (withLastRom && c->statsShare >= 0) fprintf(f, "statsshare=%d\n", c->statsShare);
     if (withLastRom) fprintf(f, "volumegame=%d\nvolumemusic=%d\nvolumesfx=%d\nmusicmode=%d\n", c->volumeGame, c->volumeMusic, c->volumeSfx, c->musicMode);
     if (withLastRom && c->musicTrack[0]) fprintf(f, "musictrack=%s\n", c->musicTrack);
     if (withLastRom) fprintf(f, "startrommode=%d\n", c->startRomMode);

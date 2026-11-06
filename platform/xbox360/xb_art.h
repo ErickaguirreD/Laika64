@@ -43,6 +43,7 @@ struct ArtResult
     u8 *dxt;                // or the same compressed: DXT1 as the Xbox 360's GPU reads it (dxtW x dxtH, whole 4x4 blocks), or NULL
     int dxtW, dxtH;
     u8 *glow;               // RGBA, ART_GLOW_W x ART_GLOW_H, or NULL
+    int infoOnly;           // only `info` changed (the critics' score came): the pictures shown stay
 };
 
 struct ArtStatus

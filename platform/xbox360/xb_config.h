@@ -113,6 +113,7 @@ struct Config
     int panelOpacity;   // panelopacity=0..100: how solid the panels are, in % (default 30)
     int panelColor;     // panelcolor=0..13: the panels' body - the interface's own (0), or a tint of xb_menu.cpp's swatches
     int settingsView;   // setview=0|1: the settings as the side list (0), or big icons with an explanation of each row (1)
+    int statsShare;     // statsshare=-1|0|1: anonymous statistics on leaving a game (xb_stats.cpp) - not asked yet (-1), no, yes
     int intro;          // intro=0|1: the LAIKA 64 logo when the emulator starts (Interface > Welcome intro; default 1)
     int sharpLevel;     // sharplevel=0..100: sharpening as a bar (0 off); from sharpen= (1: 50, 2: 100) when a file has none
     int blurLevel;      // blurlevel=0..100: blur as a bar (0 off); from blur= likewise. Only one of the two is above 0

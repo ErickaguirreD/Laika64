@@ -683,6 +683,7 @@ static const struct { int label, desc; } s_rowDesc[] = {
     { T_SHARPEN, T_D_SHARPEN },
     { T_SOUND, T_D_SOUND },
     { T_START_ROM, T_D_START_ROM },
+    { T_STATS_SHARE, T_D_STATS_SHARE },
     { T_STRETCH, T_D_STRETCH },
     { T_SYSTEM, T_D_SYSTEM },
     { T_TEXFILTER, T_D_TEXFILTER },
@@ -713,7 +714,7 @@ struct KodiPage { int title; KodiPart parts[4]; };
 static const KodiPage s_kodiPages[] = {
     { T_SYSTEM, { { T_KC_PAD_SAVE, { T_PAD_LOSS, T_AUTOSAVE_SLOT, T_BATTERY_WARN } },
                   { T_KC_PERF, { T_PERF_OVERLAY, T_CPU_NEXT, T_RSP_NEXT } },
-                  { T_KC_TOOLS, { T_DEV_MODE, T_WIZARD, T_EXPLORER } } } },
+                  { T_KC_TOOLS, { T_DEV_MODE, T_STATS_SHARE, T_WIZARD, T_EXPLORER } } } },
     // The picture's filters and effects all here (the preset sets them together);
     // the Screen page keeps the output: size, colour, sync.
     { T_GRAPHICS, { { T_KC_QUALITY, { T_PRESET, T_TEXFILTER, T_HIRESTEX, T_HIRES_DL, T_HIRES_PNG } },
@@ -1493,7 +1494,7 @@ static void ui_from_config(const Config *c)
 // The System page: what a controller unplugged in game does, the slot it saves to, the low battery
 // warning, then CPU and RSP (both apply at the next game start, so the ROM list only shows them -
 // last, so the rows before keep their place in game). B goes back, no row for it.
-enum { SYS_PADLOSS = 0, SYS_AUTOSLOT, SYS_BATTERY, SYS_PERF, SYS_DEV, SYS_CPU, SYS_RSP, SYS_WIZARD, SYS_EXPLORER };   // SYS_CPU..SYS_WIZARD: ROM list only
+enum { SYS_PADLOSS = 0, SYS_AUTOSLOT, SYS_BATTERY, SYS_PERF, SYS_DEV, SYS_STATS, SYS_CPU, SYS_RSP, SYS_WIZARD, SYS_EXPLORER };   // SYS_STATS..SYS_EXPLORER: ROM list only
 // The Developer mode page (System > Developer mode, A): the mode on or off, and with it on the
 // graphics error log (main.cpp ApplyGraphics: the renderer's gfxLog). B goes back, no row for it.
 enum { DEV_GFXLOG = 0 };   // the System page's row turns the mode on and off
@@ -1682,6 +1683,7 @@ static void settings_values(UiMenu *m, const Config *c)
     if (s_systemPage)
     {
         sprintf(m->value[SYS_DEV], "%s", toggle(c->devMode));   // opens its page: its switch shows the mode
+        sprintf(m->value[SYS_STATS], "%s", toggle(c->statsShare > 0));
         sprintf(m->value[SYS_CPU], "< %s >", strcmp(c->cpu, "interp") ? Tr(T_RECOMPILER) : Tr(T_INTERPRETER));
         sprintf(m->value[SYS_RSP], "< %s >", c->hle ? "HLE" : "LLE");
         sprintf(m->value[SYS_PADLOSS], "< %s >", Tr(c->padLoss == PADLOSS_SAVE ? T_PAD_LOSS_SAVE : c->padLoss == PADLOSS_PAUSE ? T_PAD_LOSS_PAUSE : T_OFF));
@@ -2098,6 +2100,7 @@ static void settings_system(UiMenu *m, const Config *c)
     UiMenuAdd(m, Tr(T_DEV_MODE), "");
     if (s_browser)
     {
+        UiMenuAdd(m, Tr(T_STATS_SHARE), "");   // anonymous statistics on leaving a game (xb_stats.cpp)
         // For the next game only: nothing to change in the one running.
         UiMenuAdd(m, Tr(T_CPU_NEXT), "");
         UiMenuAdd(m, Tr(T_RSP_NEXT), "");
@@ -2105,7 +2108,7 @@ static void settings_system(UiMenu *m, const Config *c)
         UiMenuAdd(m, Tr(T_EXPLORER), "");   // after a warning (settings_loop)
     }
     {
-        static const unsigned char icons[] = { UI_ICON_CONTROLS, UI_ICON_SAVE, UI_ICON_BATTERY, UI_ICON_CHART, UI_ICON_SLIDERS, UI_ICON_SYSTEM,
+        static const unsigned char icons[] = { UI_ICON_CONTROLS, UI_ICON_SAVE, UI_ICON_BATTERY, UI_ICON_CHART, UI_ICON_SLIDERS, UI_ICON_CHART, UI_ICON_SYSTEM,
                                                UI_ICON_SYSTEM, UI_ICON_SLIDERS, UI_ICON_LIST };
         UiMenuIcons(m, icons, sizeof(icons));
     }
@@ -2125,6 +2128,12 @@ static int system_input(UiMenu *m, Config *c, WORD down)
     if (m->sel == SYS_CPU && (dir || (down & XINPUT_GAMEPAD_A)))
     {
         strcpy(c->cpu, strcmp(c->cpu, "interp") ? "interp" : "dynarec");
+        settings_values(m, c);
+        return SET_CHANGED;
+    }
+    if (s_browser && m->sel == SYS_STATS && (dir || (down & XINPUT_GAMEPAD_A)))
+    {
+        c->statsShare = c->statsShare > 0 ? 0 : 1;
         settings_values(m, c);
         return SET_CHANGED;
     }
@@ -7715,6 +7724,37 @@ static void fav_star(float cx, float cy, float s, float a)
     icon_tri(cx, cy + s * 0.12f, s, 2, gold);
 }
 
+// The critics' score (H64GameInfo.score, 1-100) as five stars from (x, cy), each
+// `s` across: full, half (dimmer) or empty (grey). Nothing without a score.
+// Returns the width drawn.
+static float score_stars(float x, float cy, float s, int score, float a)
+{
+    const float step = s * 1.15f;
+    float v;
+    int i;
+    if (score <= 0) return 0;
+    v = score / 20.0f;
+    for (i = 0; i < 5; i++)
+    {
+        float f = v - i, cx = x + s * 0.5f + i * step;
+        if (f >= 0.75f) fav_star(cx, cy, s, a);
+        else if (f >= 0.25f)
+        {
+            D3DCOLOR grey = UiAlpha(D3DCOLOR_ARGB(255, 110, 112, 124), a);
+            icon_tri(cx, cy - s * 0.12f, s, 0, grey);
+            icon_tri(cx, cy + s * 0.12f, s, 2, grey);
+            fav_star(cx, cy, s * 0.62f, a);   // a half: a smaller gold star in a grey one
+        }
+        else
+        {
+            D3DCOLOR grey = UiAlpha(D3DCOLOR_ARGB(255, 110, 112, 124), a * 0.8f);
+            icon_tri(cx, cy - s * 0.12f, s, 0, grey);
+            icon_tri(cx, cy + s * 0.12f, s, 2, grey);
+        }
+    }
+    return 5 * step;
+}
+
 // ---- Settings > Interface > Categories ----
 // The list: "Make a category", then each category (A changes it). Making or
 // changing one: its field (genre, region...), its value among those the
@@ -9829,6 +9869,13 @@ static void views_take(IDirect3DDevice9 *dev)
     {
         ArtView *v;
         made++;
+        if (r.infoOnly)
+        {
+            // Its information only (the critics' score): the pictures stay as they are.
+            if ((v = view_find(r.path)) != NULL && r.hasInfo) { v->info = r.info; v->hasInfo = 1; }
+            ArtResultFree(&r);
+            continue;
+        }
         if (r.kind != ArtKindFor(r.path))
         {
             // Read for the kind of picture shown before (Interface > Game images, the right stick): it is sent again.
@@ -10414,6 +10461,12 @@ static void card_draw(const char *shown, const RomInfo *ri, const ArtView *v, in
         char fit[256];
         UiTextFit(UI_REGULAR, 16, iw, buf, fit, sizeof(fit));
         UiText(UI_REGULAR, 16, ix, ty, UiAlpha(gi ? UI_COL_TEXT2 : UI_COL_TEXT3, a), fit, UI_LEFT);
+        ty += 28;
+    }
+    // ---- The critics' score.
+    if (gi && gi->score > 0)
+    {
+        score_stars(ix, ty, 16, gi->score, a);
         ty += 28;
     }
 
@@ -11776,6 +11829,7 @@ static void browser_draw_spotlight(const std::vector<RomEntry> &roms, int sel)
                   (gi->year[0] || gi->genre[0]) && gi->developer[0] ? "  -  " : "", gi->developer);
         buf[sizeof(buf) - 1] = 0;
         UiText(UI_REGULAR, 19, tx + (fav_is(roms[sel].file) ? 32 : 0), ty + 4, UiAlpha(UI_COL_TEXT2, fade), buf, UI_LEFT);
+        score_stars(tx + (fav_is(roms[sel].file) ? 32 : 0) + UiTextWidth(UI_REGULAR, 19, buf) + (buf[0] ? 18 : 0), ty + 4, 16, gi->score, fade);
         ty += 40;
         if (gi->description[0]) paragraph(UI_REGULAR, 19, tx, ty, tw, 8, UiAlpha(UI_COL_TEXT2, fade), gi->description);
     }
@@ -11805,58 +11859,64 @@ static void browser_draw_spotlight(const std::vector<RomEntry> &roms, int sel)
 // ---- Cartridges: the games as N64 cartridges standing in a row on a shelf,
 // each one's box art as its label; the selection lifted up out of the row,
 // its name and facts under the shelf. The row glides as the carousel's does.
-// Drawn, not a picture, in the N64 cartridge's shape: the grey shell lit from
-// above (its top corners round, its bottom ones cut off), the grip ridges along
-// its top, the big label in its recess, the ridges beside it and the plate under it.
+// Drawn, not a picture, in the N64 cartridge's shape (cartridge()).
 #define CART_W 300.0f        // the middle cartridge
-#define CART_H 194.0f        // an N64 cartridge's front is about 116 x 75 mm
+#define CART_H 201.6f        // the shape's 320 x 215 (cartucho.webp)
 #define CART_SHELF 470.0f    // they stand on this line
 #define CART_SPREAD 4        // shown on each side
 #define CART_LIFT 46.0f      // how far the selection comes up
 
 // One cartridge at (x, y, w, h): `light` darkens the ones farther from the middle.
-static void cartridge(float x, float y, float w, float h, const ArtView *v, float alpha, float light)
+// The shell is the picture of an N64 cartridge (xb_cart_shell.h, 320 x 215); the
+// game's box art is its label, stretched over the label's recess (83..237 x 15..193 of it).
+#include "xb_cart_shell.h"
+static IDirect3DTexture9 *s_cartShell, *s_cartMask;   // the picture, and its outline in white (the selection's glow)
+static int s_cartShellTried;
+
+static void cart_shell_load(void)
 {
-    const float k = w / CART_W, r = 20 * k, cut = 18 * k, split = y + h * 0.62f;
-    const float lw = w - 76 * k, lh = lw * 232.0f / 400.0f, lx = x + (w - lw) * 0.5f, ly = y + 24 * k;
+    int iw, ih, i;
+    unsigned char *px;
+    if (s_cartShellTried) return;
+    s_cartShellTried = 1;
+    px = UiDecodeImage(s_cartShellPng, (long)sizeof(s_cartShellPng), 320, 215, &iw, &ih);
+    if (!px) return;
+    s_cartShell = UiImageCreate(UiDevice(), px, iw, ih);
+    for (i = 0; i < iw * ih; i++) px[i * 4] = px[i * 4 + 1] = px[i * 4 + 2] = 255;   // white, its own alpha kept
+    s_cartMask = UiImageCreate(UiDevice(), px, iw, ih);
+    free(px);
+}
+
+// The selection around a cartridge: its own outline, grown, in the selection's colours -
+// the glow fading out from it and the ring on its edge, the shape of the shell exactly.
+static void cart_select(float x, float y, float w, float h, float a)
+{
+    int g;
+    cart_shell_load();
+    if (!s_cartMask) { selection_glow(x - 6, y - 6, w + 12, h + 12, 20, a); UiRoundRing(x - 5, y - 5, w + 10, h + 10, 20, 3.0f, SEL_RING(a)); return; }
+    for (g = 16; g >= 6; g -= 2)
+        UiImage(s_cartMask, x - g, y - g * 0.67f, w + 2 * g, h + 1.34f * g, 0, SEL_GLOW(a * (0.35f - g * 0.018f)));
+    UiImage(s_cartMask, x - 4, y - 3, w + 8, h + 6, 0, SEL_RING(a));
+}
+
+static void cartridge(float x, float y, float w, float h, const ArtView *v, float alpha, float light, int selected)
+{
+    const float sx = w / 320.0f, sy = h / 215.0f;
+    const float rx = x + 86 * sx, ry = y + 18 * sy, rw = 148 * sx, rh = 172 * sy;   // inside the recess
     const int A = (int)(255 * alpha), L = (int)(255 * light);
-    int i, side;
-#define CART_RGB(rr, gg, bb) D3DCOLOR_ARGB(A, (int)((rr) * light), (int)((gg) * light), (int)((bb) * light))
-    UiShadow(x + 8 * k, y + 14 * k, w - 16 * k, h - 6 * k, r, 24 * k, D3DCOLOR_ARGB(A * 120 / 255, 0, 0, 0));
-    // The shell: round at the top, its lower corners cut off at 45 degrees.
-    UiRoundRect(x, y, w, split - y + r, r, CART_RGB(150, 151, 158), CART_RGB(122, 123, 130));
-    UiRect(x + cut, split, w - 2 * cut, y + h - split, CART_RGB(122, 123, 130));
-    UiRect(x, split, cut, y + h - cut - split, CART_RGB(122, 123, 130));
-    UiRect(x + w - cut, split, cut, y + h - cut - split, CART_RGB(122, 123, 130));
-    UiStrip(x, y + h - cut, y + h - cut, x + cut, y + h - cut, y + h, CART_RGB(122, 123, 130), CART_RGB(108, 109, 116));
-    UiStrip(x + w - cut, y + h - cut, y + h, x + w, y + h - cut, y + h - cut, CART_RGB(122, 123, 130), CART_RGB(108, 109, 116));
-    UiRect(x + cut, y + h - 3 * k, w - 2 * cut, 3 * k, CART_RGB(96, 97, 104));   // its bottom edge in shade
-    // The grip ridges along its top: grooves with light under them.
-    for (i = 0; i < 3; i++)
+    UiShadow(x + 8 * sx, y + 14 * sy, w - 16 * sx, h - 6 * sy, 14 * sx, 24 * sx, D3DCOLOR_ARGB(A * 120 / 255, 0, 0, 0));
+    cart_shell_load();
+    if (s_cartShell) UiImage(s_cartShell, x, y, w, h, 0, D3DCOLOR_ARGB(A, L, L, L));
+    else UiRoundRect(x, y, w, h, 14 * sx, D3DCOLOR_ARGB(A, (int)(140 * light), (int)(141 * light), (int)(147 * light)),
+                     D3DCOLOR_ARGB(A, (int)(116 * light), (int)(117 * light), (int)(123 * light)));
+    if (v && v->cover)
     {
-        float gy = y + 5 * k + i * 4.5f * k;
-        UiRect(x + r, gy, w - 2 * r, 1.5f * k, CART_RGB(98, 99, 106));
-        UiRect(x + r, gy + 1.5f * k, w - 2 * r, 1 * k, CART_RGB(184, 185, 192));
+        // The whole recess: the label. Box art without the N64 band at the right of the box
+        // (the logo, "Only For", the rating: its last 18.5%), the picture alone filling the
+        // label, on every cartridge; other pictures as they are.
+        if (v->shownKind == ART_KIND_BOX) UiImagePart(v->cover, rx, ry, rw, rh, 0.0f, 0.0f, 0.815f, 1.0f, D3DCOLOR_ARGB(A, L, L, L));
+        else UiImage(v->cover, rx, ry, rw, rh, 6 * sx, D3DCOLOR_ARGB(A, L, L, L));
     }
-    // The label's recess, then the label: the game's picture.
-    UiRoundRect(lx - 7 * k, ly - 7 * k, lw + 14 * k, lh + 14 * k, 12 * k, CART_RGB(92, 93, 100), CART_RGB(132, 133, 140));
-    if (v && v->cover) UiImage(v->cover, lx, ly, lw, lh, 7 * k, D3DCOLOR_ARGB(A, L, L, L));
-    else UiRoundRect(lx, ly, lw, lh, 7 * k, CART_RGB(56, 58, 70), CART_RGB(44, 46, 56));
-    // Upright ridges beside the label, where the fingers hold it.
-    for (side = 0; side < 2; side++)
-        for (i = 0; i < 4; i++)
-        {
-            float gx = side ? lx + lw + 13 * k + i * 4.5f * k : lx - 13 * k - i * 4.5f * k - 1.5f * k;
-            UiRect(gx, ly + lh * 0.18f, 1.5f * k, lh * 0.64f, CART_RGB(98, 99, 106));
-            UiRect(gx + 1.5f * k, ly + lh * 0.18f, 1 * k, lh * 0.64f, CART_RGB(176, 177, 184));
-        }
-    // The raised plate under the label.
-    {
-        float pw = w * 0.36f, ph = 11 * k, px = x + (w - pw) * 0.5f, py = ly + lh + (y + h - ly - lh - ph) * 0.5f;
-        UiRoundRect(px, py, pw, ph, ph * 0.5f, CART_RGB(170, 171, 178), CART_RGB(132, 133, 140));
-        UiRoundRing(px, py, pw, ph, ph * 0.5f, 1.0f * k, CART_RGB(100, 101, 108));
-    }
-#undef CART_RGB
 }
 
 static void browser_draw_cartridges(const std::vector<RomEntry> &roms, int sel)
@@ -11901,15 +11961,14 @@ static void browser_draw_cartridges(const std::vector<RomEntry> &roms, int sel)
         if (ad < 0.5f)
         {
             float ga = a * (1.0f - 2.0f * ad);
-            selection_glow(x - 6, y - 6, w + 12, h + 12, 20, ga);
-            UiRoundRing(x - 5, y - 5, w + 10, h + 10, 20, 3.0f, SEL_RING(ga));
+            cart_select(x, y, w, h, ga);
         }
-        cartridge(x, y, w, h, view_find(roms[idx].file.c_str()), alpha, light);
+        cartridge(x, y, w, h, view_find(roms[idx].file.c_str()), alpha, light, idx == sel);
         if (fav_is(roms[idx].file))
         {
-            // A favourite: its badge on the shell's top left corner.
-            UiCircle(x + 20 * s, y + 20 * s, 13, UiAlpha(D3DCOLOR_ARGB(200, 16, 18, 26), alpha));
-            fav_star(x + 20 * s, y + 20 * s, 15, alpha);
+            // A favourite: its badge on the left wing.
+            UiCircle(x + 32 * s, y + 52 * s, 13, UiAlpha(D3DCOLOR_ARGB(200, 16, 18, 26), alpha));
+            fav_star(x + 32 * s, y + 52 * s, 15, alpha);
         }
     }
     {
@@ -11926,6 +11985,7 @@ static void browser_draw_cartridges(const std::vector<RomEntry> &roms, int sel)
             buf[sizeof(buf) - 1] = 0;
             UiTextFit(UI_REGULAR, 19, UI_WIDTH - 2 * UI_SAFE_X, buf, fit, sizeof(fit));
             UiText(UI_REGULAR, 19, UI_WIDTH * 0.5f, CART_SHELF + 100, UI_COL_TEXT2, fit, UI_CENTER);
+            score_stars(UI_WIDTH * 0.5f - 5 * 18 * 1.15f * 0.5f, CART_SHELF + 134, 18, gi->score, 1.0f);
         }
     }
     UiScreenFooter(Tr(T_FOOT_BROWSER));
@@ -12159,6 +12219,7 @@ static void browser_draw_cinema(const std::vector<RomEntry> &roms, int sel)
                       (gi->year[0] || gi->genre[0]) && gi->developer[0] ? "  -  " : "", gi->developer);
             buf[sizeof(buf) - 1] = 0;
             UiText(UI_REGULAR, 20, sx, ty, UiAlpha(UI_COL_TEXT2, fade), buf, UI_LEFT);
+            score_stars(sx + UiTextWidth(UI_REGULAR, 20, buf) + (buf[0] ? 18 : 0), ty, 16, gi->score, fade);
             if (gi->description[0]) paragraph(UI_REGULAR, 18, tx, ty + 18, 760, 2, UiAlpha(UI_COL_TEXT2, fade), gi->description);
         }
     }
