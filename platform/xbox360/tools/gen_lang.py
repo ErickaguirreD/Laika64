@@ -329,6 +329,9 @@ def main():
         # the wallpapers' preview: its hints wrapped in 3 lines of the 578-pixel box less 60
         for key in ("WALL_HINT", "WALL_OFF_HINT"):
             check(code, key + " in 3 lines", width(t[key], 19, False), 3 * (578 - 60) * 0.9)
+        # the news window (news_screen): each item wrapped in 3 lines of the 820-pixel panel less 112
+        for key in ("NEWS_1", "NEWS_2", "NEWS_3", "NEWS_4"):
+            check(code, key + " in 3 lines", width(t[key], 20, False), 3 * (820 - 112) * 0.9)
         # On-screen performance page (perfpage_draw): the items with their tick box
         # 80 from the left column's right end, the rows' values; the right column 578 wide.
         for key in ("PERF_FPS", "PERF_CPU", "PERF_RAM", "PERF_RES", "PERF_GPU", "PERF_TCPU", "PERF_TGPU", "PERF_TRAM"):

@@ -553,6 +553,22 @@ void h64_jit_run_one(H64System *sys)
         return;
     }
     b = lookup(j, pc32, paddr, h64_jit_kernel_mode(cpu));
+    if (!b && j->codeMap[paddr >> H64_JIT_CHUNK_SHIFT] && !j->noNative &&
+        (sys->sched.next < cpu->cycles + (u64)H64_JIT_MAX_INSNS * cpu->cpi || j->midSteps > 0))
+    {
+        // Inside compiled code with an event close by: stepped, not compiled. An event inside a
+        // block steps the interpreter up to it, and each step compiled a block starting at that
+        // instruction (refused at once, the event still inside it) - over time a block at almost
+        // every instruction: Nightmare Creatures had each MIPS word in 9.3 blocks, filling the code
+        // memory and recompiling 5-11 ms a frame. Once the event is past, a few more steps find
+        // the start of a block already compiled.
+        if (sys->sched.next < cpu->cycles + (u64)H64_JIT_MAX_INSNS * cpu->cpi) j->midSteps = 16;
+        else j->midSteps--;
+        h64_cpu_step(sys);
+        j->stats.interpSteps++;
+        return;
+    }
+    j->midSteps = 0;
     if (!b)
     {
         {

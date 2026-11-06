@@ -13,9 +13,41 @@
 // The form "LAIKA 64 estadisticas" (laikaemu@gmail.com) and its questions' entry ids.
 #define STATS_HOST "docs.google.com"
 #define STATS_PATH "/forms/d/e/1FAIpQLSciDACApuYtMCF5FwiDXVgotbXJFmR8xroalb26JVh3bfNmnw/formResponse"
-enum { F_GAME, F_CODE, F_VERSION, F_FPS_AVG, F_FPS_MIN, F_PCT_LOW, F_TIMES, F_ENDING, F_SETTINGS, F_MINUTES, F_VOTE, F_REASON, F_COUNT };
+enum { F_GAME, F_CODE, F_VERSION, F_FPS_AVG, F_FPS_MIN, F_PCT_LOW, F_TIMES, F_ENDING, F_SETTINGS, F_MINUTES, F_VOTE, F_REASON, F_CONSOLE, F_COUNT };
 static const char *const s_entry[F_COUNT] = { "659327786", "535791574", "173232975", "34059198", "2116461985", "1952752355",
-                                              "1334835407", "2102775765", "788356227", "1997235836", "1181904485", "1132066091" };
+                                              "1334835407", "2102775765", "788356227", "1997235836", "1181904485", "1132066091",
+                                              "116688322" };
+
+extern "C" VOID XeCryptRandom(PBYTE pb, DWORD cb);   // xboxkrnl export
+
+static void config_file(const char *drive, const char *name, char *out, size_t size);
+
+void StatsConsoleId(const char *drive, char *out, size_t size)
+{
+    char file[96], id[16] = "";
+    FILE *f;
+    config_file(drive, "stats_console.txt", file, sizeof(file));
+    if ((f = fopen(file, "r")) != NULL)
+    {
+        if (fgets(id, sizeof(id), f)) id[strcspn(id, "\r\n")] = 0;
+        fclose(f);
+    }
+    if (strlen(id) != 8)
+    {
+        // Made once: random, nothing of the console or of its owner in it.
+        BYTE r[4];
+        XeCryptRandom(r, sizeof(r));
+        _snprintf(id, sizeof(id) - 1, "%02x%02x%02x%02x", r[0], r[1], r[2], r[3]);
+        id[sizeof(id) - 1] = 0;
+        if ((f = fopen(file, "w")) != NULL)
+        {
+            fputs(id, f);
+            fclose(f);
+        }
+    }
+    strncpy(out, id, size - 1);
+    out[size - 1] = 0;
+}
 
 void StatsSessionStart(StatsSession *s)
 {
@@ -79,6 +111,7 @@ static void build_path(const StatsSession *s, const char *ending, const char *vo
     add(out, size, F_MINUTES, v);
     if (vote[0]) add(out, size, F_VOTE, vote);
     if (reason[0]) add(out, size, F_REASON, reason);
+    if (s->console[0]) add(out, size, F_CONSOLE, s->console);
     strncat(out, "&submit=Submit", size - strlen(out) - 1);
 }
 
@@ -116,6 +149,25 @@ void StatsSend(const StatsSession *s, const char *ending, const char *vote, cons
     build_path(s, ending, vote, reason, path, sizeof(path));
     H64_INFO("[stats] %s: %.1f FPS on average, %d min, %s%s%s", s->game, s->seconds ? s->fpsSum / s->seconds : 0.0, StatsSessionMinutes(s), ending,
              vote[0] ? ", vote " : "", vote);
+    send_path(path);
+}
+
+void StatsSendReport(const char *drive, const char *game, const char *code, const char *vote, const char *reason)
+{
+    static char path[1024];
+    char console[12];
+    StatsConsoleId(drive, console, sizeof(console));
+    strncpy(path, STATS_PATH, sizeof(path) - 1);
+    path[sizeof(path) - 1] = 0;
+    add(path, sizeof(path), F_GAME, game);
+    add(path, sizeof(path), F_CODE, code);
+    add(path, sizeof(path), F_VERSION, H64_VERSION_STRING);
+    add(path, sizeof(path), F_ENDING, "reporte");
+    add(path, sizeof(path), F_VOTE, vote);
+    if (reason[0]) add(path, sizeof(path), F_REASON, reason);
+    add(path, sizeof(path), F_CONSOLE, console);
+    strncat(path, "&submit=Submit", sizeof(path) - strlen(path) - 1);
+    H64_INFO("[stats] report: %s (%s), %s%s%s", game, code, vote, reason[0] ? ", " : "", reason);
     send_path(path);
 }
 

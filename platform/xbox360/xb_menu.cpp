@@ -27,6 +27,7 @@
 #include "xb_flags.h"
 #include "xb_pad.h"
 #include "xb_profile.h"
+#include "xb_stats.h"
 #include "xb_wizref.h"
 #include "xb_ui.h"
 #include "xb_update.h"
@@ -694,7 +695,8 @@ static const struct { int label, desc; } s_rowDesc[] = {
     { T_VOLUME, T_D_VOLUME },
     { T_VSYNC, T_D_VSYNC },
     { T_WALLPAPERS, T_D_WALLPAPERS },
-    { T_WIZARD, T_D_WIZARD }
+    { T_WIZARD, T_D_WIZARD },
+    { T_REPORT_GAME, T_D_REPORT_GAME }
 };
 
 // What a row does (by its label as shown), NULL when there is no text for it.
@@ -1051,6 +1053,14 @@ static void kodi_draw(const UiMenu *m)
 
 static void edges_draw(const UiMenu *m);   // Image calibration > Calibrate the edges (below)
 
+// The side bar's row height: rowMax (48 by default), less when a page has many rows,
+// so they stay above the prompts.
+static float menu_row_h(const UiMenu *m, float room)
+{
+    float most = m->rowMax > 0 ? m->rowMax : 48;
+    return m->count > 0 && room / m->count < most ? room / m->count : most;
+}
+
 void UiMenuDraw(const UiMenu *m)
 {
     static UiAnim sel;
@@ -1058,9 +1068,8 @@ void UiMenuDraw(const UiMenu *m)
     static int lastCount;
     static float lastDraw = -1.0f, openAt = -10.0f, pageAt = -10.0f;
     const float y = 12, w = 690, h = UI_HEIGHT - 24, head = 190, foot = 78;
-    // Rows shrink a little when a page has many, so they stay above the prompts.
     const float room = h - head - 18 - foot;
-    float rowH = m->count > 0 && room / m->count < 48 ? room / m->count : 48, sy, lx, ix, x, now = UiTime(), shift;
+    float rowH = menu_row_h(m, room), sy, lx, ix, x, now = UiTime(), shift;
     int i, restart = strcmp(lastTitle, m->title) != 0 || lastCount != m->count, rtl = LangRtl(), icons = 0;
     float ddY = 0;   // under the row whose list of values is open
     char title[160];
@@ -1141,7 +1150,7 @@ void UiMenuThumb(const UiMenu *m, IDirect3DTexture9 *tex, const char *emptyText)
 {
     const float x = 8 - s_menuSlide, y = 12, w = 690, h = UI_HEIGHT - 24, head = 190, foot = 78;
     const float room = h - head - 18 - foot;
-    float rowH = m->count > 0 && room / m->count < 48 ? room / m->count : 48;
+    float rowH = menu_row_h(m, room);
     float top = y + head + m->count * rowH + 28, bottom = y + h - foot - 28, bh = bottom - top, bw, bx, a = selection_pulse();
     if (bh < 60) return;
     bw = bh * 4.0f / 3.0f;
@@ -1192,6 +1201,7 @@ void UiMenuNavigate(UiMenu *m, WORD down)
 enum { S_GRAPHICS = 0, S_SCREEN, S_CONTROLS, S_SOUND, S_SYSTEM, S_INTERFACE, S_PATHS };   // S_INTERFACE, S_PATHS: ROM list only
 static int s_rowAbout = -1;   // Settings' About row (the last)
 static int s_rowHires = -1;   // Settings' HD textures row (ROM list only: hires_hub)
+static int s_rowReport = -1;  // Settings' Report a game row (ROM list only: report_screen)
 static int s_pathsPage;   // Settings > Paths
 static void settings_paths(UiMenu *m, const Config *c);
 // The Volumen page: three bars (game, button sounds, menu music - the last from the ROM list only:
@@ -1313,7 +1323,7 @@ void UiMenuNowPlaying(const UiMenu *m, IDirect3DTexture9 *tex, int texW, int tex
 {
     const float x = 8 - s_menuSlide, y = 12, w = 690, h = UI_HEIGHT - 24, head = 190, foot = 78;
     const float room = h - head - 18 - foot;
-    float rowH = m->count > 0 && room / m->count < 48 ? room / m->count : 48;
+    float rowH = menu_row_h(m, room);
     float top = y + head + m->count * rowH + 22, bottom = y + h - foot - 22, cx = x + w * 0.5f;
     char head2[64], fit[160];
     if (bottom - top < 50) return;
@@ -1779,13 +1789,14 @@ static void settings_main(UiMenu *m, const Config *c)
     UiMenuAdd(m, Tr(T_SOUND), "");
     UiMenuAdd(m, Tr(T_SYSTEM), "");
     UiMenuIcons(m, icons, sizeof(icons));
-    s_rowSaveGame = s_rowSaveAll = s_rowAbout = s_rowHires = -1;
+    s_rowSaveGame = s_rowSaveAll = s_rowAbout = s_rowHires = s_rowReport = -1;
     if (s_browser)
     {
         // Not in game: the menus' look cannot be seen there, and the folders are the ROM list's.
         m->icon[UiMenuAdd(m, Tr(T_INTERFACE), "")] = UI_ICON_INTERFACE;
         m->icon[UiMenuAdd(m, Tr(T_PATHS), "")] = UI_ICON_LOAD;
         m->icon[s_rowHires = UiMenuAdd(m, Tr(T_HIRES_SECTION), "")] = UI_ICON_HD;   // its own screen (hires_hub)
+        m->icon[s_rowReport = UiMenuAdd(m, Tr(T_REPORT_GAME), "")] = UI_ICON_CHART;   // a game's report sent at once (settings_loop)
         m->icon[s_rowAbout = UiMenuAdd(m, Tr(T_ABOUT), "")] = UI_ICON_INFO;
     }
     else
@@ -4249,6 +4260,82 @@ static void ctl_note(const char *text)
     s_ctl.msgAt = GetTickCount();
 }
 
+// ---- Rumble (Controls > C_RUMBLE) ----
+// The strength of every player's vibration (Config::rumble, 0 off) in steps of
+// 10 %, and a test: the connected controllers vibrate RUMBLE_TEST_MS at that
+// strength, as a game's Rumble Pak at full strength does (main.cpp RumbleUpdate).
+enum { RR_STRENGTH = 0, RR_TEST, RR_COUNT };
+#define RUMBLE_TEST_MS 700
+static DWORD s_rumbleTestAt;   // when the test started (0: not running)
+
+static void rumble_motors(int pct)
+{
+    XINPUT_VIBRATION v;
+    DWORD i;
+    v.wLeftMotorSpeed = (WORD)(0xC000 * pct / 100);
+    v.wRightMotorSpeed = (WORD)(0x6000 * pct / 100);
+    for (i = 0; i < 4; i++) XInputSetState(i, &v);
+}
+
+static void rumble_values(UiMenu *m, const Config *c)
+{
+    if (c->rumble > 0) _snprintf(m->value[RR_STRENGTH], sizeof(m->value[0]) - 1, "< %d%% >", c->rumble);
+    else _snprintf(m->value[RR_STRENGTH], sizeof(m->value[0]) - 1, "< %s >", Tr(T_OFF));
+    m->value[RR_STRENGTH][sizeof(m->value[0]) - 1] = 0;
+}
+
+static void rumble_open(UiMenu *m, const Config *c)
+{
+    UiMenuClear(m, Tr(T_RUMBLE), Tr(T_FOOT_RUMBLE));
+    m->page = UI_PAGE_RUMBLE;
+    UiMenuAdd(m, Tr(T_RUMBLE_STRENGTH), "");
+    UiMenuAdd(m, Tr(T_RUMBLE_TEST), "");
+    rumble_values(m, c);
+    {
+        static const unsigned char icons[] = { UI_ICON_SLIDERS, UI_ICON_PLAY };
+        UiMenuIcons(m, icons, sizeof(icons));
+    }
+}
+
+static int rumble_input(UiMenu *m, Config *c, WORD down)
+{
+    int dir = (down & XINPUT_GAMEPAD_DPAD_RIGHT) ? 1 : (down & XINPUT_GAMEPAD_DPAD_LEFT) ? -1 : 0;
+    if (s_rumbleTestAt && (GetTickCount() - s_rumbleTestAt >= RUMBLE_TEST_MS || (down & XINPUT_GAMEPAD_B)))
+    {
+        rumble_motors(0);
+        s_rumbleTestAt = 0;
+    }
+    UiMenuNavigate(m, down);
+    if (down & XINPUT_GAMEPAD_B)
+    {
+        int i;
+        controls_open(m, c);
+        for (i = 0; i < C_COUNT; i++)
+            if (s_ctlOrder[i] == C_RUMBLE) m->sel = i;
+        return SET_NONE;
+    }
+    if (m->sel == RR_STRENGTH && dir)
+    {
+        int v = c->rumble + dir * 10;
+        c->rumble = v < 0 ? 0 : v > 100 ? 100 : v;
+        rumble_values(m, c);
+        if (s_rumbleTestAt) rumble_motors(c->rumble);   // a test running follows the new strength
+        return SET_CHANGED;
+    }
+    if (down & XINPUT_GAMEPAD_A)
+    {
+        // A on either row: the test (off: nothing to feel, said in the row's value).
+        if (c->rumble > 0)
+        {
+            rumble_motors(c->rumble);
+            s_rumbleTestAt = GetTickCount();
+            if (!s_rumbleTestAt) s_rumbleTestAt = 1;
+        }
+        else xb_audio_ui_sound(XB_SFX_ERROR);
+    }
+    return SET_NONE;
+}
+
 // Controller 1's state as the mapping's input.
 static int ctl_read(H64PadInput *in)
 {
@@ -4420,10 +4507,10 @@ static int controls_input(UiMenu *m, Config *c, WORD down)
         s_ctl.autoMode = AUTO_ASK;
         return SET_NONE;
     }
-    if (item == C_RUMBLE && dir)
+    if (item == C_RUMBLE && (down & XINPUT_GAMEPAD_A))
     {
-        c->rumble = c->rumble > 0 ? 0 : 100;   // a switch, for every player (the setting keeps a strength: off 0, on 100)
-        return SET_CHANGED;
+        rumble_open(m, c);   // its own page: the strength (for every player) and a test
+        return SET_NONE;
     }
     if (item == C_STICK && dir)
     {
@@ -4471,7 +4558,14 @@ static void ctl_hints(u32 mask, char *out, size_t size)
 
 static void ctl_value_text(int item, const H64PadMap *map, char *out)
 {
-    if (item == C_RUMBLE) { sprintf(out, "%s", toggle(s_ctl.c ? s_ctl.c->rumble > 0 : 1)); return; }   // a switch
+    if (item == C_RUMBLE)
+    {
+        // The strength; A opens its page.
+        int r = s_ctl.c ? s_ctl.c->rumble : 100;
+        if (r > 0) sprintf(out, "%d%%", r);
+        else sprintf(out, "%s", Tr(T_OFF));
+        return;
+    }
     const char *sticks[H64_STICK_COUNT] = { Tr(T_STICK_LEFT), Tr(T_STICK_RIGHT), Tr(T_STICK_DPAD), Tr(T_OFF) };
     if (item == C_STICK) sprintf(out, "< %s >", sticks[map->stick >= 0 && map->stick < H64_STICK_COUNT ? map->stick : 0]);
     else if (item == C_SHOTCOMBO) out[0] = 0;   // opens the shortcuts page
@@ -4736,7 +4830,7 @@ static void controls_draw(const UiMenu *m)
         // The last change, or a word of help, on the right.
         DWORD age = GetTickCount() - s_ctl.msgAt;
         if (selItem < H64_N64_COUNT) UiFooter(x + 40, y + CTL_H - 39, Tr(T_FOOT_CTL_BUTTON));
-        else if (selItem == C_STICK || selItem == C_RUMBLE) UiFooter(x + 40, y + CTL_H - 39, Tr(T_FOOT_CTL_VALUE));
+        else if (selItem == C_STICK) UiFooter(x + 40, y + CTL_H - 39, Tr(T_FOOT_CTL_VALUE));
         else UiFooter(x + 40, y + CTL_H - 39, Tr(T_FOOT_CTL_OTHER));
         if (s_ctl.msg[0] && age < 3000) UiText(UI_BOLD, 18, x + CTL_W - 40, y + CTL_H - 39, UI_COL_ACCENT_HI, s_ctl.msg, UI_RIGHT);
         else UiText(UI_REGULAR, 16, x + CTL_W - 40, y + CTL_H - 39, UI_COL_TEXT3, Tr(T_BACK_RESERVED), UI_RIGHT);
@@ -5895,6 +5989,7 @@ static int settings_input(UiMenu *m, Config *c, int perGame, WORD down)
     if (m->page == UI_PAGE_BORDER) return border_input(m, c, down);
     if (m->page == UI_PAGE_PERF) return perf_input(m, c, down);
     if (m->page == UI_PAGE_HOTKEYS) return hk_input(m, c, down);
+    if (m->page == UI_PAGE_RUMBLE) return rumble_input(m, c, down);
     if (s_soundPage) return sound_input(m, c, down);
     if (s_systemPage) return system_input(m, c, down);
     UiMenuNavigate(m, down);
@@ -5935,6 +6030,7 @@ static int settings_input(UiMenu *m, Config *c, int perGame, WORD down)
         return SET_NONE;
     }
     if (s_browser && m->sel == s_rowHires && (down & XINPUT_GAMEPAD_A)) return SET_HIRES_HUB;
+    if (s_browser && m->sel == s_rowReport && (down & XINPUT_GAMEPAD_A)) return SET_REPORT;
     if (m->sel == s_rowAbout && (down & XINPUT_GAMEPAD_A)) return SET_ABOUT;
     settings_values(m, c);
     if (down & XINPUT_GAMEPAD_A)
@@ -6068,17 +6164,25 @@ static void news_screen(IDirect3DDevice9 *dev)
 {
     UiInput in;
     char title[96];
-    const float openAt = UiTime();
+    static char text[NEWS_COUNT][512];   // each item wrapped to the panel (a long one takes up to 3 lines)
+    int lines[NEWS_COUNT], total = 0, i;
+    const float openAt = UiTime(), lineH = 20 * 1.35f;
     UiInputInit(&in);
     _snprintf(title, sizeof(title) - 1, Tr(T_NEWS_TITLE), H64_VERSION_STRING);
     title[sizeof(title) - 1] = 0;
+    for (i = 0; i < NEWS_COUNT; i++)
+    {
+        lines[i] = UiTextWrap(UI_REGULAR, 20, 820 - 72 - 40, 3, Tr(T_NEWS_1 + i), text[i], sizeof(text[i]));
+        if (lines[i] < 1) lines[i] = 1;
+        total += lines[i];
+    }
     xb_audio_ui_sound(XB_SFX_NOTIFY);
     for (;;)
     {
-        const float w = 820, h = 170 + NEWS_COUNT * 44, x = (UI_WIDTH - w) * 0.5f;
+        const float w = 820, h = 170 + NEWS_COUNT * 44 + (total - NEWS_COUNT) * lineH, x = (UI_WIDTH - w) * 0.5f;
         const float e = ease_out((UiTime() - openAt) / 0.25f), y = (UI_HEIGHT - h) * 0.5f + (1.0f - e) * 30.0f;
         WORD down = UiInputPoll(&in);
-        int i;
+        float ly = y + 120;
         if (down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_START)) return;
         dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
         UiBegin(dev);
@@ -6092,9 +6196,9 @@ static void news_screen(IDirect3DDevice9 *dev)
         UiRect(x + 24, y + 86, w - 48, 1, UI_COL_LINE);
         for (i = 0; i < NEWS_COUNT; i++)
         {
-            const float ly = y + 120 + i * 44;
             UiCircle(x + 52, ly, 5, UI_COL_ACCENT_HI);
-            UiText(UI_REGULAR, 20, x + 72, ly, UI_COL_TEXT, Tr(T_NEWS_1 + i), UI_LEFT);
+            UiText(UI_REGULAR, 20, x + 72, ly, UI_COL_TEXT, text[i], UI_LEFT);
+            ly += 44 + (lines[i] - 1) * lineH;
         }
         UiRect(x + 24, y + h - 56, w - 48, 1, UI_COL_LINE);
         UiFooter(x + 40, y + h - 28, Tr(T_FOOT_NEWS));
@@ -6952,7 +7056,7 @@ static void wiz_controls(IDirect3DDevice9 *dev, Config *c, int calib)
     {
         WORD down = UiInputPoll(&in);
         SettingsInput(&m, c, 0, down);
-        if (m.page != UI_PAGE_CONTROLS && m.page != UI_PAGE_CALIB) break;   // B went back out of them
+        if (m.page != UI_PAGE_CONTROLS && m.page != UI_PAGE_CALIB && m.page != UI_PAGE_RUMBLE) break;   // B went back out of them
         dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
         UiBegin(dev);
         UiBackdrop();
@@ -8938,17 +9042,80 @@ static void hub_frame(const char *title, const char *step, float x, float y, flo
     UiPanel(x, y, w, h, 22);
 }
 
-// Step 2: the game the pack is for, from the ROM list (the one selected there first). Its
-// header's name - what the packs and the game's folder go by - is shown for the one chosen.
-// Returns 1 with that name in romName.
-static int import_pick_game(IDirect3DDevice9 *dev, const char *packName, char *romName, size_t romSize)
+// A question with a few answers in a list: D-pad (or the left stick) up/down, A picks one; B
+// returns -1 when `canSkip` (else B does nothing). `text` may be "" (no paragraph).
+int ChoiceScreen(IDirect3DDevice9 *dev, const char *title, const char *text, const char *const *labels, int n, int sel,
+                 const char *footer, int canSkip)
+{
+    static char wrapped[2048];
+    const float w = UI_WIDTH - 2 * UI_SAFE_X - 200, x = (UI_WIDTH - w) * 0.5f, rowH = 50, rowGap = 10;
+    int lines = text[0] ? UiTextWrap(UI_REGULAR, 21, w - 104, 8, text, wrapped, sizeof(wrapped)) : 0;
+    float h = 104 + lines * 21 * 1.35f + (lines ? 24 : 0) + n * (rowH + rowGap) + 24, y = (UI_HEIGHT - h) * 0.5f + 20;
+    WORD prev = 0xFFFF;   // buttons held from before (the game's exit) fire nothing until released
+    SHORT prevY = 0;
+    if (!dev) return canSkip ? -1 : sel;
+    for (;;)
+    {
+        XINPUT_STATE in;
+        WORD b = 0, down;
+        SHORT ly = 0;
+        int i;
+        if (XInputGetState(0, &in) == ERROR_SUCCESS) { b = in.Gamepad.wButtons; ly = in.Gamepad.sThumbLY; }
+        down = (WORD)(b & ~prev);
+        prev = prev == 0xFFFF && b ? 0xFFFF : b;   // 0xFFFF until every button is up once
+        if ((down & XINPUT_GAMEPAD_DPAD_UP) || (ly > 16000 && prevY <= 16000)) sel = (sel + n - 1) % n;
+        if ((down & XINPUT_GAMEPAD_DPAD_DOWN) || (ly < -16000 && prevY >= -16000)) sel = (sel + 1) % n;
+        prevY = ly;
+        if (down & XINPUT_GAMEPAD_A) break;
+        if ((down & XINPUT_GAMEPAD_B) && canSkip) { sel = -1; break; }
+        dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
+        UiBegin(dev);
+        UiBackdrop();
+        UiBrand(UI_SAFE_X, 72, 34);
+        UiPanel(x, y, w, h, 22);
+        UiRoundRect(x + 28, y + 34, 5, 40, 2.5f, UI_COL_ACCENT, UI_COL_ACCENT);
+        UiText(UI_BOLD, 30, x + 52, y + 54, UI_COL_TEXT, title, UI_LEFT);
+        if (lines) UiText(UI_REGULAR, 21, x + 52, y + 104 + 10, UI_COL_TEXT2, wrapped, UI_LEFT);
+        for (i = 0; i < n; i++)
+        {
+            float rx = x + 52, rw = w - 104, ry = y + 104 + lines * 21 * 1.35f + (lines ? 24 : 0) + i * (rowH + rowGap);
+            if (i == sel)
+            {
+                UiRoundRect(rx, ry, rw, rowH, 14, UI_COL_SELECT, UI_COL_SELECT);
+                UiRoundRing(rx, ry, rw, rowH, 14, 2.0f, UI_COL_ACCENT);
+            }
+            else UiRoundRing(rx, ry, rw, rowH, 14, 1.0f, UI_COL_LINE);
+            UiText(UI_BOLD, 22, rx + 24, ry + rowH * 0.5f, i == sel ? UI_COL_TEXT : UI_COL_TEXT2, labels[i], UI_LEFT);
+        }
+        UiScreenFooter(footer);
+        UiEnd();
+        dev->Present(NULL, NULL, NULL, NULL);
+        Sleep(16);
+    }
+    for (;;)
+    {
+        // Released before going on: the next screen must not see this press.
+        XINPUT_STATE in;
+        if (XInputGetState(0, &in) != ERROR_SUCCESS || !(in.Gamepad.wButtons & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B))) break;
+        Sleep(16);
+    }
+    return sel;
+}
+
+// A game from the ROM list (the one selected there first), for Settings > HD textures > Optimize
+// my pack and Settings > System > Report a game: `title` and `step` head the screen, `line` (may
+// be "") under them. The highlighted game's header name is shown on its row. Returns 1 with the
+// chosen game's header name, its "NSME / 635A2BFF" (game code, CRC 1) and the list's name of it.
+struct PickedGame { char name[32], code[24]; std::string shown; };
+
+static int pick_game(IDirect3DDevice9 *dev, const char *title, const char *step, const char *line, const char *footer, PickedGame *out)
 {
     static UiAnim selAnim;
     UiInput in;
     std::vector<RomEntry> roms;
     const int rows = 10;
     int sel = 0, top = 0, k, n, infoFor = -1;
-    char internal[32] = "", step[96];
+    char internal[32] = "", code[24] = "";
     scan_roms(&roms);
     std::sort(roms.begin(), roms.end(), rom_less);
     n = (int)roms.size();
@@ -8973,10 +9140,17 @@ static int import_pick_game(IDirect3DDevice9 *dev, const char *packName, char *r
         }
         if (n && infoFor != sel)
         {
-            // The highlighted game's header name (one header read as the selection moves).
+            // The highlighted game's header (one header read as the selection moves).
             H64Rom rom;
-            internal[0] = 0;
-            if (read_header(roms[sel].file.c_str(), &rom)) { strncpy(internal, rom.name, sizeof(internal) - 1); internal[sizeof(internal) - 1] = 0; h64_rom_free(&rom); }
+            internal[0] = code[0] = 0;
+            if (read_header(roms[sel].file.c_str(), &rom))
+            {
+                strncpy(internal, rom.name, sizeof(internal) - 1);
+                internal[sizeof(internal) - 1] = 0;
+                _snprintf(code, sizeof(code) - 1, "%s / %08X", rom.gameCode, rom.crc1);
+                code[sizeof(code) - 1] = 0;
+                h64_rom_free(&rom);
+            }
             infoFor = sel;
         }
         if (n && (down & XINPUT_GAMEPAD_A))
@@ -8984,8 +9158,9 @@ static int import_pick_game(IDirect3DDevice9 *dev, const char *packName, char *r
             if (!internal[0]) xb_audio_ui_sound(XB_SFX_ERROR);   // not an N64 ROM it can read
             else
             {
-                strncpy(romName, internal, romSize - 1);
-                romName[romSize - 1] = 0;
+                strcpy(out->name, internal);
+                strcpy(out->code, code);
+                out->shown = roms[sel].shown;
                 xb_audio_ui_sound(XB_SFX_SELECT);
                 return 1;
             }
@@ -8994,13 +9169,10 @@ static int import_pick_game(IDirect3DDevice9 *dev, const char *packName, char *r
         if (sel >= top + rows) top = sel - rows + 1;
         dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
         UiBegin(dev);
-        _snprintf(step, sizeof(step) - 1, "%s", Tr(T_IMPORT_STEP2));
-        step[sizeof(step) - 1] = 0;
-        hub_frame(Tr(T_IMPORT_TITLE), step, x, y, w, h);
+        hub_frame(title, step, x, y, w, h);
+        if (line[0])
         {
-            char line[200], fit[200];
-            _snprintf(line, sizeof(line) - 1, Tr(T_IMPORT_PACK), packName);
-            line[sizeof(line) - 1] = 0;
+            char fit[200];
             UiTextFit(UI_REGULAR, 17, w - 48, line, fit, sizeof(fit));
             UiText(UI_REGULAR, 17, x + 24, y + 26, UI_COL_TEXT2, fit, UI_LEFT);
             UiRect(x + 24, y + 46, w - 48, 1, UI_COL_LINE);
@@ -9021,11 +9193,65 @@ static int import_pick_game(IDirect3DDevice9 *dev, const char *packName, char *r
                     UiText(UI_REGULAR, 15, x + w - 28, ly + pad + k * rowH + rowH * 0.5f, UI_COL_ACCENT_HI, internal, UI_RIGHT);
             }
         }
-        UiScreenFooter(Tr(T_FOOT_IMPORT_GAME));
+        UiScreenFooter(footer);
         UiEnd();
         dev->Present(NULL, NULL, NULL, NULL);
         Sleep(16);
     }
+}
+
+// Step 2 of Optimize my pack: the game the pack is for. Its header's name - what the packs and
+// the game's folder go by - is shown for the one chosen. Returns 1 with that name in romName.
+static int import_pick_game(IDirect3DDevice9 *dev, const char *packName, char *romName, size_t romSize)
+{
+    PickedGame g;
+    char line[200];
+    _snprintf(line, sizeof(line) - 1, Tr(T_IMPORT_PACK), packName);
+    line[sizeof(line) - 1] = 0;
+    if (!pick_game(dev, Tr(T_IMPORT_TITLE), Tr(T_IMPORT_STEP2), line, Tr(T_FOOT_IMPORT_GAME), &g)) return 0;
+    strncpy(romName, g.name, romSize - 1);
+    romName[romSize - 1] = 0;
+    return 1;
+}
+
+// "How did the game run?", and with "Bad" what went wrong (B skips either): after a game
+// (main.cpp, once per game) and in Report a game. Returns 0 when skipped at the first question;
+// *vote and *reason are the form's words ("" when not answered).
+int VoteScreen(IDirect3DDevice9 *dev, const char *game, const char **vote, const char **reason)
+{
+    static const char *const votes[2] = { "bien", "mal" }, *const reasons[5] = { "graficos", "lento", "sonido", "controles", "otro" };
+    const char *labels[5];
+    int v;
+    *vote = *reason = "";
+    labels[0] = Tr(T_VOTE_GOOD);
+    labels[1] = Tr(T_VOTE_BAD);
+    v = ChoiceScreen(dev, Tr(T_VOTE_TITLE), game, labels, 2, 0, Tr(T_FOOT_VOTE), 1);
+    if (v < 0) return 0;
+    *vote = votes[v];
+    if (v == 1)
+    {
+        labels[0] = Tr(T_GRAPHICS);
+        labels[1] = Tr(T_WHY_SLOW);
+        labels[2] = Tr(T_SOUND);
+        labels[3] = Tr(T_CONTROLS);
+        labels[4] = Tr(T_WHY_OTHER);
+        v = ChoiceScreen(dev, Tr(T_VOTE_WHY), "", labels, 5, 0, Tr(T_FOOT_VOTE), 1);
+        if (v >= 0) *reason = reasons[v];
+    }
+    return 1;
+}
+
+// Settings > Report a game (ROM list only): a game from the list, how it runs (and
+// what went wrong), sent to the statistics form at once (xb_stats.cpp), then a thank-you.
+static void report_screen(IDirect3DDevice9 *dev, const char *drive)
+{
+    PickedGame g;
+    const char *vote, *reason, *ok[1];
+    if (!pick_game(dev, Tr(T_REPORT_GAME), Tr(T_REPORT_PICK), "", Tr(T_FOOT_REPORT_GAME), &g)) return;
+    if (!VoteScreen(dev, g.shown.c_str(), &vote, &reason)) return;
+    StatsSendReport(drive, g.name, g.code, vote, reason);
+    ok[0] = Tr(T_REPORT_OK);
+    ChoiceScreen(dev, Tr(T_REPORT_SENT), g.shown.c_str(), ok, 1, 0, Tr(T_FOOT_ASK), 0);
 }
 
 // Settings > HD textures > Optimize my pack: step 1, the pack (what the user copied into the
@@ -9811,6 +10037,20 @@ static void settings_loop(IDirect3DDevice9 *dev, Config *c, const char *settings
             if (confirm_ask(dev, T_EXP_WARN_TITLE, T_EXP_WARN, T_FOOT_EXP_WARN)) FileExplorer(dev);
             settings_system(&m, c);
             m.sel = SYS_EXPLORER;
+            UiInputInit(&in);
+            continue;
+        }
+        if (r == SET_REPORT)
+        {
+            // Settings > Report a game: its own screens; the files of the statistics go where the settings are.
+            char drive[16];
+            size_t k = strcspn(settingsPath, ":");
+            if (!settingsPath[k] || k >= sizeof(drive)) k = 0;
+            memcpy(drive, settingsPath, k);
+            drive[k] = 0;
+            report_screen(dev, k ? drive : "game");
+            settings_main(&m, c);
+            m.sel = s_rowReport;
             UiInputInit(&in);
             continue;
         }

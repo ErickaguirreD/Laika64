@@ -18,8 +18,9 @@ struct UiMenu
     char footer[192];
     int page;                      // UI_PAGE_*: how UiMenuDraw shows it
     unsigned char icon[UI_MENU_MAX];   // UI_ICON_*: a small white symbol left of the label (0: none)
+    float rowMax;                  // the side bar's row height at most (0: 48)
 };
-enum { UI_PAGE_LIST = 0, UI_PAGE_CONTROLS, UI_PAGE_VOLUME, UI_PAGE_CALIB, UI_PAGE_FX, UI_PAGE_WALL, UI_PAGE_BORDER, UI_PAGE_PERF, UI_PAGE_HOTKEYS, UI_PAGE_EDGES };
+enum { UI_PAGE_LIST = 0, UI_PAGE_CONTROLS, UI_PAGE_VOLUME, UI_PAGE_CALIB, UI_PAGE_FX, UI_PAGE_WALL, UI_PAGE_BORDER, UI_PAGE_PERF, UI_PAGE_HOTKEYS, UI_PAGE_EDGES, UI_PAGE_RUMBLE };
 enum { UI_ICON_NONE = 0, UI_ICON_SYSTEM, UI_ICON_GRAPHICS, UI_ICON_SCREEN, UI_ICON_SOUND, UI_ICON_CONTROLS,
        UI_ICON_INTERFACE, UI_ICON_SAVE, UI_ICON_PLAY, UI_ICON_STATES, UI_ICON_GEAR, UI_ICON_RESET, UI_ICON_LIST,
        UI_ICON_POWER, UI_ICON_SLOT, UI_ICON_LOAD, UI_ICON_BATTERY, UI_ICON_SLIDERS, UI_ICON_TEXTURE, UI_ICON_HD,
@@ -52,7 +53,14 @@ void UiConfirmDraw(int title, int question, int footer);
 
 // ---- Settings (cpu, hle, audio margin, FPS display, the Graphics and Controls pages) ----
 enum { SET_NONE = 0, SET_CHANGED, SET_BACK, SET_SAVE_ALL, SET_SAVE_GAME, SET_ART_ASK, SET_LANGUAGE, SET_PREVIEW, SET_SAVER, SET_WIZARD, SET_PICK_PATH, SET_EXPLORER, SET_ABOUT,
-       SET_PATH_RESET, SET_HIRES_DL, SET_HIRES_PNG, SET_HIRES_HUB };
+       SET_PATH_RESET, SET_HIRES_DL, SET_HIRES_PNG, SET_HIRES_HUB, SET_REPORT };
+// A question with a few answers in a list: D-pad (or the left stick) up/down, A picks one; B
+// returns -1 when `canSkip` (else B does nothing). `text` may be "" (no paragraph).
+int ChoiceScreen(IDirect3DDevice9 *dev, const char *title, const char *text, const char *const *labels, int n, int sel,
+                 const char *footer, int canSkip);
+// "How did the game run?" and, with "Bad", what went wrong (B skips): *vote and *reason get the
+// statistics form's words ("" when not answered). Returns 0 when the first question was skipped.
+int VoteScreen(IDirect3DDevice9 *dev, const char *game, const char **vote, const char **reason);
 // Fills the menu from *c; `perGame` adds "Save for this game".
 void SettingsBuild(UiMenu *m, const Config *c, int perGame);
 // Applies one input to *c and the menu; returns SET_*. The Language row

@@ -1525,6 +1525,77 @@ static void rm_guard(Gen *g, u32 *slow, u32 *nSlow)
     }
 }
 
+// LWL, LWR, SWL, SWR: the aligned word holding the address, merged as the interpreter does
+// (h64_cpu.cpp). Their addresses are unaligned on purpose: the byte check takes them (a word's
+// bytes share its RDRAM, its TLB page and its code-map chunk). Nightmare Creatures copies with
+// them: ~7000 a frame went through the interpreter helper. r7..r10 are scratch here.
+static int emit_mem_unaligned(Gen *g, u32 op, u32 *slow, u32 *nSlowOut)
+{
+    H64PpcCode *c = &g->c;
+    u32 opc = op >> 26, rs = (op >> 21) & 31, rt = (op >> 16) & 31, nSlow = *nSlowOut, store = opc == 0x2A || opc == 0x2E;
+    s32 simm = (s32)(s16)(op & 0xFFFF);
+    ppc_addi(c, 3, src_gpr(g, rs, 3), simm);
+    ppc_branch_to(c, g->sys->jit->rtCheck[store][0], 1);   // r4 = physical address, cr0.eq = fast path
+    slow[nSlow++] = ppc_bc_fwd(c, 4, 0, PPC_EQ);
+    ppc_rlwinm(c, 8, 4, 0, 0, 29);                      // the aligned word's address
+    if (opc == 0x22 || opc == 0x2A) ppc_rlwinm(c, 9, 4, 3, 27, 28);   // sh = 8 * (addr & 3)
+    else
+    {
+        ppc_xori(c, 9, 4, 3);
+        ppc_rlwinm(c, 9, 9, 3, 27, 28);                 // sh = 8 * (3 - (addr & 3))
+    }
+    ppc_lwzx(c, 7, JR_RDRAM, 8);                        // the word
+    ppc_li(c, 10, -1);
+    load_gpr(g, 5, rt);
+    switch (opc)
+    {
+    case 0x22:   // LWL: (rt & ~(0xFFFFFFFF << sh)) | (w << sh), sign-extended
+    {
+        u32 d;
+        ppc_slw(c, 10, 10, 9);
+        ppc_slw(c, 7, 7, 9);
+        ppc_andc(c, 5, 5, 10);
+        ppc_or(c, 5, 5, 7);
+        d = rt ? dst_gpr(g, rt, 5) : 5;
+        ppc_extsw(c, d, 5);
+        dst_done(g, d, rt);
+        break;
+    }
+    case 0x26:   // LWR: bits 32..63 kept, the low word (rt & ~(0xFFFFFFFF >> sh)) | (w >> sh); sh = 0: w sign-extended
+    {
+        u32 d, whole;
+        ppc_srw(c, 10, 10, 9);
+        ppc_srw(c, 7, 7, 9);
+        ppc_andc(c, 5, 5, 10);                          // ~mask keeps bits 32..63
+        ppc_or(c, 5, 5, 7);
+        ppc_cmpwi(c, 0, 9, 0);
+        whole = ppc_bc_fwd(c, 4, 0, PPC_EQ);            // bne: a partial load
+        ppc_extsw(c, 5, 5);
+        ppc_patch_here(c, whole);
+        d = rt ? dst_gpr(g, rt, 5) : 5;
+        if (d != 5) ppc_or(c, d, 5, 5);
+        dst_done(g, d, rt);
+        break;
+    }
+    case 0x2A:   // SWL: the word's bytes under 0xFFFFFFFF >> sh from rt >> sh
+        ppc_srw(c, 10, 10, 9);
+        ppc_srw(c, 5, 5, 9);
+        ppc_andc(c, 7, 7, 10);
+        ppc_or(c, 7, 7, 5);
+        ppc_stwx(c, 7, JR_RDRAM, 8);
+        break;
+    default:     // SWR: the word's bytes under 0xFFFFFFFF << sh from rt << sh
+        ppc_slw(c, 10, 10, 9);
+        ppc_slw(c, 5, 5, 9);
+        ppc_andc(c, 7, 7, 10);
+        ppc_or(c, 7, 7, 5);
+        ppc_stwx(c, 7, JR_RDRAM, 8);
+        break;
+    }
+    *nSlowOut = nSlow;
+    return 1;
+}
+
 // emit_mem_fast emits the fast path only and appends the branches to the
 // slow path to slow[]; it returns 0 when op is not a native memory access.
 static int emit_mem_fast(Gen *g, u32 op, u32 *slow, u32 *nSlowOut)
@@ -1532,6 +1603,7 @@ static int emit_mem_fast(Gen *g, u32 op, u32 *slow, u32 *nSlowOut)
     H64PpcCode *c = &g->c;
     u32 opc = op >> 26, rs = (op >> 21) & 31, rt = (op >> 16) & 31, size, store = 0, nSlow = *nSlowOut, fpu = 0;
     s32 simm = (s32)(s16)(op & 0xFFFF);
+    if (opc == 0x22 || opc == 0x26 || opc == 0x2A || opc == 0x2E) return emit_mem_unaligned(g, op, slow, nSlowOut);
     switch (opc)
     {
     case 0x31: size = 4; fpu = 1; break;               // LWC1

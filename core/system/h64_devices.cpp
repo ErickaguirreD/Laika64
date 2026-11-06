@@ -13,7 +13,7 @@
 
 // ---- Timing models (CPU cycles at 93.75 MHz) ----
 #define CPU_HZ 93750000u
-#define SI_DMA_CYCLES 4500u         // model: PIF command round trip
+#define SI_DMA_CYCLES 4500u         // model: the 64-byte PIF RAM transfer (JoyBus time added, h64_pif.cpp)
 
 static const u32 VI_CLOCK_NTSC = 48681812u;
 static const u32 VI_CLOCK_PAL = 49656530u;
@@ -238,23 +238,23 @@ static void pi_dma(H64System *sys, int toRdram, u32 value)
 static void si_dma(H64System *sys, int toPif)
 {
     u32 dram = sys->si.dramAddr & 0x00FFFFF8;
-    u32 i;
+    u32 i, joybus;
     if (toPif)
     {
         for (i = 0; i < 64; i++)
             sys->pifRam[i] = dram + i < H64_RDRAM_SIZE ? sys->rdram[dram + i] : 0;
-        h64_pif_run_commands(sys);
+        joybus = h64_pif_run_commands(sys);
     }
     else
     {
-        h64_pif_read_hook(sys);
+        joybus = h64_pif_read_hook(sys);
         h64_jit_notify_write(sys, dram, 64);
         for (i = 0; i < 64; i++)
             if (dram + i < H64_RDRAM_SIZE)
                 sys->rdram[dram + i] = sys->pifRam[i];
     }
     sys->si.status |= 1;   // DMA busy
-    h64_sched_set(&sys->sched, H64_EV_SI, now(sys) + SI_DMA_CYCLES);
+    h64_sched_set(&sys->sched, H64_EV_SI, now(sys) + SI_DMA_CYCLES + joybus);
 }
 
 // ---- Register access ----

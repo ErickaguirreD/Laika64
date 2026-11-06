@@ -158,6 +158,7 @@ struct H64Jit
     u32 tlbLinkCount;
     int freeLink;                   // first free link record (-1: none)
     u32 rtCpi;                      // cpu.cpi the runtime and the blocks were generated for
+    int midSteps;                   // steps left, after an event inside a block, before compiling from inside compiled code
 };
 
 // Takes executable memory (and its icache flush) from the platform.

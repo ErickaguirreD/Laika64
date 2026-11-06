@@ -296,66 +296,6 @@ static void MessageScreen(IDirect3DDevice9 *dev, const char *title, const char *
     }
 }
 
-// A question with a few answers in a list: D-pad (or the left stick) up/down, A picks one; B
-// returns -1 when `canSkip` (else B does nothing). `text` may be "" (no paragraph).
-static int ChoiceScreen(IDirect3DDevice9 *dev, const char *title, const char *text, const char *const *labels, int n, int sel,
-                        const char *footer, int canSkip)
-{
-    static char wrapped[2048];
-    const float w = UI_WIDTH - 2 * UI_SAFE_X - 200, x = (UI_WIDTH - w) * 0.5f, rowH = 50, rowGap = 10;
-    int lines = text[0] ? UiTextWrap(UI_REGULAR, 21, w - 104, 8, text, wrapped, sizeof(wrapped)) : 0;
-    float h = 104 + lines * 21 * 1.35f + (lines ? 24 : 0) + n * (rowH + rowGap) + 24, y = (UI_HEIGHT - h) * 0.5f + 20;
-    WORD prev = 0xFFFF;   // buttons held from before (the game's exit) fire nothing until released
-    SHORT prevY = 0;
-    if (!dev) return canSkip ? -1 : sel;
-    for (;;)
-    {
-        XINPUT_STATE in;
-        WORD b = 0, down;
-        SHORT ly = 0;
-        int i;
-        if (XInputGetState(0, &in) == ERROR_SUCCESS) { b = in.Gamepad.wButtons; ly = in.Gamepad.sThumbLY; }
-        down = (WORD)(b & ~prev);
-        prev = prev == 0xFFFF && b ? 0xFFFF : b;   // 0xFFFF until every button is up once
-        if ((down & XINPUT_GAMEPAD_DPAD_UP) || (ly > 16000 && prevY <= 16000)) sel = (sel + n - 1) % n;
-        if ((down & XINPUT_GAMEPAD_DPAD_DOWN) || (ly < -16000 && prevY >= -16000)) sel = (sel + 1) % n;
-        prevY = ly;
-        if (down & XINPUT_GAMEPAD_A) break;
-        if ((down & XINPUT_GAMEPAD_B) && canSkip) { sel = -1; break; }
-        dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
-        UiBegin(dev);
-        UiBackdrop();
-        UiBrand(UI_SAFE_X, 72, 34);
-        UiPanel(x, y, w, h, 22);
-        UiRoundRect(x + 28, y + 34, 5, 40, 2.5f, UI_COL_ACCENT, UI_COL_ACCENT);
-        UiText(UI_BOLD, 30, x + 52, y + 54, UI_COL_TEXT, title, UI_LEFT);
-        if (lines) UiText(UI_REGULAR, 21, x + 52, y + 104 + 10, UI_COL_TEXT2, wrapped, UI_LEFT);
-        for (i = 0; i < n; i++)
-        {
-            float rx = x + 52, rw = w - 104, ry = y + 104 + lines * 21 * 1.35f + (lines ? 24 : 0) + i * (rowH + rowGap);
-            if (i == sel)
-            {
-                UiRoundRect(rx, ry, rw, rowH, 14, UI_COL_SELECT, UI_COL_SELECT);
-                UiRoundRing(rx, ry, rw, rowH, 14, 2.0f, UI_COL_ACCENT);
-            }
-            else UiRoundRing(rx, ry, rw, rowH, 14, 1.0f, UI_COL_LINE);
-            UiText(UI_BOLD, 22, rx + 24, ry + rowH * 0.5f, i == sel ? UI_COL_TEXT : UI_COL_TEXT2, labels[i], UI_LEFT);
-        }
-        UiScreenFooter(footer);
-        UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
-    }
-    for (;;)
-    {
-        // Released before going on: the next screen must not see this press.
-        XINPUT_STATE in;
-        if (XInputGetState(0, &in) != ERROR_SUCCESS || !(in.Gamepad.wButtons & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B))) break;
-        Sleep(16);
-    }
-    return sel;
-}
-
 // ---- ROM files ----
 static u8 *LoadFile(const char *path, u32 *size)
 {
@@ -887,26 +827,42 @@ static void PadFromXInput(const XINPUT_GAMEPAD *g, int port, H64Pad *pad)
     h64_padmap_apply(m, &in, pad);
 }
 
-// Rumble Pak motors (core: sys->rumbleMotor) on the controllers: what each
-// one was last told, so XInputSetState runs only on a change. `stop` (menu,
-// end of the game) or the setting off: every motor stops.
-static u8 s_rumbleOut[4];
+// Rumble Pak motors (core: sys->rumbleMotor) on the controllers, once a frame.
+// Games set the N64 motor's strength with short pulses (Ocarina of Time: on for
+// 1-2 frames, or on and off within one frame); the 360 pad's heavier motors did
+// not start on them, and the pulses inside a frame were never seen. So each
+// port keeps whether its motor ran in each of the last RUMBLE_FRAMES frames
+// (rumblePulse catches those inside one): the pad vibrates while any did,
+// harder the more did. XInputSetState runs only on a change. `stop` (menu, end
+// of the game) or the setting off: every motor stops.
+#define RUMBLE_FRAMES 6
+static u8 s_rumbleHist[4], s_rumbleOut[4];
 static int s_rumbleOn = 100;   // Settings > Controls > Rumble Pak: its strength in % (0: off)
 
 static void RumbleUpdate(H64System *sys, int stop)
 {
-    int i;
+    int i, k;
     for (i = 0; i < 4; i++)
     {
         int connected = i == 0 ? s_padValid : s_padsMoreValid[i - 1];
-        u8 want = (u8)(!stop && s_rumbleOn && connected && sys && sys->rumbleMotor[i]);
-        if (want != s_rumbleOut[i])
+        u8 ran = 0, level = 0;
+        if (sys)
         {
+            ran = (u8)(sys->rumbleMotor[i] || sys->rumblePulse[i]);
+            sys->rumblePulse[i] = 0;
+        }
+        s_rumbleHist[i] = stop ? 0 : (u8)(((s_rumbleHist[i] << 1) | ran) & ((1u << RUMBLE_FRAMES) - 1));
+        for (k = 0; k < RUMBLE_FRAMES; k++) level = (u8)(level + ((s_rumbleHist[i] >> k) & 1));
+        if (stop || !s_rumbleOn || !connected) level = 0;
+        if (level != s_rumbleOut[i])
+        {
+            // From 4/9 of the strength (one frame of the last six) to all of it: weaker, the motors barely turn.
+            int pct = level ? s_rumbleOn * (RUMBLE_FRAMES + 2 * level) / (3 * RUMBLE_FRAMES) : 0;
             XINPUT_VIBRATION v;
-            v.wLeftMotorSpeed = want ? (WORD)(0xC000 * s_rumbleOn / 100) : 0;   // the N64 pad's one motor: mostly the heavy one
-            v.wRightMotorSpeed = want ? (WORD)(0x6000 * s_rumbleOn / 100) : 0;
+            v.wLeftMotorSpeed = (WORD)(0xC000 * pct / 100);   // the N64 pad's one motor: mostly the heavy one
+            v.wRightMotorSpeed = (WORD)(0x6000 * pct / 100);
             XInputSetState((DWORD)i, &v);
-            s_rumbleOut[i] = want;
+            s_rumbleOut[i] = level;
         }
     }
 }
@@ -1559,25 +1515,38 @@ static char s_profilePath[160];     // <drive>:\config\<game>.ini
 
 static const Config *s_menuCfg;   // the settings the open menu shows (its HD textures row)
 
+// The pause menu's rows, as M_* in order: HD textures only when the game has packs.
+static int s_pauseRows[8], s_pauseCount;
+
+static int PauseRow(int action)
+{
+    int i;
+    for (i = 0; i < s_pauseCount; i++)
+        if (s_pauseRows[i] == action) return i;
+    return 0;
+}
+
 static void BuildGameMenu(void)
 {
-    char cheats[64], tex[160];
+    static const int labels[8] = { T_RESUME, T_STATES, T_CHEATS, T_HIRESTEX, T_SETTINGS, T_RESET_GAME, T_BACK_TO_LIST, T_QUIT_DASHBOARD };
+    static const unsigned char iconOf[8] = { UI_ICON_PLAY, UI_ICON_STATES, UI_ICON_SLIDERS, UI_ICON_HD, UI_ICON_GEAR, UI_ICON_RESET, UI_ICON_LIST, UI_ICON_POWER };
+    unsigned char icons[8];
+    char value[160];
+    int a;
     UiMenuClear(&s_menu, Tr(T_PAUSED), Tr(T_FOOT_PAUSED));
-    UiMenuAdd(&s_menu, Tr(T_RESUME), "");
-    UiMenuAdd(&s_menu, Tr(T_STATES), "");
-    CheatsRowValue(cheats, sizeof(cheats));
-    UiMenuAdd(&s_menu, Tr(T_CHEATS), cheats);
-    if (s_menuCfg) TexturesRowValue(s_menuCfg, tex, sizeof(tex));
-    else tex[0] = 0;
-    UiMenuAdd(&s_menu, Tr(T_HIRESTEX), tex);
-    UiMenuAdd(&s_menu, Tr(T_SETTINGS), "");
-    UiMenuAdd(&s_menu, Tr(T_RESET_GAME), "");
-    UiMenuAdd(&s_menu, Tr(T_BACK_TO_LIST), "");
-    UiMenuAdd(&s_menu, Tr(T_QUIT_DASHBOARD), "");
+    s_menu.rowMax = 40;   // shorter rows: "Now playing" (the game's name and picture) fits under them
+    s_pauseCount = 0;
+    for (a = M_RESUME; a <= M_DASHBOARD; a++)
     {
-        static const unsigned char icons[] = { UI_ICON_PLAY, UI_ICON_STATES, UI_ICON_SLIDERS, UI_ICON_HD, UI_ICON_GEAR, UI_ICON_RESET, UI_ICON_LIST, UI_ICON_POWER };
-        UiMenuIcons(&s_menu, icons, sizeof(icons));
+        if (a == M_TEXTURES && HiresPackCount() == 0) continue;
+        value[0] = 0;
+        if (a == M_CHEATS) CheatsRowValue(value, sizeof(value));
+        if (a == M_TEXTURES && s_menuCfg) TexturesRowValue(s_menuCfg, value, sizeof(value));
+        UiMenuAdd(&s_menu, Tr(labels[a]), value);
+        icons[s_pauseCount] = iconOf[a];
+        s_pauseRows[s_pauseCount++] = a;
     }
+    UiMenuIcons(&s_menu, icons, s_pauseCount);
 }
 
 // The States page's slot value: "< 3 >", the reserved slot tagged "< 9 · auto >".
@@ -1660,7 +1629,7 @@ static int GameMenu(H64System *sys, H64Renderer *renderer, Config *c)
                 else OsdT(T_SETTINGS_WRITE_FAILED, 0);
                 settings = 0;
                 BuildGameMenu();
-                s_menu.sel = M_SETTINGS;
+                s_menu.sel = PauseRow(M_SETTINGS);
             }
             else if ((down & XINPUT_GAMEPAD_A) && s_confirmOpen == CONFIRM_RESET) { s_confirmOpen = 0; ResetGame(sys); result = RG_CONTINUE; }
             else if (down & XINPUT_GAMEPAD_A) result = s_confirmOpen == CONFIRM_DASHBOARD ? RG_DASHBOARD : RG_BROWSER;
@@ -1677,7 +1646,7 @@ static int GameMenu(H64System *sys, H64Renderer *renderer, Config *c)
             {
                 s_texOpen = 0;
                 BuildGameMenu();   // its row: the pack in use now
-                s_menu.sel = M_TEXTURES;
+                s_menu.sel = PauseRow(M_TEXTURES);
             }
             else if (r == 2)
             {
@@ -1706,7 +1675,7 @@ static int GameMenu(H64System *sys, H64Renderer *renderer, Config *c)
             {
                 s_cheatsOpen = 0;
                 BuildGameMenu();   // its row: how many are on now
-                s_menu.sel = M_CHEATS;
+                s_menu.sel = PauseRow(M_CHEATS);
             }
         }
         else if (s_aboutOpen)
@@ -1739,7 +1708,7 @@ static int GameMenu(H64System *sys, H64Renderer *renderer, Config *c)
             {
                 settings = 0;
                 BuildGameMenu();
-                s_menu.sel = M_SETTINGS;
+                s_menu.sel = PauseRow(M_SETTINGS);
             }
         }
         else if (states)
@@ -1750,7 +1719,7 @@ static int GameMenu(H64System *sys, H64Renderer *renderer, Config *c)
             {
                 states = 0;
                 BuildGameMenu();
-                s_menu.sel = M_STATES;
+                s_menu.sel = PauseRow(M_STATES);
             }
             else if (sel == ST_SLOT && (down & (XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT | XINPUT_GAMEPAD_A)))
             {
@@ -1780,7 +1749,7 @@ static int GameMenu(H64System *sys, H64Renderer *renderer, Config *c)
             else if (down & XINPUT_GAMEPAD_X) s_aboutOpen = 1;   // the About panel (X, as in the ROM browser)
             else if (down & XINPUT_GAMEPAD_A)
             {
-                switch (sel)
+                switch (sel >= 0 && sel < s_pauseCount ? s_pauseRows[sel] : -1)
                 {
                 case M_RESUME: result = RG_CONTINUE; break;
                 case M_STATES: states = 1; BuildStatesMenu(); break;
@@ -1964,6 +1933,7 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
         u32 rw, rh;
         int wide;
         StatsSessionStart(&stats);
+        StatsConsoleId(s_logDrive, stats.console, sizeof(stats.console));
         strncpy(stats.game, sys->rom.name, sizeof(stats.game) - 1);
         _snprintf(stats.code, sizeof(stats.code) - 1, "%s / %08X", sys->rom.gameCode, sys->rom.crc1);
         ConfigResCurrent(c, &rw, &rh, &wide);
@@ -2658,27 +2628,11 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
         StatsPendingClear(s_logDrive);
         if (StatsSessionWorth(&stats))
         {
-            static const char *const votes[2] = { "bien", "mal" }, *const reasons[5] = { "graficos", "lento", "sonido", "controles", "otro" };
             const char *vote = "", *reason = "";
             if (!s_crashed && result == RG_BROWSER && StatsSessionMinutes(&stats) >= 3 && !StatsVoted(s_logDrive, stats.code))
             {
-                const char *labels[5];
-                int v;
                 StatsMarkVoted(s_logDrive, stats.code);
-                labels[0] = Tr(T_VOTE_GOOD);
-                labels[1] = Tr(T_VOTE_BAD);
-                v = ChoiceScreen(dev, Tr(T_VOTE_TITLE), s_npTitle[0] ? s_npTitle : stats.game, labels, 2, 0, Tr(T_FOOT_VOTE), 1);
-                if (v >= 0) vote = votes[v];
-                if (v == 1)
-                {
-                    labels[0] = Tr(T_GRAPHICS);
-                    labels[1] = Tr(T_WHY_SLOW);
-                    labels[2] = Tr(T_SOUND);
-                    labels[3] = Tr(T_CONTROLS);
-                    labels[4] = Tr(T_WHY_OTHER);
-                    v = ChoiceScreen(dev, Tr(T_VOTE_WHY), "", labels, 5, 0, Tr(T_FOOT_VOTE), 1);
-                    if (v >= 0) reason = reasons[v];
-                }
+                VoteScreen(dev, s_npTitle[0] ? s_npTitle : stats.game, &vote, &reason);
             }
             StatsSend(&stats, s_crashed ? "error" : "normal", vote, reason);
         }

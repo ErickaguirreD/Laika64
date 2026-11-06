@@ -212,6 +212,7 @@ struct H64System
     u32 rumblePaks;      // bit n: a Rumble Pak in the controller of port n + 1 (set by the platform;
                          // never port 1 when the game uses a Controller Pak there)
     u8 rumbleMotor[4];   // the motor of each port's Rumble Pak: 1 on (the platform makes the pad vibrate)
+    u8 rumblePulse[4];   // set when the motor is turned on; the platform clears it (pulses shorter than a frame)
     void (*padHook)(H64System *sys);   // optional: called just before the PIF reads the controllers
 
     // ISViewer debug output (cartridge 0x13FF0000).
@@ -320,8 +321,8 @@ void h64_device_event(H64System *sys, int ev);
 
 // PIF (h64_pif.cpp).
 void h64_pif_reset(H64System *sys);
-void h64_pif_run_commands(H64System *sys);
-void h64_pif_read_hook(H64System *sys);   // SI read (PIF -> RDRAM): controllers polled again
+u32 h64_pif_run_commands(H64System *sys);   // both return the JoyBus time (CPU cycles)
+u32 h64_pif_read_hook(H64System *sys);   // SI read (PIF -> RDRAM): controllers polled again
 void h64_pif_write_byte_hook(H64System *sys, u32 offset);
 void h64_hle_boot(H64System *sys);
 

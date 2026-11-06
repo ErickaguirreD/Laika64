@@ -96,7 +96,11 @@ static int rumble_command(H64System *sys, int channel, const u8 *tx, int txLen, 
     }
     if (tx[0] == 0x03 && txLen >= 35 && rxLen >= 1)
     {
-        if (addr == 0xC000) sys->rumbleMotor[channel] = tx[3] ? 1 : 0;
+        if (addr == 0xC000)
+        {
+            sys->rumbleMotor[channel] = tx[3] ? 1 : 0;
+            if (tx[3]) sys->rumblePulse[channel] = 1;
+        }
         rx[0] = h64_save_pak_crc(tx + 3, 32);
         return 1;
     }
@@ -152,15 +156,24 @@ static void joybus_command(H64System *sys, int channel, const u8 *tx, int txLen,
     *rxLenByte |= 0x80;   // no response
 }
 
+// JoyBus time (model, CPU cycles): the bus sends 4 us a bit, 32 us a byte; an empty
+// port answers nothing after a short wait. Nightmare Creatures loops on its
+// controller and pak commands: with every SI DMA 48 us long it made ~230 SI DMAs a
+// frame (others 1-3), its interrupt handling ~3000 COP0 instructions a frame.
+#define JOYBUS_BYTE_CYCLES 3000u
+#define JOYBUS_ABSENT_CYCLES 1000u
+
 // Runs the JoyBus command block in PIF RAM. On an SI write (RDRAM -> PIF)
 // it runs when the control byte asks for it; on an SI read (PIF -> RDRAM)
 // the controller commands run again, because libultra writes the block once
 // and then only reads (osContStartReadData), as mupen64plus does it
-// (update_pif_read).
-static void run_block(H64System *sys, int controllersOnly)
+// (update_pif_read). Returns the JoyBus time of the channels from fromChannel
+// on (the controllers' is counted on the read, which runs them again).
+static u32 run_block(H64System *sys, int controllersOnly, int fromChannel)
 {
     u8 *ram = sys->pifRam;
     int i = 0, channel = 0;
+    u32 cycles = 0;
 
     while (i < 0x3F)
     {
@@ -179,26 +192,33 @@ static void run_block(H64System *sys, int controllersOnly)
             rxData = txData + txLen;
             if (rxData + rxLen > 0x3F) break;
             if (!controllersOnly || channel < 4)
+            {
                 joybus_command(sys, channel, ram + txData, txLen, ram + rxData, rxLen, ram + rxPos);
+                if (channel >= fromChannel)
+                    cycles += ram[rxPos] & 0x80 ? JOYBUS_ABSENT_CYCLES : (u32)(txLen + rxLen) * JOYBUS_BYTE_CYCLES;
+            }
             i = rxData + rxLen;
             channel++;
         }
     }
+    return cycles;
 }
 
-void h64_pif_run_commands(H64System *sys)
+u32 h64_pif_run_commands(H64System *sys)
 {
     u8 control = sys->pifRam[0x3F];
-    if (control & 0x02) { pif_challenge(sys); return; }
-    if (!(control & 0x01)) return;
-    run_block(sys, 0);
+    u32 cycles;
+    if (control & 0x02) { pif_challenge(sys); return 0; }
+    if (!(control & 0x01)) return 0;
+    cycles = run_block(sys, 0, 4);
     sys->pifRam[0x3F] &= ~0x01u;
+    return cycles;
 }
 
-void h64_pif_read_hook(H64System *sys)
+u32 h64_pif_read_hook(H64System *sys)
 {
-    if (sys->pifRam[0x3F] & 0x02) return;   // challenge pending/in progress
-    run_block(sys, 1);
+    if (sys->pifRam[0x3F] & 0x02) return 0;   // challenge pending/in progress
+    return run_block(sys, 1, 0);
 }
 
 // CPU writes to PIF RAM: the control byte (0x3F) acts immediately.
