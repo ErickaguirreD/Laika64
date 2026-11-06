@@ -187,6 +187,8 @@ struct Xenos
     u8 *arena;                              // ARENA_BYTES of physical memory (NULL: CreateTexture only)
     u32 arenaHead;                          // next free byte
     std::vector<u64> arenaKeys[ARENA_CHUNKS];          // cache keys of the textures in each chunk
+    u32 arenaUse[ARENA_CHUNKS];             // the present in which a texture of each chunk was last used
+    DWORD presentFence[8];                  // a fence after each of the last 8 presents (presentCount & 7)
     std::vector<IDirect3DTexture9 *> arenaHeaders[ARENA_CHUNKS];
     u32 poolBytes;
     u32 retires;        // times the texture cache was emptied (it unbinds both texture units)
@@ -763,12 +765,18 @@ static int arena_alloc(Xenos *x, u32 size, u32 *offset)
         c = next / ARENA_CHUNK;
         if (!x->arenaKeys[c].empty())
         {
-            // The GPU may still read this chunk's textures: unbind, wait for
-            // everything issued so far, then drop them.
-            u32 k;
+            // The GPU may still read this chunk's textures. Used in this present:
+            // unbind, wait for everything issued so far. Last used in an earlier
+            // one: wait only for that present's fence, long passed (Yoshi's Story
+            // reuses 2-3 chunks a frame for its scrolling strips: each full wait
+            // cost ~2 ms).
+            u32 k, last = x->arenaUse[c];
             x->dev->SetTexture(0, x->dummy);
             x->dev->SetTexture(1, x->dummy);
-            x->dev->BlockOnFence(x->dev->InsertFence());
+            if (last >= x->presentCount || x->presentCount < 8)
+                x->dev->BlockOnFence(x->dev->InsertFence());
+            else
+                x->dev->BlockOnFence(x->presentFence[(x->presentCount - last <= 7 ? last : x->presentCount - 7) & 7]);
             for (k = 0; k < x->arenaKeys[c].size(); k++)
             {
                 std::map<u64, TexEntry>::iterator it = x->textures.find(x->arenaKeys[c][k]);
@@ -1180,6 +1188,7 @@ static IDirect3DTexture9 *lookup_texture(Xenos *x, u32 tileIndex, TexBinding *b)
         !(it->second.htsDeferred && x->hts && x->hiTex && hts_retry_ok(x, it->second.htsKey)))   // a put-off replacement that can come now
     {
         b->hires = it->second.hires;
+        if (it->second.chunk >= 0) x->arenaUse[it->second.chunk] = x->presentCount;
         return it->second.tex;
     }
     if (it != x->textures.end()) x->textures.erase(it);
@@ -1246,8 +1255,10 @@ static IDirect3DTexture9 *lookup_texture(Xenos *x, u32 tileIndex, TexBinding *b)
     int dxt = 0;
     const u8 *dxtBlocks = NULL;
     u32 dxtSize = 0;
-    if (hires && !hrDeferred && hrKey && x->debug != 28 && !b->ox && !b->oy && uw == hrW && uh == hrH && b->w == hrRealW && b->h == hrRealH &&
-        !(uw & 3) && !(uh & 3))
+    // Any size: the record's blocks cover the edge blocks of a size that is not a multiple
+    // of 4, and Xenos samples only the texture's own texels (Smash Remix Ultimate's 480p
+    // pack: 10264 of its 13434 DXT textures, 86x39 and the like, were unpacked by the CPU).
+    if (hires && !hrDeferred && hrKey && x->debug != 28 && !b->ox && !b->oy && uw == hrW && uh == hrH && b->w == hrRealW && b->h == hrRealH)
     {
         dxt = h64_hts_take_dxt(x->hts, hrKey, &dxtBlocks, &dxtSize);
         if (dxt && dxtSize < tex_bytes(uw, uh, dxt)) dxt = 0;
@@ -1271,7 +1282,7 @@ static IDirect3DTexture9 *lookup_texture(Xenos *x, u32 tileIndex, TexBinding *b)
     {
         // The blocks as they are, each 16-bit word big-endian (the DXT formats read memory 8in16).
         std::map<u32, std::vector<IDirect3DTexture9 *> >::iterator pit = x->pool.find(tex_pool_key(uw, uh, dxt));
-        u32 rowBytes = (uw / 4) * (dxt == 1 ? 8 : 16), rows = uh / 4, xx;
+        u32 rowBytes = ((uw + 3) / 4) * (dxt == 1 ? 8 : 16), rows = (uh + 3) / 4, xx;
         if (pit != x->pool.end() && !pit->second.empty())
         {
             e.tex = pit->second.back();
@@ -1314,14 +1325,17 @@ static IDirect3DTexture9 *lookup_texture(Xenos *x, u32 tileIndex, TexBinding *b)
     }
     {
         // Decode into a cached buffer first: texture memory is write-combined.
-        u32 count = uw * uh, xx;
+        u32 count = uw * uh, xx, ciPal[256];
         u64 f0 = h64_prof_now(x->sys);
+        // CI4/CI8 through a palette: its entries converted once, then a table per texel.
+        int ci = !hires && tlut && h64_rdp_ci_palette(st, t, tlutType, ciPal);
         if (x->decodeBuf.size() < count) x->decodeBuf.resize(count);
         if (hires) hts_fill(&x->decodeBuf[0], uw, uh, hires, hrW, hrH, b, hrRealW, hrRealH,
                              (t->flags & TILE_MIRROR_S) != 0, (t->flags & TILE_MIRROR_T) != 0);
         else for (y = 0; y < uh; y++)
         {
             s32 ty = mask_coord(t->maskT, (t->flags & TILE_MIRROR_T) != 0, (s32)y + b->oy);
+            if (ci) { h64_rdp_fetch_row_ci(st, t, (u32)b->ox, (u32)ty, uw, ciPal, &x->decodeBuf[y * uw]); continue; }
             if (h64_rdp_fetch_row_argb(st, t, (u32)b->ox, (u32)ty, uw, tlut, &x->decodeBuf[y * uw])) continue;
             if (t->fmt == 1 && t->size == 2 && !tlut)
             {
@@ -1375,6 +1389,7 @@ static IDirect3DTexture9 *lookup_texture(Xenos *x, u32 tileIndex, TexBinding *b)
             __sync();   // out of the write-combining buffers before the GPU reads it
             e.tex = t9;
             e.chunk = (int)(offset / ARENA_CHUNK);
+            x->arenaUse[e.chunk] = x->presentCount;
             x->arenaKeys[e.chunk].push_back(key);
             x->arenaHeaders[e.chunk].push_back(t9);
             x->stats.arenaTextures++;
@@ -3962,6 +3977,7 @@ void h64_xenos_present_vi(H64Renderer *r, const u32 *vi)
         x->vsyncSet = x->vsync;
     }
     x->dev->Present(NULL, NULL, NULL, NULL);
+    x->presentFence[x->presentCount & 7] = x->dev->InsertFence();
     x->stats.presents++;
     x->presentCount++;
     // The next draw rebinds the N64 target and restores its content.
@@ -4000,6 +4016,8 @@ H64Renderer *h64_xenos_create(H64System *sys, IDirect3DDevice9 *dev)
     };
     Xenos *x = new Xenos;
     int i;
+    memset(x->arenaUse, 0, sizeof(x->arenaUse));
+    memset(x->presentFence, 0, sizeof(x->presentFence));
     x->api.user = x;
     x->api.rdp = xenos_rdp;
     x->api.triangle = xenos_triangle;

@@ -388,6 +388,42 @@ int h64_rdp_fetch_row_argb(const H64RdpState *st, const H64RdpTile *tile, u32 s0
     return 1;
 }
 
+// The palette a CI4/CI8 tile reads, as ARGB (what fetch() makes of each entry):
+// 16 entries (CI4, the tile's palette) or 256. 0: not a format this does.
+int h64_rdp_ci_palette(const H64RdpState *st, const H64RdpTile *tile, int tlutType, u32 *pal)
+{
+    u32 i, n, first;
+    if (tile->size > 1 || tile->maskS) return 0;
+    n = tile->size == 0 ? 16 : 256;
+    first = tile->size == 0 ? (u32)tile->palette << 4 : 0;
+    for (i = 0; i < n; i++)
+    {
+        H64RdpTexel o;
+        u32 w = tm16(st, 0x400 | ((first + i) << 2));
+        if (tlutType) convert_ia16(w, &o);
+        else convert_rgba16(w, &o);
+        pal[i] = (u32)(o.c[3] & 0xFF) << 24 | (u32)(o.c[0] & 0xFF) << 16 | (u32)(o.c[1] & 0xFF) << 8 | (u32)(o.c[2] & 0xFF);
+    }
+    return 1;
+}
+
+// A row of a CI4/CI8 tile through that palette (Yoshi's Story loads ~270 new
+// paletted strips a frame as its backgrounds scroll: ~13 ms a frame decoded
+// one texel at a time through fetch()).
+void h64_rdp_fetch_row_ci(const H64RdpState *st, const H64RdpTile *tile, u32 s0, u32 t, u32 n, const u32 *pal, u32 *out)
+{
+    u32 i, base = tile->offset + tile->stride * t, sw = ((t & 1) << 2) ^ 3;
+    if (tile->size == 0)
+        for (i = 0; i < n; i++)
+        {
+            u32 s = s0 + i, w = st->tmem[(((base + (s >> 1)) & 0x7FF) ^ sw ^ 3) & 0xFFF];
+            out[i] = pal[(w >> ((~s & 1) * 4)) & 0xF];
+        }
+    else
+        for (i = 0; i < n; i++)
+            out[i] = pal[st->tmem[(((base + s0 + i) & 0x7FF) ^ sw ^ 3) & 0xFFF]];
+}
+
 static void fetch_yuv(const H64RdpState *st, const H64RdpTile *tile, u32 s, u32 t, u32 chromaX, H64RdpTexel *o)
 {
     u32 bo = tile->offset + tile->stride * t;

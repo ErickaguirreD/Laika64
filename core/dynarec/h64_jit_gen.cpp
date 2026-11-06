@@ -2660,6 +2660,42 @@ static int plain_branch_to(u32 op, u32 pc, u32 target)
     return 0;
 }
 
+// An idle thread's for (;;) osYieldThread() found by its shape, for games without
+// a profile entry (Doom 64, Quake 64 had theirs written by hand): at pc
+// "jal f; nop; b pc; nop", where f is libultra's osYieldThread - it sets the
+// thread's state to 2 (OS_STATE_RUNNABLE) and calls __osEnqueueAndYield with
+// &__osRunQueue in a0 (lui a0 / addiu a0, then jal). Sets options.idleYieldPc
+// and idleRunQueue the first time; 1 when pc is that loop.
+static int auto_yield_loop(H64System *sys, u32 pc, u32 paddr)
+{
+    const u8 *ram = sys->rdram;
+    u32 w0, f, i, hi = 0, haveHi = 0, two = 0, rq = 0;
+    if (paddr + 16 > H64_RDRAM_SIZE) return 0;
+    w0 = h64_load_be32(ram + paddr);
+    if ((w0 >> 26) != 3 || h64_load_be32(ram + paddr + 4) != 0 || h64_load_be32(ram + paddr + 8) != 0x1000FFFDu ||
+        h64_load_be32(ram + paddr + 12) != 0)
+        return 0;
+    f = (((pc & 0xF0000000u) | ((w0 & 0x3FFFFFFu) << 2)) & 0x1FFFFFFFu);
+    if (f + 24 * 4 > H64_RDRAM_SIZE) return 0;
+    for (i = 0; i < 24 && !rq; i++)
+    {
+        u32 op = h64_load_be32(ram + f + i * 4);
+        if ((op & 0xFFE0FFFFu) == 0x24000002u) two = 1;                          // addiu rt, zero, 2
+        else if ((op & 0xFFFF0000u) == 0x3C040000u) { hi = op & 0xFFFF; haveHi = 1; }   // lui a0, hi
+        else if (haveHi && (op & 0xFFFF0000u) == 0x24840000u)                    // addiu a0, a0, lo
+        {
+            u32 k, a = ((hi << 16) + (u32)(s32)(s16)(op & 0xFFFF)) & 0x1FFFFFFFu;
+            for (k = i + 1; k <= i + 2 && k < 24; k++)
+                if ((h64_load_be32(ram + f + k * 4) >> 26) == 3) { rq = a; break; }
+        }
+    }
+    if (!two || !rq || rq + 4 > H64_RDRAM_SIZE) return 0;
+    sys->options.idleYieldPc = pc;
+    sys->options.idleRunQueue = rq;
+    H64_INFO("[jit] idle thread's osYieldThread loop found at %08X (run queue %06X): its spare time skipped", pc, rq);
+    return 1;
+}
+
 static void classify_idle(H64JitBlock *b, const u32 *ops, u32 n)
 {
     u32 pc = b->vpc;
@@ -3001,6 +3037,7 @@ H64JitBlock *h64_jit_compile(H64System *sys, u32 pc, u32 paddr)
     b->valid = 1;
     b->hotWords = g.c.pos;
     if (g.native) classify_idle(b, ops, n);
+    if (g.native && !sys->options.idleYieldPc) auto_yield_loop(sys, pc, paddr);
     if (g.native && sys->options.idleYieldPc && pc == sys->options.idleYieldPc) b->idle = 3;
     if (g.native && sys->options.countWaitPc && pc == sys->options.countWaitPc) b->idle = 4;
     b->fn = 0;

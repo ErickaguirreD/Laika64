@@ -147,6 +147,8 @@ void h64_rdp_fetch_texel(const H64RdpState *st, const H64RdpTile *tile, u32 s, u
 // them), when the format has a fast path (RGBA16 without TLUT, no S mask):
 // returns 0 otherwise.
 int h64_rdp_fetch_row_argb(const H64RdpState *st, const H64RdpTile *tile, u32 s0, u32 t, u32 n, int tlut, u32 *out);
+int h64_rdp_ci_palette(const H64RdpState *st, const H64RdpTile *tile, int tlutType, u32 *pal);
+void h64_rdp_fetch_row_ci(const H64RdpState *st, const H64RdpTile *tile, u32 s0, u32 t, u32 n, const u32 *pal, u32 *out);
 // The state of the software RDP (allocated on first use).
 H64RdpState *h64_rdp_state(H64System *sys);
 s32 h64_rdp_sample_copy(H64RdpState *st, const H64RdpTile *tile, s32 s, s32 t, int sOffset, int tlut, int fbSize);

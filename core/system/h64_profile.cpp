@@ -267,6 +267,10 @@ static const GameExtra s_extras[] = {
     // were noise; copied back each time it left them, 30 VI/s in battles.
     // The software RDP draws them in RDRAM, as the console.
     { "NPO", H64_GX_SOFT_SMALL },
+    // Pokemon Snap draws 8 images 8 pixels wide each frame (21F1C0-21F4C0): with
+    // its 2 frames, more than the GPU's 8 slots - the frame to show was dropped
+    // and came out black (flicker). In RDRAM by the software RDP, as the console.
+    { "NPF", H64_GX_SOFT_SMALL },
     // Conker's Bad Fur Day draws an 8-bit 64x240 image each frame (its
     // character's shadow, ~1300 triangles) and loads it as a texture. Copied
     // back, each load waited for the GPU to drain (~4 ms) and the CPU for the
@@ -319,7 +323,8 @@ void h64_apply_game_profile(H64System *sys)
     if (name) H64_INFO("[profile] %s: flags %X%s", name, f, extra ? " (+ extra options)" : "");
 }
 
-// Idle threads that call osYieldThread in a loop instead of spinning: when
+// Idle threads that call osYieldThread in a loop instead of spinning (found
+// by their shape when not listed: auto_yield_loop, h64_jit_gen.cpp): when
 // no other thread is ready, the recompiler lets the time pass up to the next
 // event there (h64_jit.cpp). The loop's head and where __osRunQueue lives.
 struct IdleYield { const char *code; u32 pc, runQueue; };
