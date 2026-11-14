@@ -43,4 +43,20 @@ int NetGetEx(const char *host, const char *path, int follow, u8 **body, u32 *len
 // thread) stops it. Returns the HTTP status, or 0 (also when stopped or cut).
 int NetDownload(const char *host, const char *path, FILE *file, u32 *len, NetProgress *progress, volatile long *cancel);
 
+// A host name or a dotted address as an IPv4 address in network order (in_addr's s_addr): 1 when found.
+// For the plain sockets of the online play (xb_online.cpp); blocks like the rest (DNS).
+int NetResolve(const char *host, unsigned long *ipv4);
+
+// ---- WebSocket over TLS (wss://host/path), for the online play's rooms and their games ----
+// Opening blocks (DNS, connection, TLS, the upgrade); after that nothing waits unless asked to.
+// Messages are small (up to 1024 bytes sent, 4096 received).
+struct NetWs;
+NetWs *NetWsOpen(const char *host, const char *path);   // NULL when it could not be opened
+// One message (binary; `text`: a text one): 1 when sent, 0 when the connection is over.
+int NetWsSend(NetWs *w, const void *data, int len, int text = 0);
+// The next message into `buf` (at most `max` bytes of it): its length; 0 when none came within `ms`
+// (0: do not wait); -1 when the connection is over. *text (may be NULL): 1 for a text message.
+int NetWsRecv(NetWs *w, void *buf, int max, int ms, int *text);
+void NetWsClose(NetWs *w);
+
 #endif

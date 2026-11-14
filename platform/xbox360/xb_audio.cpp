@@ -60,6 +60,9 @@ static float s_gameVolume = 1.0f;   // Settings > Volumen - reapplied to each ne
 static float s_musicVolume = 1.0f;  // reapplied to each new music voice (music_open)
 static float s_sfxVolume = 1.0f;    // the interface sounds (xb_audio_ui_sound)
 static int s_mono;                  // Settings > Sound > Audio output: mono
+static volatile LONG s_musicDuck;   // a preview video's sound plays: the music is silent meanwhile
+
+static float music_gain(void) { return s_musicDuck ? 0.0f : s_musicVolume; }
 
 // A stereo voice's way to the speakers: its two channels apart (stereo) or
 // mixed into both (mono). The mastering voice may have more channels than
@@ -117,6 +120,7 @@ static void sfx_stop_internal(void);
 void xb_audio_shutdown(void)
 {
     destroy_voice();
+    xb_audio_preview_close();
     music_stop_internal();
     sfx_stop_internal();
     if (s_master) { s_master->DestroyVoice(); s_master = NULL; }
@@ -523,7 +527,7 @@ static int music_open(const char *path, int loop)
             s_musicVoice = NULL;
             return -1;
         }
-        s_musicVoice->SetVolume(s_musicVolume);
+        s_musicVoice->SetVolume(music_gain());
         apply_output_matrix(s_musicVoice, ch);
         s_musicVoice->Start(0, XAUDIO2_COMMIT_NOW);
     }
@@ -672,6 +676,130 @@ static float volume_from_percent(int percent)
     return percent / 100.0f;
 }
 
+// ---- The preview videos' sound ----
+// Its own voice, fed by the preview's thread from a ring of PV_SLOTS buffers (the voice reads a
+// buffer until it has played it: a slot is free again once BuffersQueued says so).
+#define PV_SLOTS 8
+#define PV_FRAMES 4096   // per slot (per channel): ~85 ms at 48 kHz
+static CRITICAL_SECTION s_pvLock;
+static int s_pvLockReady;
+static IXAudio2SourceVoice *s_pvVoice;
+static s16 *s_pvBuf[PV_SLOTS];
+static int s_pvNext, s_pvCh;
+
+static void pv_lock(void)
+{
+    if (!s_pvLockReady) { InitializeCriticalSection(&s_pvLock); s_pvLockReady = 1; }
+    EnterCriticalSection(&s_pvLock);
+}
+
+static void pv_unlock(void) { LeaveCriticalSection(&s_pvLock); }
+
+static void preview_volume(void)
+{
+    pv_lock();
+    if (s_pvVoice) s_pvVoice->SetVolume(s_musicVolume);
+    pv_unlock();
+}
+
+static void music_duck(int on)
+{
+    InterlockedExchange(&s_musicDuck, on);
+    music_lock();
+    if (s_musicVoice) s_musicVoice->SetVolume(music_gain());
+    music_unlock();
+}
+
+int xb_audio_preview_open(u32 rate, int channels)
+{
+    WAVEFORMATEX wf;
+    int i;
+    if (!s_xa || !s_master || (channels != 1 && channels != 2) || rate < 8000 || rate > 96000) return -1;
+    xb_audio_preview_close();
+    for (i = 0; i < PV_SLOTS; i++)
+        if (!s_pvBuf[i] && !(s_pvBuf[i] = (s16 *)malloc(PV_FRAMES * 2 * sizeof(s16)))) return -1;
+    memset(&wf, 0, sizeof(wf));
+    wf.wFormatTag = WAVE_FORMAT_PCM;
+    wf.nChannels = (WORD)channels;
+    wf.nSamplesPerSec = rate;
+    wf.wBitsPerSample = 16;
+    wf.nBlockAlign = (WORD)(channels * 2);
+    wf.nAvgBytesPerSec = rate * wf.nBlockAlign;
+    pv_lock();
+    if (FAILED(s_xa->CreateSourceVoice(&s_pvVoice, &wf, 0, XAUDIO2_DEFAULT_FREQ_RATIO, NULL, NULL, NULL)))
+    {
+        s_pvVoice = NULL;
+        pv_unlock();
+        H64_ERROR("[audio] preview: CreateSourceVoice(%u Hz, %d ch) failed", rate, channels);
+        return -1;
+    }
+    s_pvVoice->SetVolume(s_musicVolume);
+    apply_output_matrix(s_pvVoice, channels);
+    s_pvVoice->Start(0, XAUDIO2_COMMIT_NOW);
+    s_pvCh = channels;
+    s_pvNext = 0;
+    pv_unlock();
+    music_duck(1);
+    return 0;
+}
+
+int xb_audio_preview_push(const s16 *pcm, u32 frames)
+{
+    XAUDIO2_VOICE_STATE st;
+    XAUDIO2_BUFFER b;
+    int ok = 0;
+    pv_lock();
+    if (s_pvVoice && frames && frames <= PV_FRAMES)
+    {
+        s_pvVoice->GetState(&st);
+        if (st.BuffersQueued < PV_SLOTS - 1)
+        {
+            s16 *buf = s_pvBuf[s_pvNext];
+            memcpy(buf, pcm, frames * s_pvCh * sizeof(s16));
+            memset(&b, 0, sizeof(b));
+            b.AudioBytes = frames * s_pvCh * sizeof(s16);
+            b.pAudioData = (const BYTE *)buf;
+            if (SUCCEEDED(s_pvVoice->SubmitSourceBuffer(&b, NULL)))
+            {
+                s_pvNext = (s_pvNext + 1) % PV_SLOTS;
+                ok = 1;
+            }
+        }
+    }
+    pv_unlock();
+    return ok;
+}
+
+u64 xb_audio_preview_played(void)
+{
+    XAUDIO2_VOICE_STATE st;
+    u64 n = 0;
+    pv_lock();
+    if (s_pvVoice)
+    {
+        s_pvVoice->GetState(&st);
+        n = st.SamplesPlayed;
+    }
+    pv_unlock();
+    return n;
+}
+
+void xb_audio_preview_close(void)
+{
+    int had;
+    pv_lock();
+    had = s_pvVoice != NULL;
+    if (s_pvVoice)
+    {
+        s_pvVoice->Stop(0);
+        s_pvVoice->FlushSourceBuffers();
+        s_pvVoice->DestroyVoice();   // waits for the engine: the buffers are free after it
+        s_pvVoice = NULL;
+    }
+    pv_unlock();
+    if (had) music_duck(0);
+}
+
 void xb_audio_set_game_volume(int percent)
 {
     s_gameVolume = volume_from_percent(percent);
@@ -682,8 +810,9 @@ void xb_audio_set_music_volume(int percent)
 {
     s_musicVolume = volume_from_percent(percent);
     music_lock();
-    if (s_musicVoice) s_musicVoice->SetVolume(s_musicVolume);
+    if (s_musicVoice) s_musicVoice->SetVolume(music_gain());
     music_unlock();
+    preview_volume();
 }
 
 void xb_audio_set_sfx_volume(int percent) { s_sfxVolume = volume_from_percent(percent); }
@@ -700,6 +829,9 @@ void xb_audio_set_mono(int on)
         apply_output_matrix(s_musicVoice, (int)d.InputChannels);
     }
     music_unlock();
+    pv_lock();
+    if (s_pvVoice) apply_output_matrix(s_pvVoice, s_pvCh);
+    pv_unlock();
 }
 
 // ---- Interface sounds ----

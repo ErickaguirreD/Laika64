@@ -84,6 +84,10 @@ struct Config
     int updateCheck;    // updatecheck=0: do not ask GitHub for a newer release (xb_update.cpp); 2: as if running 0.0.0 (testing)
     int artExtras;      // artextras=1 (default): with artdownload, the pictures from the game, title screens and logos are downloaded too (0: the box art only)
     int artBackground;  // artbg=1: the downloads of every game go on while a game is played (0, default: they wait for the list)
+    int previewVideo;   // previewvideo=1 (default): the ROM list's card plays the selected game's video (xb_preview.cpp)
+    int previewSound;   // previewsound=1 (default): with its sound (0: silent, the menus' music goes on)
+    char ssUser[64];    // ssuser=NAME / sspass=PASSWORD: the user's own ScreenScraper account for the
+    char ssPass[64];    // preview videos (its quota and speed); empty: the anonymous access
     int artDownload;    // artdownload=0: the ROM browser uses only the box art and game information already in
                         // <drive>:\art\games\ (xb_art.cpp); 1 (default): it downloads what is missing; 2: also in Xenia
     int browserDemo;    // browserdemo=N: the ROM browser moves its selection down every N ms (captures in Xenia)
@@ -105,6 +109,7 @@ struct Config
     int wallShuffle;    // wallshuffle=1: the wallpapers at random, not in name order
     int descTranslate;  // desctr=0|1: the games' descriptions in the menus' language when there is one (default 1)
     int gameBackdrop;   // gamebg=0|1: a picture from the selected game behind the game list, in every view (default 0)
+    int videoBackdrop;  // videobg=0|1: the selected game's preview video there instead of over its picture (default 0; not with gamebg)
     int wallRecommend;  // wallrec=1: the background shows one of your games at a time, its big cover and what it is about
     int borderColor;    // bordercolor=0..13: the menus' edges - the selection's colour (0), or xb_menu.cpp's swatches
     int borderOpacity;  // borderopacity=0..100: how strong the edges are, in % (default 100)

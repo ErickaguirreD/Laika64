@@ -1618,6 +1618,17 @@ int ArtReadCover(const char *romPath, int kind, u8 **rgba, int *w, int *h, int *
     }
 }
 
+int ArtKeyOf(const char *romPath, char *key)
+{
+    H64Rom rom;
+    if (!s_started || !RomReadHeader(romPath, &rom)) return 0;
+    h64_gameinfo_key(rom.gameCode, rom.crc1, key);
+    h64_rom_free(&rom);
+    return 1;
+}
+
+const char *ArtFolder(void) { return s_dir; }
+
 int ArtReadPicture(const char *romPath, int kind, int maxW, int maxH, u8 **rgba, int *w, int *h)
 {
     H64Rom rom;

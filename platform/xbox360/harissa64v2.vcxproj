@@ -46,6 +46,8 @@
       <BufferSecurityCheck>false</BufferSecurityCheck>
       <RuntimeTypeInfo>false</RuntimeTypeInfo>
       <PreprocessorDefinitions>_XBOX;Z_SOLO;H64_VERSION=$(H64Version);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <!-- ScreenScraper's developer credentials (preview videos): a local file, never in the repository. -->
+      <PreprocessorDefinitions Condition="Exists('$(MSBuildProjectDirectory)\xb_ss_secret.h')">HAVE_SS_SECRET;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(H64RepoRoot);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <CompileAs>CompileAsCpp</CompileAs>
       <!-- The reference FPU changes the rounding mode at run time (#pragma fenv_access). -->
@@ -122,6 +124,8 @@
     </ClCompile>
     <ClCompile Include="xb_update.cpp" />
     <ClCompile Include="xb_stats.cpp" />
+    <ClCompile Include="xb_online.cpp" />
+    <ClCompile Include="xb_p2p.cpp" />
     <!-- LZMA SDK 19.00 (public domain): the .7z of the HD texture packs downloaded, read by
          xb_hirespack.cpp; compiled as C, big-endian, no multithreading. -->
     <ClCompile Include="..\..\third_party\lzma\*.c">
@@ -133,6 +137,24 @@
       <AdditionalIncludeDirectories>..\..\third_party\lzma;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>MY_CPU_BE;_7ZIP_ST;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
+    <!-- OpenH264 2.6.0 decoder (BSD 2-clause): the H.264 of the preview videos, read by xb_video.cpp;
+         its portable C++ paths only, one thread; xbox\windows.h stands in for <windows.h>. -->
+    <ClCompile Include="..\..\third_party\openh264\codec\common\src\*.cpp;..\..\third_party\openh264\codec\decoder\core\src\*.cpp;..\..\third_party\openh264\codec\decoder\plus\src\*.cpp">
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <AdditionalIncludeDirectories>..\..\third_party\openh264\xbox;..\..\third_party\openh264\codec\api\wels;..\..\third_party\openh264\codec\common\inc;..\..\third_party\openh264\codec\decoder\core\inc;..\..\third_party\openh264\codec\decoder\plus\inc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <!-- FAAD2 2.11.4 (GPLv2 or later): the AAC sound of the preview videos, floating point; compiled as C++
+         (its C99 declarations after statements are not C89, the only C this compiler has). -->
+    <ClCompile Include="..\..\third_party\faad2\libfaad\*.c">
+      <CompileAs>CompileAsCpp</CompileAs>
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <AdditionalIncludeDirectories>..\..\third_party\faad2\include;..\..\third_party\faad2\libfaad;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>PACKAGE_VERSION="2.11.4";%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <!-- Its own object folder: decoder.c and error.c share their names with OpenH264's files. -->
+      <ObjectFileName>$(IntDir)faad2\</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="xb_video.cpp" />
+    <ClCompile Include="xb_preview.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\core\**\*.h" />

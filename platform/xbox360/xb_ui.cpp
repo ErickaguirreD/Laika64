@@ -62,8 +62,10 @@ static const char s_uiVs[] =
 
 // Rounded box distance (negative inside), optionally turned into a ring; or
 // the atlas's distance field; or a picture (t.z = 2: the image on s1 over the
-// box, its corners rounded like a shape's). Kept short: the Xenos compiler
-// ran out of registers on long display shaders.
+// box, its corners rounded like a shape's; t.w, unused by pictures otherwise,
+// shows only the middle of it: > 0 that much of its width, < 0 of its height -
+// UiImageFill). Kept short: the Xenos compiler ran out of registers on long
+// display shaders.
 static const char s_uiPs[] =
     "sampler atlas : register(s0);\n"
     "sampler image : register(s1);\n"
@@ -71,11 +73,12 @@ static const char s_uiPs[] =
     "{\n"
     "  float2 q = abs(t.xy) - p.xy + p.z;\n"
     "  float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - p.z;\n"
-    "  d = t.w > 0.0 ? abs(d + t.w) - t.w : d;\n"
+    "  d = t.w > 0.0 && t.z < 1.5 ? abs(d + t.w) - t.w : d;\n"
     "  float shape = saturate(0.5 - d / p.w);\n"
     "  shape = shape * shape * (3.0 - 2.0 * shape);\n"
     "  float text = saturate((tex2D(atlas, t.xy).x - 0.5) * p.x + p.y);\n"
-    "  float4 img = t.z > 1.5 ? tex2D(image, t.xy / (2.0 * p.xy) + 0.5) : float4(1.0, 1.0, 1.0, 1.0);\n"
+    "  float2 k = t.w > 0.0 ? float2(t.w, 1.0) : t.w < 0.0 ? float2(1.0, -t.w) : float2(1.0, 1.0);\n"
+    "  float4 img = t.z > 1.5 ? tex2D(image, t.xy * k / (2.0 * p.xy) + 0.5) : float4(1.0, 1.0, 1.0, 1.0);\n"
     "  return float4(col.rgb * img.rgb, col.a * img.a * (t.z > 0.5 && t.z < 1.5 ? text : shape));\n"
     "}\n";
 
@@ -1396,6 +1399,26 @@ void UiImage(IDirect3DTexture9 *tex, float x, float y, float w, float h, float r
     s_dev->SetTexture(1, s_atlas);
 }
 
+void UiImageFill(IDirect3DTexture9 *tex, float x, float y, float w, float h, float r, float imgW, float imgH, D3DCOLOR color)
+{
+    float p[4], pad = 2.0f, hw = w * 0.5f, hh = h * 0.5f, ia, ba, crop = 0.0f;
+    if (!s_dev || !tex || w <= 0 || h <= 0 || imgW <= 0 || imgH <= 0) return;
+    if (r > hw) r = hw;
+    if (r > hh) r = hh;
+    // The part of the picture shown: its middle, at the box's proportions.
+    ia = imgW / imgH;
+    ba = w / h;
+    if (ia > ba * 1.001f) crop = ba / ia;            // wider: the middle of its width
+    else if (ia < ba * 0.999f) crop = -(ia / ba);    // taller: the middle of its height
+    flush();
+    s_dev->SetTexture(1, tex);
+    p[0] = hw; p[1] = hh; p[2] = r; p[3] = 1.0f;
+    // The pad around the box (its soft edge) samples a little outside the part shown: clamped by the sampler.
+    quad(x - pad, y - pad, x + w + pad, y + h + pad, -hw - pad, -hh - pad, hw + pad, hh + pad, 2.0f, crop, p, color, color);
+    flush();
+    s_dev->SetTexture(1, s_atlas);
+}
+
 void UiImageMirror(IDirect3DTexture9 *tex, float x, float y, float w, float h, float r, float frac, D3DCOLOR top, D3DCOLOR bottom)
 {
     float p[4], pad = 2.0f, hw = w * 0.5f, hh = h * 0.5f;
@@ -1825,6 +1848,39 @@ static IDirect3DTexture9 *brand_tex(float *w, float *h)
     *w = (float)UI_LAIKA_LOGO_W;
     *h = (float)UI_LAIKA_LOGO_H;
     return s_laikaLogo;
+}
+
+IDirect3DTexture9 *UiLaikaEmblem(void)
+{
+    static IDirect3DTexture9 *s_emblem;
+    static int s_emblemTried;
+    if (!s_emblemTried && s_dev)
+    {
+        int pw = 0, ph = 0, x, y, cw = 0, side;
+        unsigned char *rgba = h64_png_decode(s_laikaLogoPng, sizeof(s_laikaLogoPng), &pw, &ph, 1024 * 1024), *sq;
+        s_emblemTried = 1;
+        if (!rgba) return NULL;
+        // The mark ends at the first clear column after it (the gap before the name).
+        for (x = 100; x < pw && !cw; x++)
+        {
+            int clear = 1;
+            for (y = 0; y < ph && clear; y++)
+                if (rgba[((size_t)y * pw + x) * 4 + 3] > 8) clear = 0;
+            if (clear) cw = x;
+        }
+        if (!cw) cw = ph < pw ? ph : pw;
+        side = cw > ph ? cw : ph;
+        sq = (unsigned char *)calloc((size_t)side * side, 4);   // centred in a clear square
+        if (sq)
+        {
+            for (y = 0; y < ph; y++)
+                memcpy(sq + ((size_t)(y + (side - ph) / 2) * side + (side - cw) / 2) * 4, rgba + (size_t)y * pw * 4, (size_t)cw * 4);
+            s_emblem = UiImageCreate(s_dev, sq, side, side);
+            free(sq);
+        }
+        free(rgba);
+    }
+    return s_emblem;
 }
 
 float UiBrand(float x, float cy, float size)

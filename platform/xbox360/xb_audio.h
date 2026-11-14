@@ -50,6 +50,16 @@ void xb_audio_music_stop(void);
 int xb_audio_music_scan(const char *folder);
 const char *xb_audio_music_track(int i);
 
+// ---- The preview videos' sound (xb_preview.cpp) ----
+// One voice of its own at the music's volume; the menus' music is silent while it is open.
+// Called from the preview's thread only. Open: 0 when it plays.
+int xb_audio_preview_open(u32 rate, int channels);
+// Queues `frames` of native 16-bit PCM (copied): 0 when the queue is full (try again later).
+int xb_audio_preview_push(const s16 *pcm, u32 frames);
+// Frames the voice has played since it was opened (the preview's clock).
+u64 xb_audio_preview_played(void);
+void xb_audio_preview_close(void);
+
 // ---- Interface sounds (Settings > Sound > Interface sounds) ----
 // Short tones made here (no sound files), a different one per kind of press,
 // in the spirit of the console's own menus. Played on their own voices, at

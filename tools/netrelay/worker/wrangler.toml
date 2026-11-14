@@ -1,0 +1,23 @@
+# LAIKA 64 online server on Cloudflare Workers (free plan). From this folder:
+#   npx wrangler login                                       (once: the browser asks to allow it)
+#   npx wrangler d1 create laika                             (once: put the database_id it prints below)
+#   npx wrangler d1 execute laika --remote --file schema.sql (once; then news.sql)
+#   npx wrangler deploy
+name = "laika64"
+main = "src/index.js"
+compatibility_date = "2026-05-01"
+workers_dev = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "laika"
+database_id = "74aab990-8c3c-4e67-936f-cb7826fbcf1c"
+
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "Room"
+
+# The free plan's Durable Objects are the SQLite-backed ones.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]

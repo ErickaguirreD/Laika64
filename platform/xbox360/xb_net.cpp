@@ -158,6 +158,15 @@ static int resolve(const char *host, IN_ADDR *addr)
     return ok;
 }
 
+int NetResolve(const char *host, unsigned long *ipv4)
+{
+    IN_ADDR a;
+    a.s_addr = inet_addr(host);
+    if (a.s_addr == INADDR_NONE && !resolve(host, &a)) return 0;
+    *ipv4 = a.s_addr;
+    return 1;
+}
+
 // One connection's TLS state (~50 KB: allocated per request).
 struct NetTls
 {
@@ -220,11 +229,78 @@ static int dechunk(u8 *buf, u32 len)
     }
 }
 
-// One GET (no redirects). Returns the status or 0; see NetGet. With `sink`
-// the body goes into that file as it arrives (NetDownload), `cancel` set
-// stops it.
-static int request(const char *host, const char *path, u8 **body, u32 *bodyLen, u32 maxLen, char *location, int locSize,
-                   NetProgress *pr, FILE *sink, volatile long *cancel)
+// ---- Connections kept open between requests (HTTP keep-alive) ----
+// Each request used to make its own connection and TLS handshake (key exchange and certificate
+// checks on the Xbox's CPU), about eight for each game's pictures and information. A connection whose
+// answer was read to its end goes here for a moment; the next request to the same host takes it.
+#define NET_IDLE 6
+#define NET_IDLE_MS 4000        // servers drop idle connections after some seconds: not kept longer
+struct NetIdle { SOCKET s; NetTls *t; char host[128]; DWORD at; };
+static NetIdle s_idle[NET_IDLE];
+static CRITICAL_SECTION s_idleLock;
+static volatile LONG s_idleInit;
+
+static void idle_lock(void)
+{
+    if (InterlockedCompareExchange(&s_idleInit, 1, 0) == 0)
+    {
+        InitializeCriticalSection(&s_idleLock);
+        InterlockedExchange(&s_idleInit, 2);
+    }
+    while (s_idleInit != 2) Sleep(1);
+    EnterCriticalSection(&s_idleLock);
+}
+
+static void idle_close(NetIdle *c)
+{
+    closesocket(c->s);
+    free(c->t);
+    c->t = NULL;
+}
+
+// A kept connection to `host` (taken out of the list): 1 when there was one.
+static int idle_take(const char *host, SOCKET *s, NetTls **t)
+{
+    int i, got = 0;
+    DWORD now = GetTickCount();
+    idle_lock();
+    for (i = 0; i < NET_IDLE; i++)
+    {
+        NetIdle *c = &s_idle[i];
+        if (!c->t) continue;
+        if (now - c->at >= NET_IDLE_MS) { idle_close(c); continue; }
+        if (!got && !_stricmp(c->host, host))
+        {
+            *s = c->s;
+            *t = c->t;
+            c->t = NULL;
+            got = 1;
+        }
+    }
+    LeaveCriticalSection(&s_idleLock);
+    return got;
+}
+
+static void idle_put(const char *host, SOCKET s, NetTls *t)
+{
+    int i, slot = 0;
+    idle_lock();
+    for (i = 0; i < NET_IDLE; i++)
+    {
+        if (!s_idle[i].t) { slot = i; break; }
+        if (s_idle[i].at - s_idle[slot].at > 0x80000000u) slot = i;   // else the one kept longest
+    }
+    if (s_idle[slot].t) idle_close(&s_idle[slot]);
+    s_idle[slot].s = s;
+    s_idle[slot].t = t;
+    s_idle[slot].at = GetTickCount();
+    strncpy(s_idle[slot].host, host, sizeof(s_idle[slot].host) - 1);
+    s_idle[slot].host[sizeof(s_idle[slot].host) - 1] = 0;
+    LeaveCriticalSection(&s_idleLock);
+}
+
+// A new connection to host:443 with its TLS set up (the handshake happens on the first write).
+static int connect_tls(const char *host, SOCKET *ps, NetTls **pt)
 {
     NetTls *t;
     IN_ADDR ip;
@@ -234,13 +310,6 @@ static int request(const char *host, const char *path, u8 **body, u32 *bodyLen, 
     DWORD timeout = NET_TIMEOUT_MS;
     unsigned char seed[32];
     uint32_t days, secs;
-    char *req = NULL, *head = NULL;
-    int n = 0, r, status = 0, hlen = 0, ok = 0;
-    u8 *buf = NULL;
-    u32 cap = 0, got = 0;
-
-    if (location && locSize) location[0] = 0;
-    if (strlen(path) + strlen(host) > NET_URL_MAX) return 0;
     if (!resolve(host, &ip)) { H64_INFO("[net] cannot resolve %s", host); return 0; }
     s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (s == INVALID_SOCKET) return 0;
@@ -273,10 +342,7 @@ static int request(const char *host, const char *path, u8 **body, u32 *bodyLen, 
         return 0;
     }
     t = (NetTls *)malloc(sizeof(NetTls));
-    head = (char *)malloc(NET_HEAD_MAX + 1);
-    req = (char *)malloc(NET_URL_MAX + 512);
-    if (!t || !head || !req) { free(t); free(head); free(req); closesocket(s); return 0; }
-
+    if (!t) { closesocket(s); return 0; }
     br_ssl_client_init_full(&t->sc, &t->xc, NULL, 0);
     {
         // Speed: the downloads (HD packs of hundreds of MB, updates) are decrypted here, on
@@ -307,31 +373,68 @@ static int request(const char *host, const char *path, u8 **body, u32 *bodyLen, 
     br_ssl_engine_inject_entropy(&t->sc.eng, seed, sizeof(seed));
     br_ssl_engine_set_buffer(&t->sc.eng, t->iobuf, sizeof(t->iobuf), 1);
     br_ssl_client_reset(&t->sc, host, 0);
-    br_sslio_init(&t->ioc, &t->sc.eng, sock_read, &s, sock_write, &s);
+    *ps = s;
+    *pt = t;
+    return 1;
+}
 
+// One GET (no redirects). Returns the status or 0; see NetGet. With `sink`
+// the body goes into that file as it arrives (NetDownload), `cancel` set
+// stops it.
+static int request(const char *host, const char *path, u8 **body, u32 *bodyLen, u32 maxLen, char *location, int locSize,
+                   NetProgress *pr, FILE *sink, volatile long *cancel)
+{
+    NetTls *t = NULL;
+    SOCKET s = INVALID_SOCKET;
+    char *req = NULL, *head = NULL;
+    int n = 0, r, status = 0, hlen = 0, ok = 0, keep = 0, attempt, reused = 0, closeAsked;
+    u8 *buf = NULL;
+    u32 cap = 0, got = 0;
+
+    if (location && locSize) location[0] = 0;
+    if (strlen(path) + strlen(host) > NET_URL_MAX) return 0;
+    head = (char *)malloc(NET_HEAD_MAX + 1);
+    req = (char *)malloc(NET_URL_MAX + 512);
+    if (!head || !req) { free(head); free(req); return 0; }
     _snprintf(req, NET_URL_MAX + 511,
               "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: Harissa64/" H64_VERSION_STRING
-              " (Xbox 360; https://github.com/kernel64/Harissa64)\r\nAccept: */*\r\nConnection: close\r\n\r\n",
+              " (Xbox 360; https://github.com/kernel64/Harissa64)\r\nAccept: */*\r\nConnection: keep-alive\r\n\r\n",
               path, host);
     req[NET_URL_MAX + 511] = 0;
-    if (br_sslio_write_all(&t->ioc, req, strlen(req)) != 0 || br_sslio_flush(&t->ioc) != 0) goto done;
 
-    // Headers (whatever body arrives with them is kept).
-    while (n < NET_HEAD_MAX)
+    for (attempt = 0; attempt < 2; attempt++)
     {
-        char *e;
-        r = br_sslio_read(&t->ioc, head + n, NET_HEAD_MAX - n);
-        if (r <= 0) break;
-        n += r;
-        head[n] = 0;
-        if ((e = strstr(head, "\r\n\r\n")) != NULL) { hlen = (int)(e - head) + 4; break; }
+        reused = attempt == 0 && idle_take(host, &s, &t);
+        if (!reused && !connect_tls(host, &s, &t)) { s = INVALID_SOCKET; t = NULL; goto done; }
+        br_sslio_init(&t->ioc, &t->sc.eng, sock_read, &s, sock_write, &s);
+        n = 0;
+        hlen = 0;
+        if (br_sslio_write_all(&t->ioc, req, strlen(req)) == 0 && br_sslio_flush(&t->ioc) == 0)
+        {
+            // Headers (whatever body arrives with them is kept).
+            while (n < NET_HEAD_MAX)
+            {
+                char *e;
+                r = br_sslio_read(&t->ioc, head + n, NET_HEAD_MAX - n);
+                if (r <= 0) break;
+                n += r;
+                head[n] = 0;
+                if ((e = strstr(head, "\r\n\r\n")) != NULL) { hlen = (int)(e - head) + 4; break; }
+            }
+        }
+        if (hlen || !reused || n) break;
+        // A kept connection the server had closed meanwhile: again on a new one.
+        closesocket(s);
+        free(t);
+        s = INVALID_SOCKET;
+        t = NULL;
     }
     if (!hlen)
     {
-        if (!n) H64_INFO("[net] %s: TLS error %d", host, br_ssl_engine_last_error(&t->sc.eng));
+        if (!n && t) H64_INFO("[net] %s: TLS error %d", host, br_ssl_engine_last_error(&t->sc.eng));
         goto done;
     }
-    if (sink)
+    if (sink && !reused)
     {
         // The suite the server chose (a download's speed depends on it; see above).
         br_ssl_session_parameters sp;
@@ -350,8 +453,31 @@ static int request(const char *host, const char *path, u8 **body, u32 *bodyLen, 
             memcpy(location, v, vn);
             location[vn] = 0;
         }
+        v = header(head, "connection", &vn);
+        closeAsked = (v && vn >= 5 && !_strnicmp(v, "close", 5)) || !strncmp(head, "HTTP/1.0", 8);
     }
-    if ((!body && !sink) || status < 200 || status >= 300) { ok = 1; goto done; }
+    if ((!body && !sink) || status < 200 || status >= 300)
+    {
+        // No body wanted (a redirect, an error): a short one read and dropped keeps the connection.
+        int vn;
+        const char *cl = header(head, "content-length", &vn), *te = header(head, "transfer-encoding", &vn);
+        ok = 1;
+        if (cl && !te && !closeAsked)
+        {
+            u32 want = (u32)strtoul(cl, NULL, 10), have = (u32)(n - hlen);
+            if (want <= 65536)
+            {
+                while (have < want)
+                {
+                    r = br_sslio_read(&t->ioc, head, NET_HEAD_MAX < want - have ? NET_HEAD_MAX : want - have);
+                    if (r <= 0) break;
+                    have += (u32)r;
+                }
+                keep = have == want;
+            }
+        }
+        goto done;
+    }
 
     // The body: Content-Length bytes, chunked, or up to the end of the connection.
     {
@@ -377,6 +503,7 @@ static int request(const char *host, const char *path, u8 **body, u32 *bodyLen, 
                 if (want) InterlockedExchange(&pr->total, (LONG)want);   // else the caller's guess (the release's size) stays
                 InterlockedExchange(&pr->got, 0);
             }
+            if (!chunked && !want && cl) cs = CS_DONE;   // an empty file
             for (;;)
             {
                 while (avail && !bad && cs != CS_DONE)
@@ -418,13 +545,15 @@ static int request(const char *host, const char *path, u8 **body, u32 *bodyLen, 
                 avail = (u32)r;
             }
             free(chunk);
-            if (bad || (cancel && *cancel) || (want && got < want) || (chunked && cs != CS_DONE) || !got)
+            if (bad || (cancel && *cancel) || (want && got < want) || (chunked && cs != CS_DONE) || (!got && cs != CS_DONE))
             {
                 H64_INFO("[net] %s%s: stopped at %u of %u bytes%s", host, path, got, want, chunked ? " (chunked)" : "");
                 goto done;
             }
             if (bodyLen) *bodyLen = got;
             ok = 1;
+            // Kept when its length was known (a chunked answer's last CRLF may still be on its way).
+            keep = !closeAsked && cs == CS_DONE && !chunked && cl;
             goto done;
         }
         if (want > maxLen) { H64_INFO("[net] %s%s: %u bytes, more than %u", host, path, want, maxLen); goto done; }
@@ -441,7 +570,10 @@ static int request(const char *host, const char *path, u8 **body, u32 *bodyLen, 
         }
         for (;;)
         {
-            if (want && got >= want) break;
+            if (want && got >= want) { keep = !closeAsked; break; }
+            // A chunked answer ends with a chunk of size 0 (the connection stays open: not read to its end).
+            if (chunked && got >= 5 && !memcmp(buf + got - 5, "0\r\n\r\n", 5)) { keep = !closeAsked; break; }
+            if (!want && cl) { keep = !closeAsked; break; }   // Content-Length: 0
             if (got == cap)
             {
                 u8 *nb;
@@ -457,14 +589,14 @@ static int request(const char *host, const char *path, u8 **body, u32 *bodyLen, 
             got += (u32)r;
             if (pr) InterlockedExchange(&pr->got, (LONG)got);
         }
-        if (want && got < want) { H64_INFO("[net] %s%s: cut at %u of %u bytes", host, path, got, want); goto done; }
+        if (want && got < want) { H64_INFO("[net] %s%s: cut at %u of %u bytes", host, path, got, want); keep = 0; goto done; }
         if (chunked)
         {
             int d = dechunk(buf, got);
-            if (d < 0) { H64_INFO("[net] %s%s: bad chunked answer", host, path); goto done; }
+            if (d < 0) { H64_INFO("[net] %s%s: bad chunked answer", host, path); keep = 0; goto done; }
             got = (u32)d;
         }
-        if (got > maxLen) goto done;
+        if (got > maxLen) { keep = 0; goto done; }
         buf[got] = 0;
         *body = buf;
         *bodyLen = got;
@@ -473,11 +605,18 @@ static int request(const char *host, const char *path, u8 **body, u32 *bodyLen, 
     }
 
 done:
-    closesocket(s);
+    if (t)
+    {
+        if (keep && ok) idle_put(host, s, t);
+        else
+        {
+            closesocket(s);
+            free(t);
+        }
+    }
     free(buf);
     free(head);
     free(req);
-    free(t);
     return ok ? status : 0;
 }
 
@@ -545,4 +684,288 @@ static int net_get(const char *host, const char *path, int follow, u8 **body, u3
     free(curPath);
     free(loc);
     return status;
+}
+
+// ---- WebSocket over TLS (wss://host/path): the online play's rooms and their games ----
+// The TLS engine is run by hand over a socket that never blocks, so a call can ask "anything there?"
+// without waiting (a game asks every frame). Messages are small: one that does not fit NET_WS_BUF,
+// or one sent in pieces, ends the connection.
+#define NET_WS_BUF 4096
+struct NetWs
+{
+    SOCKET s;
+    NetTls *t;
+    u8 in[NET_WS_BUF];   // what arrived and is not a whole message yet
+    int inLen;
+    int dead;
+};
+
+static int ws_wait(SOCKET s, int write, int ms)
+{
+    fd_set fds;
+    timeval tv;
+    if (ms < 0) ms = 0;
+    tv.tv_sec = ms / 1000;
+    tv.tv_usec = (ms % 1000) * 1000;
+    FD_ZERO(&fds);
+    FD_SET(s, &fds);
+    return select(0, write ? NULL : &fds, write ? &fds : NULL, NULL, &tv) > 0;
+}
+
+// Moves TLS records between the engine and the socket until the engine has data for the application
+// (1), or nothing more arrives within `ms` (0); -1 when the connection is over.
+static int ws_pump(NetWs *w, int ms)
+{
+    br_ssl_engine_context *eng = &w->t->sc.eng;
+    const DWORD t0 = GetTickCount();
+    for (;;)
+    {
+        unsigned st = br_ssl_engine_current_state(eng);
+        size_t len;
+        unsigned char *buf;
+        int n;
+        if (st == BR_SSL_CLOSED) return -1;
+        if (st & BR_SSL_SENDREC)
+        {
+            buf = br_ssl_engine_sendrec_buf(eng, &len);
+            n = send(w->s, (const char *)buf, (int)len, 0);
+            if (n > 0) { br_ssl_engine_sendrec_ack(eng, n); continue; }
+            if (n < 0 && WSAGetLastError() == WSAEWOULDBLOCK && ws_wait(w->s, 1, NET_TIMEOUT_MS)) continue;
+            return -1;
+        }
+        if (st & BR_SSL_RECVAPP) return 1;
+        if (st & BR_SSL_RECVREC)
+        {
+            buf = br_ssl_engine_recvrec_buf(eng, &len);
+            n = recv(w->s, (char *)buf, (int)len, 0);
+            if (n > 0) { br_ssl_engine_recvrec_ack(eng, n); continue; }
+            if (n == 0 || WSAGetLastError() != WSAEWOULDBLOCK) return -1;
+            n = ms - (int)(GetTickCount() - t0);
+            if (n <= 0 || !ws_wait(w->s, 0, n)) return 0;
+            continue;
+        }
+        return 0;
+    }
+}
+
+// All of `data` to the other end (encrypted and on the socket before it returns).
+static int ws_write(NetWs *w, const void *data, int len)
+{
+    br_ssl_engine_context *eng = &w->t->sc.eng;
+    const u8 *p = (const u8 *)data;
+    const DWORD t0 = GetTickCount();
+    while (len > 0)
+    {
+        size_t room;
+        unsigned char *buf;
+        if (!(br_ssl_engine_current_state(eng) & BR_SSL_SENDAPP))
+        {
+            // The handshake is not over yet (or the engine is full): its records go on, a little at a time.
+            if (GetTickCount() - t0 > NET_TIMEOUT_MS || ws_pump(w, 20) < 0) return 0;
+            continue;
+        }
+        buf = br_ssl_engine_sendapp_buf(eng, &room);
+        if (room > (size_t)len) room = (size_t)len;
+        memcpy(buf, p, room);
+        br_ssl_engine_sendapp_ack(eng, room);
+        p += room;
+        len -= (int)room;
+    }
+    br_ssl_engine_flush(eng, 0);
+    return ws_pump(w, 0) >= 0;
+}
+
+// What the engine has decrypted, into w->in (as much as fits).
+static void ws_take(NetWs *w)
+{
+    br_ssl_engine_context *eng = &w->t->sc.eng;
+    while ((br_ssl_engine_current_state(eng) & BR_SSL_RECVAPP) && w->inLen < NET_WS_BUF)
+    {
+        size_t len;
+        unsigned char *buf = br_ssl_engine_recvapp_buf(eng, &len);
+        if (len > (size_t)(NET_WS_BUF - w->inLen)) len = (size_t)(NET_WS_BUF - w->inLen);
+        memcpy(w->in + w->inLen, buf, len);
+        w->inLen += (int)len;
+        br_ssl_engine_recvapp_ack(eng, len);
+    }
+}
+
+// One frame to the server: masked, as a client's must be.
+static int ws_frame(NetWs *w, int opcode, const void *data, int len)
+{
+    u8 f[8 + 1024];
+    u8 mask[4];
+    int n = 0, k;
+    if (len < 0 || len > 1024) return 0;
+    XeCryptRandom(mask, sizeof(mask));
+    f[n++] = (u8)(0x80 | opcode);
+    if (len < 126) f[n++] = (u8)(0x80 | len);
+    else { f[n++] = 0x80 | 126; f[n++] = (u8)(len >> 8); f[n++] = (u8)len; }
+    memcpy(f + n, mask, 4);
+    n += 4;
+    for (k = 0; k < len; k++) f[n + k] = ((const u8 *)data)[k] ^ mask[k & 3];
+    return ws_write(w, f, n + len);
+}
+
+void NetWsClose(NetWs *w)
+{
+    if (!w) return;
+    if (!w->dead) ws_frame(w, 8, NULL, 0);   // a close frame: the server ends its side at once
+    closesocket(w->s);
+    free(w->t);
+    free(w);
+}
+
+NetWs *NetWsOpen(const char *host, const char *path)
+{
+    static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    NetWs *w;
+    IN_ADDR ip;
+    SOCKADDR_IN sa;
+    BOOL one = TRUE;
+    u_long nb = 1;
+    unsigned char seed[32], raw[18];
+    uint32_t days, secs;
+    char key[28], req[900];
+    DWORD t0;
+    int k;
+    if (strlen(path) + strlen(host) > 600 || !NetStart(0) || !resolve(host, &ip)) return NULL;
+    w = (NetWs *)calloc(1, sizeof(NetWs));
+    if (!w) return NULL;
+    w->t = (NetTls *)malloc(sizeof(NetTls));
+    w->s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (!w->t || w->s == INVALID_SOCKET) goto fail;
+    setsockopt(w->s, SOL_SOCKET, SO_MARKINSECURE, (const char *)&one, sizeof(one));
+    setsockopt(w->s, IPPROTO_TCP, TCP_NODELAY, (const char *)&one, sizeof(one));
+    ioctlsocket(w->s, FIONBIO, &nb);
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(443);
+    sa.sin_addr = ip;
+    if (connect(w->s, (const sockaddr *)&sa, sizeof(sa)) != 0 && (WSAGetLastError() != WSAEWOULDBLOCK || !ws_wait(w->s, 1, NET_TIMEOUT_MS)))
+    {
+        H64_INFO("[net] cannot connect to %s (%d)", host, WSAGetLastError());
+        goto fail;
+    }
+    // The TLS client as request() sets it up (fast ciphers first, no trusted roots on the console).
+    br_ssl_client_init_full(&w->t->sc, &w->t->xc, NULL, 0);
+    {
+        static const uint16_t suites[] = {
+            BR_TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256, BR_TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+            BR_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, BR_TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+            BR_TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384, BR_TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+        };
+        br_ssl_engine_set_suites(&w->t->sc.eng, suites, sizeof(suites) / sizeof(suites[0]));
+        br_ssl_engine_set_aes_ctr(&w->t->sc.eng, &br_aes_big_ctr_vtable);
+        br_ssl_engine_set_ghash(&w->t->sc.eng, br_ghash_ctmul64);
+    }
+    ssl_time(&days, &secs);
+    br_x509_minimal_set_time(&w->t->xc, days, secs);
+    w->t->na.vtable = &s_noAnchorVtable;
+    w->t->na.inner = &w->t->xc.vtable;
+    br_ssl_engine_set_x509(&w->t->sc.eng, &w->t->na.vtable);
+    XeCryptRandom(seed, sizeof(seed));
+    br_ssl_engine_inject_entropy(&w->t->sc.eng, seed, sizeof(seed));
+    br_ssl_engine_set_buffer(&w->t->sc.eng, w->t->iobuf, sizeof(w->t->iobuf), 1);
+    br_ssl_client_reset(&w->t->sc, host, 0);
+
+    // The upgrade request, with a random key (16 bytes in base64; the answer's hash of it is not checked).
+    XeCryptRandom(raw, 16);
+    raw[16] = raw[17] = 0;
+    for (k = 0; k < 6; k++)
+    {
+        const u32 v = ((u32)raw[k * 3] << 16) | ((u32)raw[k * 3 + 1] << 8) | raw[k * 3 + 2];
+        key[k * 4] = b64[v >> 18];
+        key[k * 4 + 1] = b64[(v >> 12) & 63];
+        key[k * 4 + 2] = b64[(v >> 6) & 63];
+        key[k * 4 + 3] = b64[v & 63];
+    }
+    key[22] = key[23] = '=';
+    key[24] = 0;
+    _snprintf(req, sizeof(req) - 1,
+              "GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\n"
+              "Sec-WebSocket-Version: 13\r\nUser-Agent: LAIKA64/" H64_VERSION_STRING " (Xbox 360)\r\n\r\n",
+              path, host, key);
+    req[sizeof(req) - 1] = 0;
+    if (!ws_write(w, req, (int)strlen(req))) { H64_INFO("[net] %s: no TLS connection (error %d)", host, br_ssl_engine_last_error(&w->t->sc.eng)); goto fail; }
+    // The answer's headers: "HTTP/1.1 101"; what follows them is the first messages.
+    for (t0 = GetTickCount();;)
+    {
+        int r, end = -1;
+        for (k = 0; k + 3 < w->inLen; k++)
+            if (!memcmp(w->in + k, "\r\n\r\n", 4)) { end = k + 4; break; }
+        if (end >= 0)
+        {
+            if (w->inLen < 12 || memcmp(w->in, "HTTP/1.1 101", 12))
+            {
+                H64_INFO("[net] %s%s: not a WebSocket (%.12s)", host, path, (const char *)w->in);
+                goto fail;
+            }
+            memmove(w->in, w->in + end, w->inLen - end);
+            w->inLen -= end;
+            return w;
+        }
+        if (w->inLen >= NET_WS_BUF || GetTickCount() - t0 > NET_TIMEOUT_MS) goto fail;
+        r = ws_pump(w, 500);
+        if (r < 0) goto fail;
+        if (r > 0) ws_take(w);
+    }
+fail:
+    w->dead = 1;
+    if (w->s != INVALID_SOCKET) closesocket(w->s);
+    free(w->t);
+    free(w);
+    return NULL;
+}
+
+int NetWsSend(NetWs *w, const void *data, int len, int text)
+{
+    if (!w || w->dead) return 0;
+    if (!ws_frame(w, text ? 1 : 2, data, len)) { w->dead = 1; return 0; }
+    return 1;
+}
+
+int NetWsRecv(NetWs *w, void *buf, int max, int ms, int *text)
+{
+    const DWORD t0 = GetTickCount();
+    if (!w || w->dead) return -1;
+    for (;;)
+    {
+        int r, left;
+        // A whole frame in w->in?
+        if (w->inLen >= 2)
+        {
+            const int opcode = w->in[0] & 0x0F, fin = w->in[0] & 0x80, masked = w->in[1] & 0x80;
+            int len = w->in[1] & 0x7F, head = 2;
+            if (len == 126)
+            {
+                if (w->inLen < 4) len = -1;
+                else { len = (w->in[2] << 8) | w->in[3]; head = 4; }
+            }
+            else if (len == 127) { w->dead = 1; return -1; }   // 64-bit lengths: never ours
+            if (len >= 0 && (masked || !fin || head + len > NET_WS_BUF)) { w->dead = 1; return -1; }
+            if (len >= 0 && w->inLen >= head + len)
+            {
+                const u8 *payload = w->in + head;
+                int out = -2;
+                if (opcode == 8) { w->dead = 1; return -1; }   // the server closed
+                if (opcode == 9) ws_frame(w, 10, payload, len < 125 ? len : 125);   // ping: pong
+                else if (opcode == 1 || opcode == 2)
+                {
+                    out = len < max ? len : max;
+                    memcpy(buf, payload, out);
+                    if (text) *text = opcode == 1;
+                }
+                memmove(w->in, w->in + head + len, w->inLen - head - len);
+                w->inLen -= head + len;
+                if (out >= 0) return out > 0 ? out : 0;
+                continue;
+            }
+        }
+        left = ms - (int)(GetTickCount() - t0);
+        r = ws_pump(w, left > 0 ? left : 0);
+        if (r < 0) { w->dead = 1; return -1; }
+        if (r > 0) { ws_take(w); continue; }
+        return 0;
+    }
 }

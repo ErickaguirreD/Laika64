@@ -119,6 +119,9 @@ unsigned char *UiDecodeImage(const unsigned char *enc, long size, int maxW, int 
 // Draws the whole picture stretched over (x, y, w, h), corners rounded by `r`,
 // tinted by `color` (white: as it is; its alpha fades the picture).
 void UiImage(IDirect3DTexture9 *tex, float x, float y, float w, float h, float r, D3DCOLOR color);
+// The same filling the box at its own proportions: a picture of imgW x imgH cut to the box's shape (its
+// middle kept), corners rounded by `r` (a video over a cover of another shape).
+void UiImageFill(IDirect3DTexture9 *tex, float x, float y, float w, float h, float r, float imgW, float imgH, D3DCOLOR color);
 // The reflection of a picture drawn at (x, y - h - gap, w, h): its lower part
 // (`frac` of it) upside down from y, tinted from `top` to `bottom` (fade the
 // alpha to 0 for a mirror floor).
@@ -156,6 +159,8 @@ float UiBrand(float x, float cy, float size);
 // Its width at `size` (UiBrand's), and the logo as large as fits the box
 // (x, y, w, h), centred across it, its bottom on the box's bottom.
 float UiBrandWidth(float size);
+// The logo's mark alone (the wolf in the cube), square, its surroundings clear: made on first use, kept.
+IDirect3DTexture9 *UiLaikaEmblem(void);
 void UiBrandFit(float x, float y, float w, float h);
 
 // ---- Wallpapers (game:\wallpapers\<folder>\, over a skin's background) ----

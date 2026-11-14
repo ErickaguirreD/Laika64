@@ -105,6 +105,10 @@ int ArtReadCover(const char *romPath, int kind, u8 **rgba, int *w, int *h, int *
 // large as maxW x maxH (smaller ones as they are): the cinema view's picture
 // from the game and logo. Read on the calling thread; 0 when there is none.
 int ArtReadPicture(const char *romPath, int kind, int maxW, int maxH, u8 **rgba, int *w, int *h);
+// A ROM's cache key ("NSME": its files' name in the folder below), from its header read now on the
+// calling thread (key: 16 bytes); 0 when the ROM cannot be read. And that folder ("game:\art\games").
+int ArtKeyOf(const char *romPath, char *key);
+const char *ArtFolder(void);
 // A message for the user once ("No network connection", the bulk summary).
 int ArtTakeNote(char *text, int size);
 

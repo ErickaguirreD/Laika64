@@ -1,0 +1,12 @@
+{
+  "name": "laika64-avatars",
+  "private": true,
+  "devDependencies": {
+    "@iconify-json/game-icons": "*",
+    "@resvg/resvg-js": "^2"
+  },
+  "dependencies": {
+    "@twemoji/svg": "^15.0.0",
+    "flag-icons": "^7.6.0"
+  }
+}

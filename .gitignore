@@ -86,3 +86,6 @@ docs-local/
 
 # Box art and game info fetched by tools/fetch_game_art.py (copyrighted pictures: never committed)
 art/games/
+
+# ---- ScreenScraper developer credentials (preview videos): local only, never committed ----
+platform/xbox360/xb_ss_secret.h

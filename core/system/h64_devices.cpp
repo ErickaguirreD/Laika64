@@ -54,6 +54,7 @@ static void vi_advance(H64System *sys)
     {
         sys->vi.frameStart += sys->vi.frameCycles;
         sys->vi.frames++;
+        if (sys->viHook) sys->viHook(sys);
     }
 }
 

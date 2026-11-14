@@ -88,6 +88,15 @@ static DWORD WINAPI update_thread(LPVOID)
     return 0;
 }
 
+int UpdateCheckNow(const char *current, char *version, size_t size)
+{
+    char latest[32];
+    if (!NetStart(0) || !fetch_latest(latest, sizeof(latest))) return -1;
+    strncpy(version, latest, size - 1);
+    version[size - 1] = 0;
+    return newer(latest, current);
+}
+
 void UpdateCheckStart(const char *current)
 {
     if (InterlockedExchange(&s_started, 1)) return;

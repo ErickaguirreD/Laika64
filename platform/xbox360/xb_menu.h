@@ -26,7 +26,8 @@ enum { UI_ICON_NONE = 0, UI_ICON_SYSTEM, UI_ICON_GRAPHICS, UI_ICON_SCREEN, UI_IC
        UI_ICON_POWER, UI_ICON_SLOT, UI_ICON_LOAD, UI_ICON_BATTERY, UI_ICON_SLIDERS, UI_ICON_TEXTURE, UI_ICON_HD,
        UI_ICON_SMOOTH, UI_ICON_SHARP, UI_ICON_BLUR, UI_ICON_CHART, UI_ICON_STRETCH, UI_ICON_CROSSHAIR, UI_ICON_SUN,
        UI_ICON_VSYNC, UI_ICON_EYE, UI_ICON_SCANLINES, UI_ICON_FRAME, UI_ICON_ARROWS_H, UI_ICON_ARROWS_V, UI_ICON_CLOCK,
-       UI_ICON_PALETTE, UI_ICON_GLOBE, UI_ICON_LAYOUT, UI_ICON_MUSIC, UI_ICON_SPEAKERS, UI_ICON_PLUS, UI_ICON_TRASH, UI_ICON_INFO };
+       UI_ICON_PALETTE, UI_ICON_GLOBE, UI_ICON_LAYOUT, UI_ICON_MUSIC, UI_ICON_SPEAKERS, UI_ICON_PLUS, UI_ICON_TRASH, UI_ICON_INFO,
+       UI_ICON_FRIENDS, UI_ICON_CHAT, UI_ICON_PERSON };
 // Sets the icons of a menu's rows in order (n of them, from row 0).
 void UiMenuIcons(UiMenu *m, const unsigned char *icons, int n);
 
@@ -53,7 +54,7 @@ void UiConfirmDraw(int title, int question, int footer);
 
 // ---- Settings (cpu, hle, audio margin, FPS display, the Graphics and Controls pages) ----
 enum { SET_NONE = 0, SET_CHANGED, SET_BACK, SET_SAVE_ALL, SET_SAVE_GAME, SET_ART_ASK, SET_LANGUAGE, SET_PREVIEW, SET_SAVER, SET_WIZARD, SET_PICK_PATH, SET_EXPLORER, SET_ABOUT,
-       SET_PATH_RESET, SET_HIRES_DL, SET_HIRES_PNG, SET_HIRES_HUB, SET_REPORT };
+       SET_PATH_RESET, SET_HIRES_DL, SET_HIRES_PNG, SET_HIRES_HUB, SET_REPORT, SET_ONLINE, SET_SS_ACCOUNT };
 // A question with a few answers in a list: D-pad (or the left stick) up/down, A picks one; B
 // returns -1 when `canSkip` (else B does nothing). `text` may be "" (no paragraph).
 int ChoiceScreen(IDirect3DDevice9 *dev, const char *title, const char *text, const char *const *labels, int n, int sel,
@@ -72,6 +73,8 @@ int SettingsInput(UiMenu *m, Config *c, int perGame, WORD down);
 void PerfStyleApply(const Config *c);
 // The menu settings file where a language change is kept (lang=); "" for none.
 void SettingsSetLangFile(const char *path);
+// The game is played online: the settings that would set this console apart are not shown.
+void SettingsSetOnline(int on);
 
 // A folder chosen among the drives' (game:, Hdd1:, Usb0: ...), opened at `start`: 1 and its
 // path in `out` ("Usb0:\\Games\\N64") when one is taken (Y), 0 when left (B).
@@ -165,5 +168,19 @@ int BatteryCheck(const Config *c, char *msg, int size);
 // the user leaves to the dashboard. Y opens the settings for all games,
 // saved to `settingsPath` (also where the last selection is kept).
 int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char *path, size_t pathSize);
+
+// ---- The on-screen keyboard (the online play's names, codes and chats; main.cpp's quick chat) ----
+// The D-pad moves over the keys, A types, X deletes, Y changes the case (RB a space in a message);
+// kbd_input returns 1 when START takes the text (minLen characters at least).
+enum { KBD_NAME = 0, KBD_DIGITS, KBD_CHAT };
+struct OnlineKbd
+{
+    char *out;
+    int minLen, maxLen, mode, row, col, lower;
+};
+void kbd_init(OnlineKbd *k, char *out, int minLen, int maxLen, int mode);
+int kbd_input(OnlineKbd *k, WORD down);
+void kbd_draw_text(const OnlineKbd *k, float cx, float y, float w, float h, float size);   // between UiBegin and UiEnd
+void kbd_draw_keys(const OnlineKbd *k, float cx, float y, float key, float gap);
 
 #endif

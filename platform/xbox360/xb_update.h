@@ -13,6 +13,9 @@ void UpdateCheckStart(const char *current);
 // to `version`.
 int UpdateCheckTake(char *version, size_t size);
 
+// The same asked now, waiting for the answer (Settings > Online play > Check for updates): 1 when
+// `version` is newer than `current`, 0 when it is not, -1 when GitHub could not be asked.
+int UpdateCheckNow(const char *current, char *version, size_t size);
 // The updater: downloads the release's default.xex (and its .sha1) in a thread,
 // checks it (an XEX2 file of a sane size whose SHA-1 matches), then puts it in
 // place of game:\default.xex, the running one kept as default.xex.bak.

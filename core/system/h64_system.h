@@ -214,6 +214,7 @@ struct H64System
     u8 rumbleMotor[4];   // the motor of each port's Rumble Pak: 1 on (the platform makes the pad vibrate)
     u8 rumblePulse[4];   // set when the motor is turned on; the platform clears it (pulses shorter than a frame)
     void (*padHook)(H64System *sys);   // optional: called just before the PIF reads the controllers
+    void (*viHook)(H64System *sys);    // optional: called as each VI frame begins (the online play's per-frame work)
 
     // ISViewer debug output (cartridge 0x13FF0000).
     u8 isvBuffer[0x200];

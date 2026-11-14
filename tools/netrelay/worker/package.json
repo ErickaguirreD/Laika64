@@ -1,0 +1,5 @@
+{
+  "name": "laika64-online",
+  "private": true,
+  "devDependencies": { "wrangler": "^4" }
+}
