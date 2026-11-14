@@ -52,7 +52,10 @@ struct OnlineUser
     char name[ONLINE_TAG_MAX + 1], country[4], status[44];
     int avatar, online, isFriend;
     int pos, minutes;   // the ranking's
+    int inRoom;         // in a room's lobby (Play online's players)
+    int ms, conn;       // its time to the server and back (0: not known); its connection (ONLINE_CONN_*)
 };
+enum { ONLINE_CONN_NONE = 0, ONLINE_CONN_CABLE, ONLINE_CONN_WIFI };
 enum { ONLINE_LIST_USERS = 0, ONLINE_LIST_FRIENDS, ONLINE_LIST_RANK };
 int OnlineList(int kind, int offset, std::vector<OnlineUser> *out);   // 50 at a time from `offset` (friends: all)
 // add: asks for a friendship (*how "sent", or "accepted" when the other had asked too), else ends one.
@@ -76,6 +79,13 @@ int OnlineNewsGet(const char *lang, std::vector<OnlineNews> *out);
 
 // ---- The thread's ----
 void OnlineSetStatus(const char *game);   // the game being played ("": in the menus), told at the next ping
+int OnlineMyMs(void);                     // this console's time to the server and back, ms (0: not measured yet)
+// The players online read by the thread every few seconds while watched (the pause menu's page, which
+// must not wait for the server): OnlineWatchedUsers gives the last list read - 1, 0 none read yet, -1 none
+// could be read.
+void OnlineWatchUsers(int on);
+int OnlineWatchedUsers(std::vector<OnlineUser> *out);
+int OnlineMyConn(void);                   // ONLINE_CONN_*
 void OnlinePlayed(const char *code, const char *game, int minutes);   // a game just left: sent soon
 // The next notice of the player's news (a friend came online, a friendship asked, a message): 1 with its
 // text in `out`, 0 when there is none. The ROM list and the game show them.
@@ -84,13 +94,19 @@ int OnlineNoticeTake(char *out, size_t size);
 // ---- Public rooms and the general chat ----
 #define ONLINE_ROOM_NAME 24
 #define ONLINE_ROOM_PASS 12
-struct OnlineRoomInfo { unsigned code; char host[ONLINE_TAG_MAX + 1]; int avatar, players, locked; char game[44], name[ONLINE_ROOM_NAME + 4]; };
+// max: the players it is for (2-4); hostMs: the host's time to the server (0: not known); art: its game's box art key
+// (xb_art.cpp ArtKeyOf: "" when not known).
+struct OnlineRoomInfo { unsigned code; char host[ONLINE_TAG_MAX + 1]; int avatar, players, locked, max, hostMs; char game[44], name[ONLINE_ROOM_NAME + 4], art[16]; };
 int OnlineRooms(std::vector<OnlineRoomInfo> *out);   // the rooms waiting for players (locked: a password is asked)
+// A game being played in a room: who plays it, for how long.
+struct OnlineGameInfo { unsigned code; char game[44], art[16]; int seconds, count; char tag[4][ONLINE_TAG_MAX + 1]; };
 struct OnlineChatLine { int id; char tag[ONLINE_TAG_MAX + 1]; int avatar; std::string text; char when[8]; };   // when: "HH:MM", this console's clock
 int OnlineChatGet(int since, std::vector<OnlineChatLine> *out);   // the general chat after message `since` (0: the last ones)
 int OnlineChatSay(const char *text);                              // OnlineError "busy": too soon after the last one
-// The rooms and the general chat after `since` in one request (the Play online screen's).
-int OnlineLobbyGet(int since, std::vector<OnlineRoomInfo> *rooms, std::vector<OnlineChatLine> *chat);
+// The rooms waiting, the games being played, the players online and the general chat after `since` in one
+// request (the Play online screen's).
+int OnlineLobbyGet(int since, std::vector<OnlineRoomInfo> *rooms, std::vector<OnlineGameInfo> *games, std::vector<OnlineUser> *users,
+                   std::vector<OnlineChatLine> *chat);
 
 // ---- A game in a room (the server's): up to four consoles ----
 // Create: a room for a game, its name (and a password: "" for none) - listed in OnlineRooms, a password
@@ -100,7 +116,8 @@ int OnlineLobbyGet(int since, std::vector<OnlineRoomInfo> *rooms, std::vector<On
 // -1 the room is over (OnlineError: "none" no such room, "full", "started", "closed" the host left,
 // "expired", "busy", "old" another LAIKA version, "auth", "password", "kicked" the host put it out, "net").
 // main.cpp takes the connection for the game (OnlineRoomTake: NULL when there is none; it closes it with
-// NetWsClose).
+// NetWsClose) - or gives it back (OnlineRoomGiveBack) when the player goes back to the room's lobby: the
+// room stays, with the same players, and the ROM list opens its lobby again (OnlineRoomBack).
 #define ONLINE_ROOM_PLAYERS 4
 #define ONLINE_ROOM_CHAT 8   // chat lines kept
 struct NetWs;
@@ -111,6 +128,10 @@ struct OnlineLobby
     char tag[ONLINE_ROOM_PLAYERS][ONLINE_TAG_MAX + 1];
     int avatar[ONLINE_ROOM_PLAYERS];
     int rtt[ONLINE_ROOM_PLAYERS];                     // each one's time to the server and back, ms (0: not known)
+    char country[ONLINE_ROOM_PLAYERS][4];             // each one's country ("MX"; "--": not known)
+    int conn[ONLINE_ROOM_PLAYERS];                    // ... and connection (ONLINE_CONN_*)
+    int local[ONLINE_ROOM_PLAYERS];                   // ... and how many play on it (1-3)
+    int players;                                      // all of them (the room's places they take)
     int myRtt;                                        // this console's (measured here)
     int countdown;                                    // the host started: the game in this many seconds from countAt (0: not)
     unsigned countAt;                                 // GetTickCount of the countdown's start
@@ -118,17 +139,23 @@ struct OnlineLobby
     char game[44];                                    // the room's game: its name and header CRCs
     u32 crc1, crc2;
     int haveGame;
-    int startPlayers, startPort;
+    int max;                                          // the players it is for (2-4)
+    int startPlayers, startPort, startLocal;
+    unsigned char startOwner[ONLINE_ROOM_PLAYERS + 1];   // each port's console (its first port)
     std::vector<OnlineChatLine> chat;                 // the room's last messages, the newest last
 };
-int OnlineRoomCreate(const char *name, const char *password, const char *game, u32 crc1, u32 crc2, unsigned *code);
+int OnlineRoomCreate(const char *name, const char *password, const char *game, u32 crc1, u32 crc2, const char *art, int max, unsigned *code);
 int OnlineRoomJoin(unsigned code, const char *password);
 int OnlineRoomPoll(void);
 const OnlineLobby *OnlineRoomLobby(void);
 int OnlineRoomSay(const char *text);
 int OnlineRoomStart(void);   // the host only, with two players at least (a countdown, then the game)
 int OnlineRoomKick(int place);   // the host only, before the game: that player out of the room (it may come back)
+int OnlineRoomNewPlayer(char *tag, size_t size);   // 1 once after a player came into the room, its gamertag in `tag` (the lobby's alert)
 void OnlineRoomClose(void);
-NetWs *OnlineRoomTake(int *port, int *players);
+int OnlineRoomLocal(int count);   // how many play on this console (1-3), before the game: refused when the room has no places
+NetWs *OnlineRoomTake(int *port, int *players, int *local, unsigned char *owner);   // owner: ONLINE_ROOM_PLAYERS + 1 entries
+void OnlineRoomGiveBack(NetWs *w);   // the game's connection back: "back" said, the room's lobby again
+int OnlineRoomBack(void);            // a room given back and still open (its lobby to show)
 
 #endif

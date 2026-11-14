@@ -1957,7 +1957,8 @@ static float button_glyph(float x, float cy, const char *name, int draw)
     }
 }
 
-static float footer_impl(float x, float cy, const char *hints, int draw)
+// `glow`: the button that pulses with a soft light around it (the ROM list's START, Online), or NULL.
+static float footer_impl(float x, float cy, const char *hints, int draw, const char *glow = NULL)
 {
     char buf[256], *item, *nextItem;
     float x0 = x;
@@ -1977,7 +1978,16 @@ static float footer_impl(float x, float cy, const char *hints, int draw)
         {
             nextBtn = strchr(btn, '/');
             if (nextBtn) *nextBtn++ = 0;
-            x += button_glyph(x, cy, btn, draw);
+            if (draw && glow && !strcmp(btn, glow))
+            {
+                // A slow breath (1.6 s): the light around it swells and fades, the button's edge with it.
+                const float bw = button_glyph(x, cy, btn, 0), a = 0.5f - 0.5f * cosf(UiTime() * 3.9f);
+                UiShadow(x - 6, cy - PILL_H * 0.5f - 6, bw + 12, PILL_H + 12, PILL_H * 0.5f + 6, 16, with_alpha(UI_COL_ACCENT_HI, 0.25f + 0.6f * a));
+                button_glyph(x, cy, btn, 1);
+                UiRoundRing(x, cy - PILL_H * 0.5f, bw, PILL_H, PILL_H * 0.5f, 2.0f, with_alpha(UI_COL_ACCENT_HI, 0.35f + 0.65f * a));
+                x += bw;
+            }
+            else x += button_glyph(x, cy, btn, draw);
             if (nextBtn && *nextBtn) x += 6;
         }
         if (label)
@@ -1997,6 +2007,12 @@ void UiScreenFooter(const char *hints)
 {
     UiRect(UI_SAFE_X, 636, UI_WIDTH - 2 * UI_SAFE_X, 1, UI_COL_LINE);
     UiFooter(UI_SAFE_X, 664, hints);
+}
+
+void UiScreenFooterGlow(const char *hints, const char *glow)
+{
+    UiRect(UI_SAFE_X, 636, UI_WIDTH - 2 * UI_SAFE_X, 1, UI_COL_LINE);
+    footer_impl(UI_SAFE_X, 664, hints, 1, glow);
 }
 
 // ---- Notifications ----

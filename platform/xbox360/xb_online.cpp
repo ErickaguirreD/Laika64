@@ -14,7 +14,8 @@
 #define ONLINE_SERVER "laika64.laikaemu.workers.dev"   // LAIKA 64's own (online.txt's server= names another)
 #define ONLINE_ANSWER_MS 8000
 #define ONLINE_PING_MS 90000        // the server calls a player online for 5 minutes after one (the news come with it)
-#define ONLINE_PROTO 2              // main.cpp NET_PROTO
+#define ONLINE_PROTO 5              // the rooms' (the server's PROTOCOLS): 3 has their size and "back" to the lobby, 4 each
+                                    // player's country and connection, 5 two or three playing on one console
 
 static OnlineProfile s_me;
 static char s_file[96];             // <drive>:\config\online.txt
@@ -27,6 +28,9 @@ static std::map<std::string, int> s_friendOnline;   // per friend: online at the
 static std::vector<std::string> s_askedSeen;        // friendships asked already told
 static int s_dmSeen;                                // the last message told
 static char s_status[44];
+static volatile int s_myMs;         // this console's time to the server and back (the thread measures it)
+static volatile int s_inRoom;       // a room's lobby is open (told with the ping: "in a room" for the others)
+static int s_roomRtt;               // ... and the time its pings measured, ms
 struct Played { char code[24], game[44]; int minutes; };
 static std::vector<Played> s_played;
 static HANDLE s_thread;
@@ -257,6 +261,8 @@ int OnlineList(int kind, int offset, std::vector<OnlineUser> *out)
             u.online = atoi(field(rows[k], 3).c_str());
             copy(u.status, sizeof(u.status), field(rows[k], 4).c_str());
             u.isFriend = atoi(field(rows[k], 5).c_str());
+            u.ms = atoi(field(rows[k], 6).c_str());
+            u.conn = atoi(field(rows[k], 7).c_str());
         }
         if (u.name[0]) out->push_back(u);
     }
@@ -403,6 +409,15 @@ static void ping_news(const std::vector<std::string> &rows)
                 s_notices.push_back(t);
             }
         }
+        else if (kind == "c")
+        {
+            // The country the server sees this console in (the profile's, found by itself).
+            if (name.size() == 2 && _stricmp(name.c_str(), s_me.country))
+            {
+                copy(s_me.country, sizeof(s_me.country), name.c_str());
+                profile_write();
+            }
+        }
         else if (kind == "m")
         {
             const int id = atoi(name.c_str());
@@ -484,18 +499,100 @@ void OnlinePlayed(const char *code, const char *game, int minutes)
     LeaveCriticalSection(&s_lock);
 }
 
+int OnlineMyMs(void) { return s_inRoom && s_roomRtt ? s_roomRtt : s_myMs; }
+
+int OnlineMyConn(void)
+{
+    const DWORD link = XNetGetEthernetLinkStatus();
+    if (!(link & XNET_ETHERNET_LINK_ACTIVE)) return ONLINE_CONN_NONE;
+    return (link & XNET_ETHERNET_LINK_WIRELESS) ? ONLINE_CONN_WIFI : ONLINE_CONN_CABLE;
+}
+
+// The time to the server and back: the quickest of two answers without work (whereami) on a connection
+// already made by a first one - the handshake not counted. 0 when it could not be reached.
+static int measure_ms(char *err)
+{
+    int best = 0, k;
+    if (!request("whereami", std::string(), NULL, NULL, err)) return 0;
+    for (k = 0; k < 2; k++)
+    {
+        const DWORD t0 = GetTickCount();
+        int ms;
+        if (!request("whereami", std::string(), NULL, NULL, err)) break;
+        ms = (int)(GetTickCount() - t0);
+        if (ms < 1) ms = 1;
+        if (!best || ms < best) best = ms;
+    }
+    return best;
+}
+
+// The players online, read by the thread every few seconds while a screen watches them (the pause menu's).
+#define ONLINE_WATCH_MS 8000
+static volatile int s_watch;
+static DWORD s_watchAt;
+static std::vector<OnlineUser> s_watched;   // under s_lock
+static int s_watchState;                    // 0 not read yet, 1 read, -1 could not be read
+static int user_row(const std::string &r, OnlineUser *u);
+
+void OnlineWatchUsers(int on)
+{
+    if (!s_thread) return;
+    EnterCriticalSection(&s_lock);
+    if (on && !s_watch) { s_watchAt = GetTickCount(); s_watchState = 0; s_watched.clear(); }
+    s_watch = on;
+    LeaveCriticalSection(&s_lock);
+}
+
+int OnlineWatchedUsers(std::vector<OnlineUser> *out)
+{
+    int st;
+    if (!s_thread) { out->clear(); return -1; }
+    EnterCriticalSection(&s_lock);
+    *out = s_watched;
+    st = s_watchState;
+    LeaveCriticalSection(&s_lock);
+    return st;
+}
+
+static void watch_read(void)
+{
+    std::vector<std::string> rows;
+    std::vector<OnlineUser> users;
+    std::string q;
+    char err[sizeof(s_error)];
+    size_t k;
+    add(&q, "since", 0x7FFFFFFF);   // the general chat not wanted
+    const int ok = request_me("lobby", q, &rows, err);
+    for (k = 0; ok && k < rows.size(); k++)
+    {
+        OnlineUser u;
+        if (!rows[k].compare(0, 2, "U\t") && user_row(rows[k], &u)) users.push_back(u);
+    }
+    EnterCriticalSection(&s_lock);
+    if (ok) s_watched.swap(users);
+    if (ok || s_watchState <= 0) s_watchState = ok ? 1 : -1;   // a list already read stays when one read fails
+    LeaveCriticalSection(&s_lock);
+}
+
 static DWORD WINAPI online_thread(LPVOID)
 {
     DWORD pingAt = GetTickCount();   // the first one at once
     char sent[44] = "\1";            // the status last told (never this one)
+    int sentRoom = -1;               // ... and whether in a room
     for (;;)
     {
         char status[44], err[sizeof(s_error)];
         std::string q;
         Played p;
         int have = 0;
-        Sleep(2000);
+        Sleep(s_watch ? 250 : 2000);
         if (!OnlineRegistered() || !s_me.server[0]) continue;
+        if (s_watch && (int)(GetTickCount() - s_watchAt) >= 0)
+        {
+            watch_read();
+            s_watchAt = GetTickCount() + ONLINE_WATCH_MS;
+            continue;
+        }
         EnterCriticalSection(&s_lock);
         strcpy(status, s_status);
         if (!s_played.empty()) { p = s_played[0]; have = 1; }
@@ -515,14 +612,21 @@ static DWORD WINAPI online_thread(LPVOID)
             else Sleep(ONLINE_PING_MS / 4);
             continue;
         }
-        if ((int)(GetTickCount() - pingAt) < 0 && !strcmp(status, sent)) continue;
-        add(&q, "status", status);
-        add(&q, "since", s_dmSeen);
+        if ((int)(GetTickCount() - pingAt) < 0 && !strcmp(status, sent) && sentRoom == s_inRoom) continue;
         {
+            // In a room its own pings measure the time; in a game none is measured (the game's time is not to be taken).
+            const int room = s_inRoom, ms = room && s_roomRtt ? s_roomRtt : status[0] ? s_myMs : measure_ms(err);
             std::vector<std::string> rows;
+            if (ms) s_myMs = ms;
+            add(&q, "status", status);
+            add(&q, "since", s_dmSeen);
+            add(&q, "ms", s_myMs);
+            add(&q, "conn", OnlineMyConn());
+            add(&q, "room", room);
             if (request_me("ping", q, &rows, err))
             {
                 strcpy(sent, status);
+                sentRoom = room;
                 ping_news(rows);
             }
         }
@@ -593,12 +697,30 @@ int OnlineChatGet(int since, std::vector<OnlineChatLine> *out)
     return 1;
 }
 
-int OnlineLobbyGet(int since, std::vector<OnlineRoomInfo> *rooms, std::vector<OnlineChatLine> *chat)
+// A player online of /v1/lobby: "U name country avatar status room ms conn". 1 when it names one.
+static int user_row(const std::string &r, OnlineUser *u)
+{
+    memset(u, 0, sizeof(*u));
+    copy(u->name, sizeof(u->name), field(r, 1).c_str());
+    copy(u->country, sizeof(u->country), field(r, 2).c_str());
+    u->avatar = atoi(field(r, 3).c_str()) % ONLINE_AVATARS;
+    copy(u->status, sizeof(u->status), field(r, 4).c_str());
+    u->inRoom = atoi(field(r, 5).c_str());
+    u->ms = atoi(field(r, 6).c_str());
+    u->conn = atoi(field(r, 7).c_str());
+    u->online = 1;
+    return u->name[0] != 0;
+}
+
+int OnlineLobbyGet(int since, std::vector<OnlineRoomInfo> *rooms, std::vector<OnlineGameInfo> *games, std::vector<OnlineUser> *users,
+                   std::vector<OnlineChatLine> *chat)
 {
     std::vector<std::string> rows;
     std::string q;
     size_t k;
     rooms->clear();
+    games->clear();
+    users->clear();
     chat->clear();
     add(&q, "since", since);
     if (!request_me("lobby", q, &rows)) return 0;
@@ -607,7 +729,7 @@ int OnlineLobbyGet(int since, std::vector<OnlineRoomInfo> *rooms, std::vector<On
         const std::string &r = rows[k];
         if (!r.compare(0, 2, "R\t"))
         {
-            // R code host avatar players game name locked
+            // R code host avatar players game name locked max hostms
             OnlineRoomInfo m;
             memset(&m, 0, sizeof(m));
             m.code = (unsigned)atoi(field(r, 1).c_str());
@@ -617,8 +739,37 @@ int OnlineLobbyGet(int since, std::vector<OnlineRoomInfo> *rooms, std::vector<On
             copy(m.game, sizeof(m.game), field(r, 5).c_str());
             copy(m.name, sizeof(m.name), field(r, 6).c_str());
             m.locked = atoi(field(r, 7).c_str());
+            m.max = atoi(field(r, 8).c_str());
+            if (m.max < 2 || m.max > ONLINE_ROOM_PLAYERS) m.max = ONLINE_ROOM_PLAYERS;
+            m.hostMs = atoi(field(r, 9).c_str());
+            copy(m.art, sizeof(m.art), field(r, 10).c_str());
             if (!m.name[0]) copy(m.name, sizeof(m.name), m.host);
             if (m.code) rooms->push_back(m);
+        }
+        else if (!r.compare(0, 2, "G\t"))
+        {
+            // G code game seconds tag,tag...
+            OnlineGameInfo g;
+            const std::string tags = field(r, 4);
+            size_t at = 0, comma;
+            memset(&g, 0, sizeof(g));
+            g.code = (unsigned)atoi(field(r, 1).c_str());
+            copy(g.game, sizeof(g.game), field(r, 2).c_str());
+            g.seconds = atoi(field(r, 3).c_str());
+            copy(g.art, sizeof(g.art), field(r, 5).c_str());
+            while (at < tags.size() && g.count < 4)
+            {
+                comma = tags.find(',', at);
+                copy(g.tag[g.count++], sizeof(g.tag[0]), tags.substr(at, comma == std::string::npos ? comma : comma - at).c_str());
+                if (comma == std::string::npos) break;
+                at = comma + 1;
+            }
+            if (g.code && g.count) games->push_back(g);
+        }
+        else if (!r.compare(0, 2, "U\t"))
+        {
+            OnlineUser u;
+            if (user_row(r, &u)) users->push_back(u);
         }
         else if (!r.compare(0, 2, "C\t"))
         {
@@ -649,11 +800,27 @@ int OnlineChatSay(const char *text)
 static NetWs *s_room;
 static OnlineLobby s_lobby;
 static DWORD s_roomPingAt;          // the next ping to the server (its answer gives this console's time)
+static int s_back;                  // the room was given back by the game (OnlineRoomBack)
+static int s_pongs;                 // the server's answers to this console's pings since the room opened
+static DWORD s_roomAt;              // when the room opened (its first pings every second)
+static int s_newPlayer;             // a player came into the room (OnlineRoomNewPlayer) ...
+static char s_newTag[ONLINE_TAG_MAX + 1];   // ... this one
+
+int OnlineRoomNewPlayer(char *tag, size_t size)
+{
+    const int n = s_newPlayer;
+    if (n && tag && size) copy(tag, size, s_newTag);
+    s_newPlayer = 0;
+    return n;
+}
 
 void OnlineRoomClose(void)
 {
     if (s_room) NetWsClose(s_room);   // the server tells the others
     s_room = NULL;
+    s_inRoom = s_back = s_newPlayer = 0;
+    s_roomRtt = 0;
+    s_lobby.max = 0;
     s_lobby.code = 0;
     s_lobby.count = s_lobby.mine = s_lobby.haveGame = s_lobby.startPlayers = s_lobby.startPort = 0;
     s_lobby.myRtt = s_lobby.countdown = 0;
@@ -695,20 +862,37 @@ static int room_line(char *line)
         s_lobby.crc2 = (u32)strtoul(f[2].c_str(), NULL, 16);
         copy(s_lobby.game, sizeof(s_lobby.game), f[3].c_str());
         copy(s_lobby.name, sizeof(s_lobby.name), f.size() >= 5 ? f[4].c_str() : f[3].c_str());
+        s_lobby.max = f.size() >= 6 ? atoi(f[5].c_str()) : ONLINE_ROOM_PLAYERS;
+        if (s_lobby.max < 2 || s_lobby.max > ONLINE_ROOM_PLAYERS) s_lobby.max = ONLINE_ROOM_PLAYERS;
         s_lobby.haveGame = 1;
         return 1;
     }
+    if (f[0] == "status" || f[0] == "p2p") return 0;   // the game's words, left from it after "back"
     if (f[0] == "players" && f.size() >= 2)
     {
         size_t k;
+        const int was = s_lobby.count;
         s_lobby.mine = atoi(f[1].c_str());
         s_lobby.count = 0;
-        for (k = 2; k + 2 < f.size() && s_lobby.count < ONLINE_ROOM_PLAYERS; k += 3)
+        // Each console: tag avatar ms country conn local.
+        s_lobby.players = 0;
+        for (k = 2; k + 5 < f.size() && s_lobby.count < ONLINE_ROOM_PLAYERS; k += 6)
         {
+            s_lobby.local[s_lobby.count] = atoi(f[k + 5].c_str());
+            if (s_lobby.local[s_lobby.count] < 1 || s_lobby.local[s_lobby.count] > 3) s_lobby.local[s_lobby.count] = 1;
+            s_lobby.players += s_lobby.local[s_lobby.count];
             copy(s_lobby.tag[s_lobby.count], sizeof(s_lobby.tag[0]), f[k].c_str());
             s_lobby.avatar[s_lobby.count] = atoi(f[k + 1].c_str());
             s_lobby.rtt[s_lobby.count] = atoi(f[k + 2].c_str());
+            copy(s_lobby.country[s_lobby.count], sizeof(s_lobby.country[0]), f[k + 3].c_str());
+            s_lobby.conn[s_lobby.count] = atoi(f[k + 4].c_str());
             s_lobby.count++;
+        }
+        // One more than there were (not this console's own first list, not the others coming back from a game).
+        if (was > 0 && s_lobby.count > was)
+        {
+            s_newPlayer = 1;
+            copy(s_newTag, sizeof(s_newTag), s_lobby.tag[s_lobby.count - 1]);   // the server puts who came last
         }
         return 1;
     }
@@ -721,6 +905,8 @@ static int room_line(char *line)
         for (size_t k = 0; k < (size_t)s_lobby.count; k++)
             if (!strcmp(s_lobby.tag[k], m.tag)) m.avatar = s_lobby.avatar[k];
         m.text = f[2];
+        // A quick chat text of the game's ("@q<n>", main.cpp's 8): in this console's language.
+        if (m.text.size() == 3 && m.text[0] == '@' && m.text[1] == 'q' && m.text[2] >= '0' && m.text[2] < '8') m.text = Tr(T_QC_1 + (m.text[2] - '0'));
         chat_when(m.when, 0);
         s_lobby.chat.push_back(m);
         if (s_lobby.chat.size() > ONLINE_ROOM_CHAT) s_lobby.chat.erase(s_lobby.chat.begin());
@@ -731,9 +917,12 @@ static int room_line(char *line)
         // This console's time to the server and back, told to it (the others see it beside its name).
         char line[24];
         const int ms = (int)(GetTickCount() - (DWORD)strtoul(f[1].c_str(), NULL, 10));
-        if (ms >= 0 && ms < 10000)
+        // The first answer (the connection just made, the room just woken) is slow: not counted. Then a quicker
+        // time is taken at once and a slower one slowly - a moment's delay does not show as the time.
+        if (ms >= 0 && ms < 10000 && ++s_pongs > 1)
         {
-            s_lobby.myRtt = s_lobby.myRtt ? (s_lobby.myRtt * 3 + ms) / 4 : ms;
+            s_lobby.myRtt = !s_lobby.myRtt ? ms : ms < s_lobby.myRtt ? (s_lobby.myRtt + ms * 3) / 4 : (s_lobby.myRtt * 3 + ms) / 4;
+            s_roomRtt = s_lobby.myRtt;
             _snprintf(line, sizeof(line), "rtt\t%d", s_lobby.myRtt);
             NetWsSend(s_room, line, (int)strlen(line), 1);
         }
@@ -747,8 +936,21 @@ static int room_line(char *line)
     }
     if (f[0] == "start" && f.size() >= 3)
     {
+        // start players port local owners (each port's console, "1,1,3")
+        size_t at = 0;
+        int p = 1;
         s_lobby.startPlayers = atoi(f[1].c_str());
         s_lobby.startPort = atoi(f[2].c_str());
+        s_lobby.startLocal = f.size() >= 4 ? atoi(f[3].c_str()) : 1;
+        memset(s_lobby.startOwner, 0, sizeof(s_lobby.startOwner));
+        for (p = 1; p <= ONLINE_ROOM_PLAYERS; p++) s_lobby.startOwner[p] = (unsigned char)p;
+        for (p = 1; f.size() >= 5 && at < f[4].size() && p <= ONLINE_ROOM_PLAYERS; p++)
+        {
+            const size_t comma = f[4].find(',', at);
+            s_lobby.startOwner[p] = (unsigned char)atoi(f[4].substr(at, comma == std::string::npos ? comma : comma - at).c_str());
+            if (comma == std::string::npos) break;
+            at = comma + 1;
+        }
         return 2;
     }
     if (!strncmp(line, "created ", 8)) { s_lobby.code = (unsigned)atoi(line + 8); return 1; }
@@ -762,9 +964,15 @@ int OnlineRoomPoll(void)
     if (s_room && (int)(GetTickCount() - s_roomPingAt) >= 0)
     {
         char line[24];
+        if (!s_roomPingAt && !s_lobby.myRtt && OnlineMyMs())
+        {
+            // To start with, the time the thread measured: the others see one at once.
+            _snprintf(line, sizeof(line), "rtt\t%d", OnlineMyMs());
+            NetWsSend(s_room, line, (int)strlen(line), 1);
+        }
         _snprintf(line, sizeof(line), "ping\t%u", (unsigned)GetTickCount());
         NetWsSend(s_room, line, (int)strlen(line), 1);
-        s_roomPingAt = GetTickCount() + 2000;
+        s_roomPingAt = GetTickCount() + (GetTickCount() - s_roomAt < 10000 ? 1000 : 2000);
     }
     while (s_room)
     {
@@ -791,8 +999,12 @@ static int room_open(const std::string &query)
     add(&q, "g", s_me.tag);
     add(&q, "t", s_me.token);
     add(&q, "proto", ONLINE_PROTO);
+    add(&q, "conn", OnlineMyConn());   // cable or Wi-Fi, shown to the others in the room
     path += "&" + q;
     s_room = s_me.server[0] ? NetWsOpen(s_me.server, path.c_str()) : NULL;
+    s_inRoom = s_room != NULL;
+    s_roomAt = GetTickCount();
+    s_pongs = 0;
     return s_room != NULL;
 }
 
@@ -814,7 +1026,7 @@ static int room_wait(const char *want, int ms)
     return 0;
 }
 
-int OnlineRoomCreate(const char *name, const char *password, const char *game, u32 crc1, u32 crc2, unsigned *code)
+int OnlineRoomCreate(const char *name, const char *password, const char *game, u32 crc1, u32 crc2, const char *art, int max, unsigned *code)
 {
     std::string q;
     char hex[12];
@@ -826,6 +1038,8 @@ int OnlineRoomCreate(const char *name, const char *password, const char *game, u
     add(&q, "crc1", hex);
     _snprintf(hex, sizeof(hex), "%08X", crc2);
     add(&q, "crc2", hex);
+    add(&q, "max", max);
+    add(&q, "art", art);
     if (!room_open(q) || !room_wait("created", ONLINE_ANSWER_MS)) return 0;
     *code = s_lobby.code;
     return 1;
@@ -861,13 +1075,38 @@ int OnlineRoomKick(int place)
     return s_room && NetWsSend(s_room, line, (int)strlen(line), 1);
 }
 
-NetWs *OnlineRoomTake(int *port, int *players)
+int OnlineRoomLocal(int count)
+{
+    char line[16];
+    _snprintf(line, sizeof(line), "local\t%d", count);
+    return s_room && NetWsSend(s_room, line, (int)strlen(line), 1);
+}
+
+NetWs *OnlineRoomTake(int *port, int *players, int *local, unsigned char *owner)
 {
     NetWs *w = s_room;
     *port = s_lobby.startPort;
     *players = s_lobby.startPlayers;
+    *local = s_lobby.startLocal > 0 ? s_lobby.startLocal : 1;
+    memcpy(owner, s_lobby.startOwner, ONLINE_ROOM_PLAYERS + 1);
     if (!w || *port < 1 || *players < 2) { *port = *players = 0; return NULL; }
+    // The game's now; the lobby's name, game and chat kept for OnlineRoomGiveBack.
     s_room = NULL;
-    OnlineRoomClose();
+    s_inRoom = s_back = 0;
     return w;
 }
+
+void OnlineRoomGiveBack(NetWs *w)
+{
+    if (!w) return;
+    if (s_room) NetWsClose(s_room);
+    s_room = w;
+    NetWsSend(s_room, "back", 4, 1);   // out of the game: the others are told, the lobby's lines come again
+    s_inRoom = s_back = 1;
+    s_lobby.startPlayers = s_lobby.startPort = s_lobby.countdown = 0;
+    s_lobby.countAt = 0;
+    s_roomPingAt = 0;
+    s_roomAt = GetTickCount();
+}
+
+int OnlineRoomBack(void) { return s_room && s_back; }

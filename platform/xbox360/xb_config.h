@@ -110,6 +110,7 @@ struct Config
     int descTranslate;  // desctr=0|1: the games' descriptions in the menus' language when there is one (default 1)
     int gameBackdrop;   // gamebg=0|1: a picture from the selected game behind the game list, in every view (default 0)
     int videoBackdrop;  // videobg=0|1: the selected game's preview video there instead of over its picture (default 0; not with gamebg)
+    int hideHints;      // hidehints=0|1: the ROM list without its button prompts at the bottom (default 0)
     int wallRecommend;  // wallrec=1: the background shows one of your games at a time, its big cover and what it is about
     int borderColor;    // bordercolor=0..13: the menus' edges - the selection's colour (0), or xb_menu.cpp's swatches
     int borderOpacity;  // borderopacity=0..100: how strong the edges are, in % (default 100)

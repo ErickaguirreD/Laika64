@@ -1579,15 +1579,23 @@ int ArtKindFor(const char *romPath)
 int ArtReadCover(const char *romPath, int kind, u8 **rgba, int *w, int *h, int *gotKind)
 {
     H64Rom rom;
-    char key[16], png[128];
-    ArtResult r;
-    u8 *data;
-    u32 len;
+    char key[16];
     *rgba = NULL;
     // Its own header read and file reads, like ArtReadInfo: nothing of the worker's is touched.
     if (!s_started || !RomReadHeader(romPath, &rom)) return 0;
     h64_gameinfo_key(rom.gameCode, rom.crc1, key);
     h64_rom_free(&rom);
+    return ArtReadCoverKey(key, kind, rgba, w, h, gotKind);
+}
+
+int ArtReadCoverKey(const char *key, int kind, u8 **rgba, int *w, int *h, int *gotKind)
+{
+    char png[128];
+    ArtResult r;
+    u8 *data;
+    u32 len;
+    *rgba = NULL;
+    if (!s_started || !key[0]) return 0;
     if (kind < 0 || kind >= ART_KIND_COUNT) kind = ART_KIND_BOX;
     art_path(key, s_kindPng[kind], png, sizeof(png));
     if (kind != ART_KIND_BOX && !file_exists(png))

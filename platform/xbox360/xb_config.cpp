@@ -159,6 +159,7 @@ void ConfigDefaults(Config *c)
     c->descTranslate = 1;
     c->gameBackdrop = 0;
     c->videoBackdrop = 0;
+    c->hideHints = 0;
     c->texFilter = 1;
     c->hiTex = 1;
     c->hiTexFile[0] = 0;
@@ -221,6 +222,7 @@ int ConfigParseFile(Config *c, const char *path)
         if (!strcmp(line, "previewvideo")) c->previewVideo = atoi(eq + 1) ? 1 : 0;
         if (!strcmp(line, "previewsound")) c->previewSound = atoi(eq + 1) ? 1 : 0;
         if (!strcmp(line, "videobg")) c->videoBackdrop = atoi(eq + 1) ? 1 : 0;
+        if (!strcmp(line, "hidehints")) c->hideHints = atoi(eq + 1) ? 1 : 0;
         if (!strcmp(line, "ssuser")) { strncpy(c->ssUser, eq + 1, sizeof(c->ssUser) - 1); c->ssUser[sizeof(c->ssUser) - 1] = 0; }
         if (!strcmp(line, "sspass")) { strncpy(c->ssPass, eq + 1, sizeof(c->ssPass) - 1); c->ssPass[sizeof(c->ssPass) - 1] = 0; }
         if (!strcmp(line, "panelcolor")) c->panelColor = atoi(eq + 1);
@@ -496,7 +498,7 @@ int ConfigWriteMenuKeys(const Config *c, const char *path, int withLastRom)
         fprintf(f, "selcolor=%d\nwallinterval=%d\nwalltransition=%d\nwalldim=%d\nsavermode=%d\nsavertime=%d\n", c->selColor, c->wallInterval,
                 c->wallTransition, c->wallDim, c->saverMode, c->saverTime);
     if (withLastRom) fprintf(f, "wallcustom=%d\nuisoundstyle=%d\nartkind=%d\n", c->wallCustom, c->uiSoundStyle, c->artKind);
-    if (withLastRom) fprintf(f, "previewvideo=%d\npreviewsound=%d\nvideobg=%d\n", c->previewVideo, c->previewSound, c->videoBackdrop);
+    if (withLastRom) fprintf(f, "previewvideo=%d\npreviewsound=%d\nvideobg=%d\nhidehints=%d\n", c->previewVideo, c->previewSound, c->videoBackdrop, c->hideHints);
     if (withLastRom && c->ssUser[0]) fprintf(f, "ssuser=%s\nsspass=%s\n", c->ssUser, c->ssPass);
     fprintf(f, "uifont=%d\ncolorstyle=%d\n", c->uiFont, c->colorStyle);
     {

@@ -218,6 +218,7 @@ float UiFooter(float x, float cy, const char *hints);
 float UiFooterWidth(const char *hints);
 // The footer of a full screen: a fine line and the prompts in the safe area.
 void UiScreenFooter(const char *hints);
+void UiScreenFooterGlow(const char *hints, const char *glow);   // the same, button `glow` ("START") pulsing with a soft light
 
 // ---- Notifications ----
 // A toast at the bottom centre; `age` and `life` in ms (it slides in and fades out).

@@ -1067,12 +1067,23 @@ static double QpcMs(void);
 // A message's type: its low bytes; the server puts the sender's port in the top byte (0: directly, the other console).
 enum { NM_HELLO = 1, NM_INPUT, NM_HASH, NM_BYE, NM_PING, NM_PONG, NM_INPUT2 };   // a ping's a: its sender's tick; a pong's b: who it answers
 // NM_INPUT2: the inputs of two reads in one message (the room's: half the messages the server counts), a and a + 1 in b and c.
+// A type's third byte: which of the sender's ports an input is of (0: its first, 1 the next...).
+#define NET_KIND(t) ((t) & 0xFFFF)
+#define NET_SUB(t) (((t) >> 16) & 0xFF)
 struct NetMsg { u32 type, a, b, c; };   // big-endian on every end
 static SOCKET s_netSock = INVALID_SOCKET;   // the other console, directly (netplay.txt) ...
 static NetWs *s_netWs;                      // ... or the server's room (Settings > Online play)
+static int s_toRoom;                        // the pause menu's Back to the room: the game ends, the room's lobby again
 static char s_netPeer[64];
-static int s_netPort;               // this console's port (1..s_netPlayers)
+static int s_netPort;               // this console's (first) port (1..s_netPlayers)
 static int s_netPlayers;            // ports played (2..NET_PLAYERS)
+// Two or three may play on one console (a room's, its controllers 1..s_netLocal on its ports s_netPort...): each
+// port is owned by the console whose first port that is (s_netOwner), which sends its input; a console is known
+// by its first port everywhere else (its hello, hashes, pings, the way to it directly, its leaving).
+static int s_netLocal = 1;
+static u8 s_netOwner[NET_PLAYERS + 1];
+#define NET_MINE(p) (s_netOwner[p] == s_netPort)
+#define NET_CONSOLE(p) (s_netOwner[p] == (p))
 static int s_netHiTex = -1;         // Config::hiTex as it was before an online game turned it off (-1: not changed)
 static u32 s_netDelay = 3;
 static u32 s_netReads;              // controller reads so far
@@ -1093,7 +1104,7 @@ static DWORD s_netPingAt;                   // the next ping (one a second, as t
 #define NET_P2P_PUNCH_MS 3000       // probing each other's addresses
 #define NET_P2P_AGREE_MS 2500       // waiting for every console's verdict
 #define NET_P2P_QUIET_MS 1500       // nothing directly from a console this long: back to the room
-#define NET_P2P_REPEAT 4            // the last input messages repeated in each packet (a lost one costs nothing)
+#define NET_P2P_REPEAT 8            // the last input messages repeated in each packet (a lost one costs nothing; one per port played here)
 static int s_netP2p;                        // the game's messages go directly
 static int s_netP2pOpen;                    // the UDP socket is open (directly, or trying)
 static int s_netP2pOk[NET_PLAYERS + 1];     // per port: its verdict, the ports it reaches (+1; 0: not told yet)
@@ -1173,7 +1184,7 @@ static int NetSend(u32 type, u32 a, u32 b, u32 c)
         int k, n = 0;
         pkt[n++] = m;
         for (k = 0; k < s_netP2pHistN; k++) pkt[n++] = s_netP2pHist[k];
-        if (type == NM_INPUT || type == NM_INPUT2)
+        if (NET_KIND(type) == NM_INPUT || NET_KIND(type) == NM_INPUT2)
         {
             memmove(s_netP2pHist + 1, s_netP2pHist, sizeof(s_netP2pHist[0]) * (NET_P2P_REPEAT - 1));
             s_netP2pHist[0] = m;
@@ -1200,20 +1211,20 @@ static int NetSend(u32 type, u32 a, u32 b, u32 c)
     return sent == (int)sizeof(m);
 }
 
-// The port a message is from: the server's stamp, or directly the one other console.
+// The console a message is from (its first port): the server's stamp, or directly the one other console.
 static int NetFrom(const NetMsg *m)
 {
     const int p = (int)(m->type >> 24);
     if (!p) return s_netPort == 1 ? 2 : 1;
-    return p >= 1 && p <= s_netPlayers && p != s_netPort ? p : 0;
+    return p >= 1 && p <= s_netPlayers && p != s_netPort && NET_CONSOLE(p) ? p : 0;
 }
 
-// The other ports still playing.
+// The other consoles' ports still playing.
 static int NetOthers(void)
 {
     int p, n = 0;
     for (p = 1; p <= s_netPlayers; p++)
-        if (p != s_netPort && !s_netGone[p]) n++;
+        if (!NET_MINE(p) && !s_netGone[p]) n++;
     return n;
 }
 
@@ -1235,22 +1246,22 @@ static void NetHashCheck(int port, u32 slot)
 // One message of another console's. 0 when the game is over for this one (nobody left).
 static int NetMessage(const NetMsg *m)
 {
-    const int p = NetFrom(m);
-    const u32 type = m->type & 0xFFFFFF;
+    const int p = NetFrom(m), q = p + (int)NET_SUB(m->type);   // q: the port an input is of
+    const u32 type = NET_KIND(m->type);
     if (!p) return 1;
-    if ((type == NM_INPUT || type == NM_INPUT2) && !s_netGone[p])
+    if ((type == NM_INPUT || type == NM_INPUT2) && q <= s_netPlayers && s_netOwner[q] == p && !s_netGone[q])
     {
         const u32 n = type == NM_INPUT2 ? 2 : 1;
         u32 k;
         for (k = 0; k < n; k++)
         {
             const u32 v = k ? m->c : m->b;
-            H64Pad *pad = &s_netIn[p][(m->a + k) % NET_RING];
+            H64Pad *pad = &s_netIn[q][(m->a + k) % NET_RING];
             pad->buttons = (u16)(v >> 16);
             pad->x = (s8)(v >> 8);
             pad->y = (s8)v;
         }
-        if (m->a + n > s_netHave[p]) s_netHave[p] = m->a + n;
+        if (m->a + n > s_netHave[q]) s_netHave[q] = m->a + n;
     }
     else if (type == NM_HASH)
     {
@@ -1270,7 +1281,9 @@ static int NetMessage(const NetMsg *m)
         // Its controller lets go after the last input it sent (the same read on every console: the server
         // passes a console's messages in order, its leaving last).
         char t[80];
-        s_netGone[p] = 1;
+        int o;
+        for (o = 1; o <= s_netPlayers; o++)
+            if (s_netOwner[o] == p) s_netGone[o] = 1;   // every port of that console
         if (!NetOthers()) { NetEnd(s_netPlayers > 2 ? "los demas salieron del juego" : "la otra consola salio del juego"); return 0; }
         _snprintf(t, sizeof(t) - 1, "EN LINEA: el jugador %d salio del juego", p);
         t[sizeof(t) - 1] = 0;
@@ -1295,7 +1308,7 @@ static void NetPump(int ms)
         if (s_netMode > 0 && s_netP2p)
         {
             for (p = 1; p <= s_netPlayers; p++)
-                if (p != s_netPort && !s_netGone[p] && GetTickCount() - P2pLastHeard(p) > NET_P2P_QUIET_MS) { NetP2pOff(1); break; }
+                if (NET_CONSOLE(p) && p != s_netPort && !s_netGone[p] && GetTickCount() - P2pLastHeard(p) > NET_P2P_QUIET_MS) { NetP2pOff(1); break; }
             if (s_netP2p && s_netWs && (int)(GetTickCount() - s_netRelayPingAt) >= 0)
             {
                 NetWsSend(s_netWs, "ping\t0", 6, 1);   // the room closes when nothing comes for a while
@@ -1349,12 +1362,12 @@ static void NetPump(int ms)
     }
 }
 
-// Read n can go on: every other port still playing has sent its input for it.
+// Read n can go on: every other console's port still playing has its input for it.
 static int NetReady(u32 n)
 {
     int p;
     for (p = 1; p <= s_netPlayers; p++)
-        if (p != s_netPort && !s_netGone[p] && s_netHave[p] <= n) return 0;
+        if (!NET_MINE(p) && !s_netGone[p] && s_netHave[p] <= n) return 0;
     return 1;
 }
 
@@ -1362,10 +1375,10 @@ static u32 NetPadWord(const H64Pad *p) { return ((u32)p->buttons << 16) | ((u32)
 
 static void NetPad(H64System *sys)
 {
-    H64Pad local;
+    H64Pad local[NET_PLAYERS];
     static const H64Pad zero = { 0, 0, 0 };
-    u32 n = s_netReads++, made = 0;
-    int p;
+    u32 n = s_netReads++, made = 0, s;
+    int p, k;
     double w0 = QpcMs();
     if (s_netDelayNext)
     {
@@ -1373,13 +1386,22 @@ static void NetPad(H64System *sys)
         s_netDelay = s_netDelayNext;
         s_netDelayNext = 0;
     }
-    if (!s_padValid || (s_pad.Gamepad.wButtons & XINPUT_GAMEPAD_BACK) || s_qcOpen) local = zero;   // the quick chat: the controller plays nothing
-    else PadFromXInput(&s_pad.Gamepad, 0, &local);
+    // This console's controllers, one per port it plays (its first: the one whose BACK opens the quick chat).
+    for (k = 0; k < s_netLocal; k++)
+    {
+        XINPUT_STATE xs;
+        local[k] = zero;
+        if (k == 0)
+        {
+            if (s_padValid && !(s_pad.Gamepad.wButtons & XINPUT_GAMEPAD_BACK) && !s_qcOpen) PadFromXInput(&s_pad.Gamepad, 0, &local[0]);   // the quick chat: it plays nothing
+        }
+        else if (XInputGetState(k, &xs) == ERROR_SUCCESS) PadFromXInput(&xs.Gamepad, k, &local[k]);
+    }
     // This read's input for read n + delay: none when that one is sent already (the delay shrank), the reads
     // up to it too when it grew (all ports go on without a gap).
     while (s_netNextSlot <= n + s_netDelay)
     {
-        s_netIn[s_netPort][s_netNextSlot % NET_RING] = local;
+        for (k = 0; k < s_netLocal; k++) s_netIn[s_netPort + k][s_netNextSlot % NET_RING] = local[k];
         s_netNextSlot++;
         made++;
     }
@@ -1391,16 +1413,17 @@ static void NetPad(H64System *sys)
     else
     {
         // Through a room: two reads' inputs in one message (each sent a read later at most: the delay still covers
-        // it); one alone when no other follows this read.
+        // it); one alone when no other follows this read. One message per port played here.
         while (s_netNextSlot - s_netSentUpTo >= 2)
         {
-            NetSend(NM_INPUT2, s_netSentUpTo, NetPadWord(&s_netIn[s_netPort][s_netSentUpTo % NET_RING]),
-                    NetPadWord(&s_netIn[s_netPort][(s_netSentUpTo + 1) % NET_RING]));
+            for (k = 0, s = s_netSentUpTo; k < s_netLocal; k++)
+                NetSend(NM_INPUT2 | ((u32)k << 16), s, NetPadWord(&s_netIn[s_netPort + k][s % NET_RING]), NetPadWord(&s_netIn[s_netPort + k][(s + 1) % NET_RING]));
             s_netSentUpTo += 2;
         }
         if (!made && s_netSentUpTo < s_netNextSlot)
         {
-            NetSend(NM_INPUT, s_netSentUpTo, NetPadWord(&s_netIn[s_netPort][s_netSentUpTo % NET_RING]), 0);
+            for (k = 0; k < s_netLocal; k++)
+                NetSend(NM_INPUT | ((u32)k << 16), s_netSentUpTo, NetPadWord(&s_netIn[s_netPort + k][s_netSentUpTo % NET_RING]), 0);
             s_netSentUpTo++;
         }
     }
@@ -1438,7 +1461,7 @@ static void NetPad(H64System *sys)
     {
         H64Pad *out = &sys->pad[p - 1];
         if (p > s_netPlayers) *out = zero;
-        else if (p == s_netPort) *out = s_netIn[p][n % NET_RING];
+        else if (NET_MINE(p)) *out = s_netIn[p][n % NET_RING];
         else if (s_netMode > 0 && n < s_netHave[p]) *out = s_netIn[p][n % NET_RING];
         else *out = zero;
     }
@@ -1478,7 +1501,7 @@ static void NetVi(H64System *sys)
     s_netMine[slot][1] = NetHashBlock(sys->rdram + (block << 20)) ^ cpu;
     NetSend(NM_HASH, f, s_netMine[slot][1], 0);
     for (p = 1; p <= s_netPlayers; p++)
-        if (p != s_netPort) NetHashCheck(p, slot);
+        if (NET_CONSOLE(p) && p != s_netPort) NetHashCheck(p, slot);
 }
 
 // Before the saves are opened: whether this game is played online (a room of Settings > Online play, or
@@ -1487,13 +1510,20 @@ static void NetConfig(H64System *sys)
 {
     char line[96] = { 0 };
     FILE *f;
-    int d = 0, port = 0, players = 0;
-    NetWs *room = OnlineRoomTake(&port, &players);
+    int d = 0, port = 0, players = 0, local = 1, p;
+    u8 owner[NET_PLAYERS + 1];
+    NetWs *room = OnlineRoomTake(&port, &players, &local, owner);
     s_netMode = 0;
     s_netDelay = 3;
+    s_netLocal = 1;
+    for (p = 0; p <= NET_PLAYERS; p++) s_netOwner[p] = (u8)p;   // one port each (directly, netplay.txt)
     if (room)
     {
-        if (players < 2 || players > NET_PLAYERS || port < 1 || port > players) { NetWsClose(room); return; }
+        if (players < 2 || players > NET_PLAYERS || port < 1 || port > players || local < 1 || port + local - 1 > players) { NetWsClose(room); return; }
+        // Who owns each port (the server's start line): this console the ones from its first.
+        for (p = 1; p <= players; p++) s_netOwner[p] = owner[p] >= 1 && owner[p] <= players ? owner[p] : (u8)p;
+        for (p = port; p < port + local; p++) s_netOwner[p] = (u8)port;
+        s_netLocal = local;
         s_netWs = room;
         s_netPort = port;
         s_netPlayers = players;
@@ -1502,7 +1532,7 @@ static void NetConfig(H64System *sys)
         s_rumblePort = port - 1;
         strcpy(s_netPeer, "sala");
         sys->viHook = NetVi;
-        H64_INFO("[net] online room: port %d of %d, delay %u reads", port, players, s_netDelay);
+        H64_INFO("[net] online room: port %d (%d here) of %d, delay %u reads", port, local, players, s_netDelay);
         return;
     }
     f = fopen("game:\\netplay.txt", "rb");
@@ -1553,14 +1583,17 @@ static int NetRecvWait(NetMsg *m, DWORD ms)
 static void NetP2pOff(int tell)
 {
     u32 r;
+    int k;
     s_netP2p = 0;
     if (!s_netWs) return;
     if (tell) NetWsSend(s_netWs, "p2p\toff", 7, 1);
     for (r = s_netSentUpTo > 128 ? s_netSentUpTo - 128 : 0; r < s_netSentUpTo; r += 2)
-    {
-        if (r + 1 < s_netSentUpTo) NetSend(NM_INPUT2, r, NetPadWord(&s_netIn[s_netPort][r % NET_RING]), NetPadWord(&s_netIn[s_netPort][(r + 1) % NET_RING]));
-        else NetSend(NM_INPUT, r, NetPadWord(&s_netIn[s_netPort][r % NET_RING]), 0);
-    }
+        for (k = 0; k < s_netLocal; k++)
+        {
+            const int q = s_netPort + k;
+            if (r + 1 < s_netSentUpTo) NetSend(NM_INPUT2 | ((u32)k << 16), r, NetPadWord(&s_netIn[q][r % NET_RING]), NetPadWord(&s_netIn[q][(r + 1) % NET_RING]));
+            else NetSend(NM_INPUT | ((u32)k << 16), r, NetPadWord(&s_netIn[q][r % NET_RING]), 0);
+        }
     NetOsd("EN LINEA: conexion directa perdida - por el servidor", 8000);
 }
 
@@ -1586,7 +1619,8 @@ static void NetP2pSetup(u32 token)
             mask = P2pPunch(20);
         }
     }
-    for (p = 1; p <= s_netPlayers; p++) full |= 1 << p;
+    for (p = 1; p <= s_netPlayers; p++)
+        if (NET_CONSOLE(p)) full |= 1 << p;   // the consoles (their first ports)
     _snprintf(line, sizeof(line) - 1, "p2p\tok %d", mask);
     line[sizeof(line) - 1] = 0;
     NetWsSend(s_netWs, line, (int)strlen(line), 1);
@@ -1596,11 +1630,11 @@ static void NetP2pSetup(u32 token)
         NetPump(5);
         if (s_netP2pOpen) P2pPunch(20);   // the others may still be probing
         for (all = 1, p = 1; p <= s_netPlayers; p++)
-            if (!s_netP2pOk[p]) all = 0;
+            if (NET_CONSOLE(p) && !s_netP2pOk[p]) all = 0;
         if (all) break;
     }
     for (all = 1, p = 1; p <= s_netPlayers; p++)
-        if (!s_netP2pOk[p] || (((s_netP2pOk[p] - 1) | (1 << p)) & full) != full) all = 0;
+        if (NET_CONSOLE(p) && (!s_netP2pOk[p] || (((s_netP2pOk[p] - 1) | (1 << p)) & full) != full)) all = 0;
     H64_INFO("[net] direct: reaches %X here; verdicts %X %X %X %X -> %s", mask, s_netP2pOk[1] - 1, s_netP2pOk[2] - 1, s_netP2pOk[3] - 1,
              s_netP2pOk[4] - 1, all && s_netP2pOpen ? "directly" : "through the room");
     if (all && s_netP2pOpen)
@@ -1624,7 +1658,7 @@ static void NetConnect(H64System *sys, const Config *c)
     NetMsg hello, theirs;
     DWORD t0 = GetTickCount();
     const int relay = s_netWs != NULL;   // connected already, through the server's room (NetConfig)
-    int heard = 0, p;
+    int heard = 0, p, consoles = 0;
     if (s_netMode <= 0) return;
     if (!relay && !NetStart(1)) { NetEnd("sin red"); return; }
     memset(&sa, 0, sizeof(sa));
@@ -1687,12 +1721,14 @@ static void NetConnect(H64System *sys, const Config *c)
     hello.b = sys->rom.crc1;
     hello.c = NetBuildId() ^ sys->rom.crc2;
     if (relay ? !NetWsSend(s_netWs, &hello, sizeof(hello)) : send(s_netSock, (const char *)&hello, sizeof(hello), 0) != sizeof(hello)) { NetEnd("no hubo saludo"); return; }
-    // One hello from each of the others (they may still be loading the game).
-    while (heard < s_netPlayers - 1)
+    // One hello from each of the other consoles (they may still be loading the game).
+    for (p = 1; p <= s_netPlayers; p++)
+        if (NET_CONSOLE(p) && p != s_netPort) consoles++;
+    while (heard < consoles)
     {
         const int left = (relay ? 90000 : 10000) - (int)(GetTickCount() - t0);
         if (left <= 0 || !NetRecvWait(&theirs, left)) { NetEnd("no hubo saludo"); return; }
-        if ((theirs.type & 0xFFFFFF) != NM_HELLO) continue;
+        if (NET_KIND(theirs.type) != NM_HELLO) continue;
         heard++;
         H64_INFO("[net] hello of port %d: here %08X %08X %08X, there %08X %08X %08X", NetFrom(&theirs), hello.a, hello.b, hello.c, theirs.a, theirs.b, theirs.c);
         if (theirs.a >> 24 != NET_PROTO || theirs.c != hello.c) { NetEnd("las consolas no tienen la misma build"); return; }
@@ -1747,7 +1783,9 @@ static void NetStop(void)
         LogFlush();
         if (s_netSock != INVALID_SOCKET) closesocket(s_netSock);
         s_netSock = INVALID_SOCKET;
-        if (s_netWs) NetWsClose(s_netWs);
+        // Back to the room (the pause menu's): its connection stays open, the room's lobby again.
+        if (s_toRoom && s_netWs) OnlineRoomGiveBack(s_netWs);
+        else if (s_netWs) NetWsClose(s_netWs);
         s_netWs = NULL;
     }
     s_netMode = 0;
@@ -1781,6 +1819,8 @@ static void NetChatAdd(const char *tag, const char *text)
         s_netChatCount--;
     }
     l = &s_netChat[s_netChatCount++];
+    // A quick chat text ("@q<n>"): in this console's language.
+    if (text[0] == '@' && text[1] == 'q' && text[2] >= '0' && text[2] < '0' + QC_TEXTS && !text[3]) text = Tr(T_QC_1 + (text[2] - '0'));
     _snprintf(l->tag, sizeof(l->tag) - 1, "%s", tag);
     l->tag[sizeof(l->tag) - 1] = 0;
     _snprintf(l->text, sizeof(l->text) - 1, "%s", text);
@@ -1869,7 +1909,9 @@ static void NetQuickChatInput(void)
         }
         else if (s_qcRow <= 2)
         {
-            NetChatSay(Tr(T_QC_1 + (s_qcRow - 1) * (QC_TEXTS / 2) + s_qcCol));
+            // Its number, not its text: each console shows it in its own language (NetChatAdd).
+            _snprintf(msg, sizeof(msg), "@q%d", (s_qcRow - 1) * (QC_TEXTS / 2) + s_qcCol);
+            NetChatSay(msg);
             s_qcOpen = 0;
         }
         else
@@ -2160,6 +2202,94 @@ static void CheatsDraw(void)
     UiFooter(lx, y + h - 28, Tr(n ? T_FOOT_CHEATS : T_FOOT_BACK_ONLY));
 }
 
+// ---- The pause menu's Players online page (with an online profile and a network) ----
+// Who is online and what each one does (the game played, in a room, in the lobby), each one's time to the
+// server and its connection; xb_online.cpp's thread reads the list every few seconds meanwhile, so the
+// menu never waits for the server (an online game's consoles keep hearing this one).
+#define PLAYERS_ROWS 12
+static int s_playersOpen, s_playersTop;
+
+static int PlayersAvailable(void) { return OnlineRegistered() && OnlineHasServer() && OnlineMyConn() != ONLINE_CONN_NONE; }
+
+static void PlayersDraw(void)
+{
+    const float w = 940, h = 600, x = (UI_WIDTH - w) * 0.5f, y = (UI_HEIGHT - h) * 0.5f, rowH = 36, lx = x + 30, lw = w - 60;
+    std::vector<OnlineUser> users;
+    const int st = OnlineWatchedUsers(&users), n = (int)users.size();
+    char line[160], fit[160];
+    int k;
+    UiRect(0, 0, UI_WIDTH, UI_HEIGHT, D3DCOLOR_ARGB(150, 0, 0, 0));
+    UiPanel(x, y, w, h, 22);
+    UiText(UI_BOLD, 28, lx, y + 36, UI_COL_TEXT, Tr(T_ONLINE_NOW), UI_LEFT);
+    if (st > 0)
+    {
+        _snprintf(line, sizeof(line) - 1, "%d", n);
+        line[sizeof(line) - 1] = 0;
+        k = (int)UiText(UI_BOLD, 18, x + w - 30, y + 36, UI_COL_TEXT2, line, UI_RIGHT);
+        UiCircle(x + w - 30 - k - 14, y + 36, 6, D3DCOLOR_ARGB(255, 80, 210, 120));
+    }
+    UiRect(lx, y + 66, lw, 1, UI_COL_LINE);
+    if (st <= 0 || !n)
+        UiText(UI_REGULAR, 20, x + w * 0.5f, y + h * 0.5f, UI_COL_TEXT2, Tr(st == 0 ? T_ONLINE_CONNECTING : st < 0 ? T_ONLINE_NO_SERVER : T_ONLINE_EMPTY), UI_CENTER);
+    if (s_playersTop > n - PLAYERS_ROWS) s_playersTop = n > PLAYERS_ROWS ? n - PLAYERS_ROWS : 0;
+    for (k = 0; st > 0 && k < PLAYERS_ROWS && s_playersTop + k < n; k++)
+    {
+        const OnlineUser *u = &users[s_playersTop + k];
+        const int me = !_stricmp(u->name, OnlineMe()->tag), ms = me && OnlineMyMs() ? OnlineMyMs() : u->ms;
+        const int conn = me ? OnlineMyConn() : u->conn, lit = ms <= 0 ? 0 : ms < 60 ? 4 : ms < 100 ? 3 : ms < 160 ? 2 : 1;
+        const D3DCOLOR pc = ms <= 0 ? UI_COL_TEXT3 : ms < 90 ? D3DCOLOR_ARGB(255, 80, 210, 120) : ms < 160 ? D3DCOLOR_ARGB(255, 240, 200, 70) : D3DCOLOR_ARGB(255, 240, 90, 80);
+        const float cy = y + 80 + k * rowH + rowH * 0.5f;
+        float right = x + w - 30;
+        int b;
+        if (k & 1) UiRect(x + 14, cy - rowH * 0.5f, w - 28, rowH, D3DCOLOR_ARGB(18, 255, 255, 255));
+        // The connection, the time (four bars and the ms), then the country, the name and what it does.
+        if (conn != ONLINE_CONN_NONE)
+        {
+            const char *t = conn == ONLINE_CONN_CABLE ? "LAN" : "Wi-Fi";
+            const float tw = UiTextWidth(UI_BOLD, 13, t) + 12;
+            UiRoundRect(right - tw, cy - 10, tw, 20, 6, UiAlpha(UI_COL_CARD, 0.9f), UiAlpha(UI_COL_CARD, 0.9f));
+            UiText(UI_BOLD, 13, right - tw * 0.5f, cy, UI_COL_TEXT2, t, UI_CENTER);
+        }
+        right -= 80;
+        if (ms) _snprintf(line, sizeof(line), "%d ms", ms);
+        else _snprintf(line, sizeof(line), "-- ms");
+        UiText(UI_BOLD, 15, right, cy, pc, line, UI_RIGHT);
+        right -= 70;
+        for (b = 0; b < 4; b++)
+        {
+            const float bh = 16 * (0.35f + 0.65f * b / 3.0f);
+            UiRect(right + b * 6, cy + 8 - bh, 4, bh, b < lit ? pc : UiAlpha(UI_COL_TEXT3, 0.45f));
+        }
+        UiText(UI_BOLD, 14, lx + 6, cy, UI_COL_TEXT3, u->country, UI_LEFT);
+        UiTextFit(UI_BOLD, 18, 250, u->name, fit, sizeof(fit));
+        UiText(UI_BOLD, 18, lx + 50, cy, me ? UI_COL_ACCENT_HI : UI_COL_TEXT, fit, UI_LEFT);
+        if (u->status[0])
+        {
+            _snprintf(line, sizeof(line) - 1, Tr(T_ONLINE_PLAYING), u->status);
+            line[sizeof(line) - 1] = 0;
+        }
+        else _snprintf(line, sizeof(line), "%s", Tr(u->inRoom ? T_ONLINE_ST_ROOM : T_ONLINE_ST_LOBBY));
+        UiTextFit(UI_REGULAR, 16, right - 20 - (lx + 320), line, fit, sizeof(fit));
+        UiText(UI_REGULAR, 16, lx + 320, cy, u->status[0] ? D3DCOLOR_ARGB(255, 80, 210, 120) : u->inRoom ? UI_COL_ACCENT_HI : UI_COL_TEXT2, fit, UI_LEFT);
+    }
+    if (st > 0 && n > PLAYERS_ROWS)
+    {
+        const float ty = y + 82, th = PLAYERS_ROWS * rowH - 4, hh = th * PLAYERS_ROWS / n;
+        UiRoundRect(x + w - 14, ty + (th - hh) * s_playersTop / (float)(n - PLAYERS_ROWS), 4, hh, 2, D3DCOLOR_ARGB(150, 255, 255, 255), D3DCOLOR_ARGB(110, 255, 255, 255));
+    }
+    UiRect(lx, y + h - 56, lw, 1, UI_COL_LINE);
+    UiFooter(lx, y + h - 28, Tr(T_FOOT_BACK_ONLY));
+}
+
+// Its input (the D-pad scrolls); 1 when it closes.
+static int PlayersInput(WORD down)
+{
+    if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) return 1;
+    if ((down & XINPUT_GAMEPAD_DPAD_UP) && s_playersTop > 0) { s_playersTop--; xb_audio_ui_sound(XB_SFX_MOVE); }
+    if (down & XINPUT_GAMEPAD_DPAD_DOWN) { s_playersTop++; xb_audio_ui_sound(XB_SFX_MOVE); }   // PlayersDraw keeps it within the list
+    return 0;
+}
+
 // Its input; 1 when it closes (what is on is kept for the game).
 static int CheatsInput(WORD down)
 {
@@ -2367,6 +2497,7 @@ static void OverlayHook(void *, IDirect3DDevice9 *dev)
     if (s_menuOpen && s_hiresPreviewOpen) HiresPreviewDraw(dev);
     else if (s_menuOpen && s_aboutOpen) AboutDraw();
     else if (s_menuOpen && s_cheatsOpen) CheatsDraw();
+    else if (s_menuOpen && s_playersOpen) PlayersDraw();
     else if (s_menuOpen && s_texOpen) TexturesDraw();
     else if (s_menuOpen)
     {
@@ -2479,15 +2610,16 @@ static void LoadStateNow(H64System *sys)
 // margin, smoothing, FPS) or at the next start (CPU, RSP); they are saved
 // for all games (config\settings.ini) or for this game (config\<game>.ini).
 enum { RG_DASHBOARD = 0, RG_BROWSER, RG_CONTINUE };
-enum { M_RESUME = 0, M_STATES, M_CHEATS, M_TEXTURES, M_SETTINGS, M_RESET, M_ROMS, M_DASHBOARD };   // X opens About
+enum { M_RESUME = 0, M_STATES, M_CHEATS, M_TEXTURES, M_SETTINGS, M_PLAYERS, M_RESET, M_ROOM, M_ROMS, M_DASHBOARD };   // X opens About
 enum { ST_SLOT = 0, ST_LOAD, ST_SAVE };   // the States page, opened from M_STATES; B goes back, no row for it
 static char s_settingsPath[160];    // <drive>:\config\settings.ini ("" when the menu files are not used)
 static char s_profilePath[160];     // <drive>:\config\<game>.ini
 
 static const Config *s_menuCfg;   // the settings the open menu shows (its HD textures row)
 
-// The pause menu's rows, as M_* in order: HD textures only when the game has packs.
-static int s_pauseRows[8], s_pauseCount;
+// The pause menu's rows, as M_* in order: HD textures only when the game has packs, Back to the room only
+// online through a room, Players online with an online profile and a network.
+static int s_pauseRows[10], s_pauseCount;
 
 static int PauseRow(int action)
 {
@@ -2499,9 +2631,10 @@ static int PauseRow(int action)
 
 static void BuildGameMenu(void)
 {
-    static const int labels[8] = { T_RESUME, T_STATES, T_CHEATS, T_HIRESTEX, T_SETTINGS, T_RESET_GAME, T_BACK_TO_LIST, T_QUIT_DASHBOARD };
-    static const unsigned char iconOf[8] = { UI_ICON_PLAY, UI_ICON_STATES, UI_ICON_SLIDERS, UI_ICON_HD, UI_ICON_GEAR, UI_ICON_RESET, UI_ICON_LIST, UI_ICON_POWER };
-    unsigned char icons[8];
+    static const int labels[10] = { T_RESUME, T_STATES, T_CHEATS, T_HIRESTEX, T_SETTINGS, T_ONLINE_NOW, T_RESET_GAME, T_BACK_TO_ROOM, T_BACK_TO_LIST, T_QUIT_DASHBOARD };
+    static const unsigned char iconOf[10] = { UI_ICON_PLAY, UI_ICON_STATES, UI_ICON_SLIDERS, UI_ICON_HD, UI_ICON_GEAR, UI_ICON_GLOBE, UI_ICON_RESET, UI_ICON_FRIENDS,
+                                              UI_ICON_LIST, UI_ICON_POWER };
+    unsigned char icons[10];
     char value[160];
     int a;
     UiMenuClear(&s_menu, Tr(T_PAUSED), Tr(T_FOOT_PAUSED));
@@ -2511,6 +2644,8 @@ static void BuildGameMenu(void)
     {
         if (a == M_TEXTURES && HiresPackCount() == 0) continue;
         if (s_netMode > 0 && (a == M_STATES || a == M_CHEATS || a == M_TEXTURES || a == M_RESET)) continue;   // online: what would set this console apart
+        if (a == M_ROOM && !(s_netMode > 0 && s_netWs)) continue;
+        if (a == M_PLAYERS && !PlayersAvailable()) continue;
         value[0] = 0;
         if (a == M_CHEATS) CheatsRowValue(value, sizeof(value));
         if (a == M_TEXTURES && s_menuCfg) TexturesRowValue(s_menuCfg, value, sizeof(value));
@@ -2582,7 +2717,7 @@ static int GameMenu(H64System *sys, H64Renderer *renderer, Config *c)
         WORD down = UiInputPoll(&in);
         NetKeepAlive();   // the other console waits: it hears this one is still here
         s_reservedSlot = c->padLoss == PADLOSS_SAVE ? c->autoSaveSlot : 0;   // Settings > System may change it from here
-        if (!settings && !s_aboutOpen && !s_hiresPreviewOpen && !s_confirmOpen && !s_cheatsOpen && !s_texOpen && (down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT)))
+        if (!settings && !s_aboutOpen && !s_hiresPreviewOpen && !s_confirmOpen && !s_cheatsOpen && !s_texOpen && !s_playersOpen && (down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT)))
             UiMenuPress();   // the pause menu's and the States page's rows show the press (Settings does it itself)
         if (s_confirmOpen)
         {
@@ -2653,6 +2788,15 @@ static int GameMenu(H64System *sys, H64Renderer *renderer, Config *c)
                 s_cheatsOpen = 0;
                 BuildGameMenu();   // its row: how many are on now
                 s_menu.sel = PauseRow(M_CHEATS);
+            }
+        }
+        else if (s_playersOpen)
+        {
+            if (PlayersInput(down))
+            {
+                s_playersOpen = 0;
+                OnlineWatchUsers(0);
+                s_menu.sel = PauseRow(M_PLAYERS);
             }
         }
         else if (s_aboutOpen)
@@ -2733,20 +2877,24 @@ static int GameMenu(H64System *sys, H64Renderer *renderer, Config *c)
                 case M_CHEATS: s_cheatsOpen = 1; s_cheatSel = s_cheatTop = 0; break;
                 case M_TEXTURES: TexturesOpen(c); break;
                 case M_SETTINGS: settings = 1; SettingsBuild(&s_menu, c, s_profilePath[0] != 0); break;
+                case M_PLAYERS: s_playersOpen = 1; s_playersTop = 0; OnlineWatchUsers(1); break;
                 case M_RESET: s_confirmOpen = CONFIRM_RESET; break;      // asked first (above)
+                case M_ROOM: s_toRoom = 1; result = RG_BROWSER; break;   // the ROM list opens the room's lobby
                 case M_ROMS: s_confirmOpen = CONFIRM_LIST; break;        // asked first (above)
                 case M_DASHBOARD: s_confirmOpen = CONFIRM_DASHBOARD; break;
                 }
             }
         }
         s_statesOpen = states;   // the overlay shows the slot's picture under the rows
-        s_pauseMain = !states && !settings && !s_aboutOpen && !s_hiresPreviewOpen && !s_cheatsOpen && !s_texOpen;   // ... or the game's, on the main page
+        s_pauseMain = !states && !settings && !s_aboutOpen && !s_hiresPreviewOpen && !s_cheatsOpen && !s_texOpen && !s_playersOpen;   // ... or the game's, on the main page
         h64_xenos_present(renderer);   // the frozen frame, the menu (overlay) on top
         Sleep(16);
     }
     if (s_cheatsOpen) h64_cheats_save_state(&s_cheats, s_cheatState);
     s_cheatsOpen = 0;
     s_texOpen = 0;
+    if (s_playersOpen) OnlineWatchUsers(0);
+    s_playersOpen = 0;
     s_menuCfg = NULL;
     s_statesOpen = 0;
     s_pauseMain = 0;
@@ -3636,7 +3784,8 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
     H64_INFO("[main] game ended: %s", result == RG_BROWSER ? "ROM list" : "dashboard");
     LogFlush();
     OnlineSetStatus("");
-    OnlineRoomClose();   // a room this game did not take (it takes it in NetConfig)
+    s_toRoom = 0;
+    if (!OnlineRoomBack()) OnlineRoomClose();   // a room this game did not take (it takes it in NetConfig) - not one given back to
     OnlinePlayed(onlineCode, onlineGame, (int)((GetTickCount() - onlineStart) / 60000));
     if (statsOn)
     {
@@ -3646,7 +3795,7 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
         if (StatsSessionWorth(&stats))
         {
             const char *vote = "", *reason = "";
-            if (!s_crashed && result == RG_BROWSER && StatsSessionMinutes(&stats) >= 3 && !StatsVoted(s_logDrive, stats.code))
+            if (!s_crashed && result == RG_BROWSER && !OnlineRoomBack() && StatsSessionMinutes(&stats) >= 3 && !StatsVoted(s_logDrive, stats.code))
             {
                 StatsMarkVoted(s_logDrive, stats.code);
                 VoteScreen(dev, s_npTitle[0] ? s_npTitle : stats.game, &vote, &reason);
@@ -3841,7 +3990,7 @@ int __cdecl main()
                 int rg;
                 HiresSetPlaying(1);   // a pack converting meanwhile: one thread only
                 rg = RunGame(dev, &game, path);
-                OnlineRoomClose();   // an online room the game never got to take (the ROM could not be read)
+                if (!OnlineRoomBack()) OnlineRoomClose();   // an online room the game never got to take (the ROM could not be read) - not one it gave back
                 HiresSetPlaying(0);
                 if (rg == RG_DASHBOARD) break;
             }

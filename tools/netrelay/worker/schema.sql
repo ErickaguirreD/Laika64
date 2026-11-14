@@ -2,7 +2,8 @@
 --   npx wrangler d1 execute laika --remote --file schema.sql
 CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, lower TEXT NOT NULL UNIQUE,
     token TEXT NOT NULL, country TEXT NOT NULL, avatar INTEGER NOT NULL, created INTEGER NOT NULL,
-    seen INTEGER NOT NULL, status TEXT NOT NULL DEFAULT '', minutes INTEGER NOT NULL DEFAULT 0);
+    seen INTEGER NOT NULL, status TEXT NOT NULL DEFAULT '', minutes INTEGER NOT NULL DEFAULT 0,
+    ms INTEGER NOT NULL DEFAULT 0, conn INTEGER NOT NULL DEFAULT 0, room INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS users_minutes ON users (minutes DESC);
 CREATE TABLE IF NOT EXISTS friends (user INTEGER NOT NULL, friend INTEGER NOT NULL, PRIMARY KEY (user, friend));
 CREATE TABLE IF NOT EXISTS played (user INTEGER NOT NULL, code TEXT NOT NULL, game TEXT NOT NULL,
@@ -11,9 +12,11 @@ CREATE TABLE IF NOT EXISTS played (user INTEGER NOT NULL, code TEXT NOT NULL, ga
 CREATE TABLE IF NOT EXISTS registered (place TEXT NOT NULL, at INTEGER NOT NULL);
 -- The news, the newest first; a language without items of its own gets the English ones.
 CREATE TABLE IF NOT EXISTS news (id INTEGER PRIMARY KEY, date TEXT NOT NULL, lang TEXT NOT NULL, title TEXT NOT NULL, text TEXT NOT NULL);
--- Public rooms waiting for players (each room's Durable Object keeps its own row).
+-- The rooms, waiting for players or playing (started: since when; tags: who plays). Each room's Durable
+-- Object keeps its own row.
 CREATE TABLE IF NOT EXISTS rooms (code TEXT PRIMARY KEY, host TEXT NOT NULL, avatar INTEGER NOT NULL, players INTEGER NOT NULL,
-    game TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', locked INTEGER NOT NULL DEFAULT 0, updated INTEGER NOT NULL);
+    game TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', locked INTEGER NOT NULL DEFAULT 0, updated INTEGER NOT NULL,
+    size INTEGER NOT NULL DEFAULT 4, started INTEGER NOT NULL DEFAULT 0, tags TEXT NOT NULL DEFAULT '', art TEXT NOT NULL DEFAULT '');
 -- The general chat (the last messages), and when each player last wrote in it.
 CREATE TABLE IF NOT EXISTS chat (id INTEGER PRIMARY KEY, at INTEGER NOT NULL, tag TEXT NOT NULL, avatar INTEGER NOT NULL, text TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS said (user INTEGER PRIMARY KEY, at INTEGER NOT NULL);

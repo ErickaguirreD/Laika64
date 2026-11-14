@@ -101,6 +101,8 @@ int ArtKindFor(const char *romPath);
 // scaled (ART_COVER_W x ART_COVER_H at most, RGBA, free() it), read now on the
 // calling thread - the pause menu's "Now playing". 0 when there is none. After ArtStart.
 int ArtReadCover(const char *romPath, int kind, u8 **rgba, int *w, int *h, int *gotKind);   // gotKind: the one read (the box as a fallback)
+// The same by a game's cache key (ArtKeyOf's), without its ROM: another console's room's game.
+int ArtReadCoverKey(const char *key, int kind, u8 **rgba, int *w, int *h, int *gotKind);
 // One kind of a game's pictures exactly (no box instead), with its alpha, as
 // large as maxW x maxH (smaller ones as they are): the cinema view's picture
 // from the game and logo. Read on the calling thread; 0 when there is none.
