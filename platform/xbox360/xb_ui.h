@@ -159,6 +159,8 @@ float UiBrand(float x, float cy, float size);
 // Its width at `size` (UiBrand's), and the logo as large as fits the box
 // (x, y, w, h), centred across it, its bottom on the box's bottom.
 float UiBrandWidth(float size);
+// The LAIKA 64 ONLINE logo (Play online's title), `h` pixels high, centred on (cx, cy).
+void UiOnlineLogo(float cx, float cy, float h, float alpha = 1.0f);
 // The logo's mark alone (the wolf in the cube), square, its surroundings clear: made on first use, kept.
 IDirect3DTexture9 *UiLaikaEmblem(void);
 void UiBrandFit(float x, float y, float w, float h);
@@ -198,6 +200,10 @@ int UiWallpaperIsImage(const char *name);
 // Part (u0..u1, v0..v1) of a picture over four corners (top left, top right,
 // bottom left, bottom right as xy[8]): a box's faces seen at an angle.
 void UiImageQuad(IDirect3DTexture9 *tex, const float *xy, float u0, float v0, float u1, float v1, D3DCOLOR color);
+// Many quads of one picture sent together: Begin, Add each (as UiImageQuad), End. Nothing else is drawn between.
+void UiQuadsBegin(IDirect3DTexture9 *tex);
+void UiQuadsAdd(const float *xy, float u0, float v0, float u1, float v1, D3DCOLOR color);
+void UiQuadsEnd(void);
 // Part (u0..u1, v0..v1, 0..1) of a picture stretched over (x, y, w, h).
 void UiImagePart(IDirect3DTexture9 *tex, float x, float y, float w, float h, float u0, float v0, float u1, float v1, D3DCOLOR color);
 

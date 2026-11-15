@@ -22,11 +22,14 @@ static char s_file[96];             // <drive>:\config\online.txt
 static int s_serverSet;             // online.txt names the server (kept when the file is written again)
 static char s_error[24];
 static CRITICAL_SECTION s_lock;     // s_status, s_played, the news below
-static std::vector<std::string> s_notices;          // the news not shown yet
+struct Notice { std::string text; int invite; };
+static std::vector<Notice> s_notices;               // the news not shown yet
 static std::map<std::string, int> s_unread;         // per friend: messages not read yet
 static std::map<std::string, int> s_friendOnline;   // per friend: online at the last ping
 static std::vector<std::string> s_askedSeen;        // friendships asked already told
 static int s_dmSeen;                                // the last message told
+static unsigned s_invitedTo;                        // the room of the last invitation received ...
+static DWORD s_invitedAt;                           // ... and when
 static char s_status[44];
 static volatile int s_myMs;         // this console's time to the server and back (the thread measures it)
 static volatile int s_inRoom;       // a room's lobby is open (told with the ping: "in a room" for the others)
@@ -358,19 +361,59 @@ void OnlineUnreadClear(const char *name)
     LeaveCriticalSection(&s_lock);
 }
 
-int OnlineNoticeTake(char *out, size_t size)
+int OnlineNoticeTake(char *out, size_t size, int *invite)
 {
     int got = 0;
     if (!s_thread) return 0;
     EnterCriticalSection(&s_lock);
     if (!s_notices.empty())
     {
-        copy(out, size, s_notices[0].c_str());
+        copy(out, size, s_notices[0].text.c_str());
+        if (invite) *invite = s_notices[0].invite;
         s_notices.erase(s_notices.begin());
         got = 1;
     }
     LeaveCriticalSection(&s_lock);
     return got;
+}
+
+// A notice for the screens (under s_lock): invitations before the other news, the last eight kept.
+static void notice_add(const char *text, int invite)
+{
+    Notice n;
+    size_t at = 0;
+    n.text = text;
+    n.invite = invite;
+    if (invite)
+        while (at < s_notices.size() && s_notices[at].invite) at++;
+    else at = s_notices.size();
+    s_notices.insert(s_notices.begin() + at, n);
+    if (s_notices.size() > 8) s_notices.pop_back();
+}
+
+int OnlineInvite(const char *name, unsigned code, int *live)
+{
+    std::vector<std::string> rows;
+    std::string q, how;
+    add(&q, "to", name);
+    add(&q, "code", (int)code);
+    *live = 0;
+    if (!OnlineRegistered()) { set_error(s_error, "auth"); return 0; }
+    add(&q, "g", s_me.tag);
+    add(&q, "t", s_me.token);
+    if (!request("invite", q, NULL, &how, s_error)) return 0;
+    *live = how == "live";
+    return 1;
+}
+
+unsigned OnlineInvitedTo(void)
+{
+    unsigned code;
+    if (!s_thread) return 0;
+    EnterCriticalSection(&s_lock);
+    code = s_invitedTo && GetTickCount() - s_invitedAt < 600000 ? s_invitedTo : 0;
+    LeaveCriticalSection(&s_lock);
+    return code;
 }
 
 // The news a ping answered with (the thread's): friends coming online, friendships asked, messages.
@@ -391,7 +434,7 @@ static void ping_news(const std::vector<std::string> &rows)
             {
                 _snprintf(t, sizeof(t) - 1, Tr(T_ONLINE_N_FRIEND_ON), name.c_str());
                 t[sizeof(t) - 1] = 0;
-                s_notices.push_back(t);
+                notice_add(t, 0);
             }
             s_friendOnline[name] = on;
         }
@@ -406,7 +449,7 @@ static void ping_news(const std::vector<std::string> &rows)
                 s_askedSeen.push_back(name);
                 _snprintf(t, sizeof(t) - 1, Tr(T_ONLINE_N_REQUEST), name.c_str());
                 t[sizeof(t) - 1] = 0;
-                s_notices.push_back(t);
+                notice_add(t, 0);
             }
         }
         else if (kind == "c")
@@ -428,11 +471,10 @@ static void ping_news(const std::vector<std::string> &rows)
                 s_unread[from]++;
                 _snprintf(t, sizeof(t) - 1, Tr(T_ONLINE_N_DM), from.c_str(), text.c_str());
                 t[sizeof(t) - 1] = 0;
-                s_notices.push_back(t);
+                notice_add(t, 0);
             }
         }
     }
-    if (s_notices.size() > 8) s_notices.erase(s_notices.begin(), s_notices.end() - 8);
     first = 0;
     LeaveCriticalSection(&s_lock);
 }
@@ -634,6 +676,62 @@ static DWORD WINAPI online_thread(LPVOID)
     }
 }
 
+// ---- The inbox: a WebSocket kept open to the server, which sends each invitation through it at once ----
+#define ONLINE_INBOX_KEEP_MS 30000   // "p" this often (the server lets go of one silent for 90 s)
+
+// "invite\t<from>\t<game>\t<code>\t<room>": "<from> wants to play <game> with you" for the screens.
+static void inbox_line(const char *line)
+{
+    const std::string l = line, from = field(l, 1), game = field(l, 2);
+    char t[200];
+    if (field(l, 0) != "invite" || from.empty()) return;
+    _snprintf(t, sizeof(t) - 1, Tr(T_ONLINE_N_INVITE), from.c_str(), game.c_str());
+    t[sizeof(t) - 1] = 0;
+    H64_INFO("[online] %s", t);
+    EnterCriticalSection(&s_lock);
+    notice_add(t, 1);
+    s_invitedTo = (unsigned)atoi(field(l, 3).c_str());
+    s_invitedAt = GetTickCount();
+    LeaveCriticalSection(&s_lock);
+}
+
+static DWORD WINAPI inbox_thread(LPVOID)
+{
+    DWORD wait = 3000;
+    for (;;)
+    {
+        std::string q;
+        char tag[ONLINE_TAG_MAX + 1], line[512];
+        NetWs *w;
+        DWORD openAt, keepAt;
+        Sleep(wait);
+        if (!OnlineRegistered() || !s_me.server[0] || !NetStart(0)) { wait = 10000; continue; }
+        copy(tag, sizeof(tag), s_me.tag);
+        add(&q, "g", s_me.tag);
+        add(&q, "t", s_me.token);
+        w = NetWsOpen(s_me.server, ("/v1/inbox?" + q).c_str());
+        // Not reached, or refused at once: again later and later (up to two minutes).
+        if (!w) { wait = wait < 60000 ? wait * 2 : 120000; continue; }
+        openAt = GetTickCount();
+        keepAt = openAt + ONLINE_INBOX_KEEP_MS;
+        for (;;)
+        {
+            int text = 0;
+            const int n = NetWsRecv(w, line, sizeof(line) - 1, 1000, &text);
+            if (n < 0) break;
+            if (n > 0 && text) { line[n] = 0; inbox_line(line); }
+            if (strcmp(tag, s_me.tag)) break;   // another gamertag: its own inbox
+            if ((int)(GetTickCount() - keepAt) >= 0)
+            {
+                if (!NetWsSend(w, "p", 1, 1)) break;
+                keepAt = GetTickCount() + ONLINE_INBOX_KEEP_MS;
+            }
+        }
+        NetWsClose(w);
+        wait = GetTickCount() - openAt < 20000 ? (wait < 60000 ? wait * 2 : 120000) : 3000;
+    }
+}
+
 void OnlineInit(const char *drive)
 {
     if (s_thread) return;
@@ -648,6 +746,14 @@ void OnlineInit(const char *drive)
     XSetThreadProcessor(s_thread, 3);
     SetThreadPriority(s_thread, THREAD_PRIORITY_BELOW_NORMAL);
     ResumeThread(s_thread);
+    {
+        HANDLE inbox = CreateThread(NULL, 256 * 1024, inbox_thread, NULL, CREATE_SUSPENDED, NULL);
+        if (!inbox) return;
+        XSetThreadProcessor(inbox, 3);
+        SetThreadPriority(inbox, THREAD_PRIORITY_BELOW_NORMAL);
+        ResumeThread(inbox);
+        CloseHandle(inbox);
+    }
 }
 
 // ---- Public rooms and the general chat (plain requests) ----

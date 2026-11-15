@@ -61,6 +61,7 @@ static float s_musicVolume = 1.0f;  // reapplied to each new music voice (music_
 static float s_sfxVolume = 1.0f;    // the interface sounds (xb_audio_ui_sound)
 static int s_mono;                  // Settings > Sound > Audio output: mono
 static volatile LONG s_musicDuck;   // a preview video's sound plays: the music is silent meanwhile
+static int s_musicPaused;           // xb_audio_music_pause (under the music's lock)
 
 static float music_gain(void) { return s_musicDuck ? 0.0f : s_musicVolume; }
 
@@ -529,7 +530,7 @@ static int music_open(const char *path, int loop)
         }
         s_musicVoice->SetVolume(music_gain());
         apply_output_matrix(s_musicVoice, ch);
-        s_musicVoice->Start(0, XAUDIO2_COMMIT_NOW);
+        if (!s_musicPaused) s_musicVoice->Start(0, XAUDIO2_COMMIT_NOW);
     }
     H64_INFO("[audio] music: %s (%u Hz, %d ch)", path, rate, ch);
     return 0;
@@ -668,6 +669,19 @@ int xb_audio_music_start(const char *folder, int mode, const char *track)
 }
 
 void xb_audio_music_tick(void) {}   // the music's own thread moves on from track to track now
+
+void xb_audio_music_pause(int on)
+{
+    // The voice stopped keeps its queue: its thread waits, and Start goes on from the same place.
+    music_lock();
+    s_musicPaused = on ? 1 : 0;
+    if (s_musicVoice)
+    {
+        if (on) s_musicVoice->Stop(0);
+        else s_musicVoice->Start(0, XAUDIO2_COMMIT_NOW);
+    }
+    music_unlock();
+}
 
 static float volume_from_percent(int percent)
 {
@@ -1130,3 +1144,171 @@ static void sfx_play(int kind, int instead)
 void xb_audio_ui_sound(int kind) { sfx_play(kind, 0); }
 
 void xb_audio_ui_sound_instead(int kind) { sfx_play(kind, 1); }
+
+// ---- The online intro's sound (xb_menu.cpp online_intro): data going down a line ----
+// Made here as the interface sounds are (sfx_tone, in the glass style whatever the one chosen), 4.3 s timed to
+// the tunnel: a rush of noise opening up and a carrier humming higher as it speeds up, short beeps of data
+// quicker and quicker, then at 2.2 s (the logo in front) a low thump and a bright chord ringing out.
+#define INTRO_MS 4300
+#define INTRO_LANDS 2.2f
+static IXAudio2SourceVoice *s_introVoice;
+static s16 *s_introPcm;
+
+static u32 intro_rand(u32 *seed)
+{
+    *seed = *seed * 1664525u + 1013904223u;
+    return *seed >> 8;
+}
+
+static u32 intro_make(void)
+{
+    static const float notes[8] = { 1046.5f, 1318.5f, 1568.0f, 1760.0f, 2093.0f, 2349.3f, 2637.0f, 3136.0f };
+    const u32 len = INTRO_MS * SFX_RATE / 1000;
+    const float pi2 = 6.2831853f;
+    const int keepStyle = s_sfxStyle;
+    float *mix = (float *)calloc(len, sizeof(float)), lp1 = 0, lp2 = 0, a1 = 0, a2 = 0, t;
+    double hum = 0;
+    u32 i, seed = 64;
+    if (!mix) return 0;
+    for (i = 0; i < len; i++)
+    {
+        const float ti = i / (float)SFX_RATE, open = ti < INTRO_LANDS ? ti / INTRO_LANDS : 1.0f;
+        float n, env, henv;
+        if (!(i & 63))
+        {
+            // The rush's band (between two one-pole low-passes), opening from 300 Hz to 3.8 kHz.
+            const float fc = 300.0f + 3500.0f * open * open;
+            a1 = 1.0f - expf(-pi2 * fc / SFX_RATE);
+            a2 = 1.0f - expf(-pi2 * fc * 0.25f / SFX_RATE);
+        }
+        n = (intro_rand(&seed) & 0xFFFF) / 32768.0f - 1.0f;
+        lp1 += a1 * (n - lp1);
+        lp2 += a2 * (n - lp2);
+        env = ti < INTRO_LANDS ? 0.05f + 0.25f * open * open : 0.30f * expf(-(ti - INTRO_LANDS) / 0.35f);
+        mix[i] += (lp1 - lp2) * env * 1.6f;
+        // The carrier: 55 Hz rising to 110, pulsing eight times a second.
+        hum += pi2 * (55.0f + 55.0f * open) / SFX_RATE;
+        henv = (ti < 0.3f ? ti / 0.3f : 1.0f) * (ti < INTRO_LANDS + 0.1f ? 1.0f : expf(-(ti - INTRO_LANDS - 0.1f) / 0.5f));
+        mix[i] += 0.10f * henv * (float)sin(hum) * (0.75f + 0.25f * sinf(pi2 * 8.0f * ti));
+    }
+    s_sfxStyle = XB_SFX_STYLE_GLASS;
+    for (t = 0.12f; t < 3.6f;)
+    {
+        // The data: beeps of 12 to 32 ms, closer and closer until the logo lands, then thinning out.
+        const float d = 0.012f + (intro_rand(&seed) % 20) / 1000.0f, f = notes[intro_rand(&seed) % 8];
+        const float gap = t < INTRO_LANDS ? 0.075f - 0.05f * (t / INTRO_LANDS) : 0.03f + (t - INTRO_LANDS) * 0.12f;
+        const float amp = t < INTRO_LANDS ? 0.05f + 0.06f * (t / INTRO_LANDS) : 0.11f * expf(-(t - INTRO_LANDS) / 0.5f);
+        sfx_tone(mix, len, t * 1000.0f, d * 1000.0f, f, f * ((intro_rand(&seed) & 1) ? 1.06f : 0.97f), amp, 0.8f, d * 600.0f);
+        t += d + gap * (0.5f + (intro_rand(&seed) % 100) / 100.0f);
+    }
+    // Locked on: the thump and the chord (C6 E6 G6, C7 and a shimmer over them).
+    sfx_tone(mix, len, INTRO_LANDS * 1000.0f, 400, 140, 45, 0.45f, 2, 110);
+    sfx_tone(mix, len, INTRO_LANDS * 1000.0f, 1900, 1046.5f, 1046.5f, 0.14f, 4, 700);
+    sfx_tone(mix, len, INTRO_LANDS * 1000.0f + 30, 1870, 1318.5f, 1318.5f, 0.12f, 4, 700);
+    sfx_tone(mix, len, INTRO_LANDS * 1000.0f + 60, 1840, 1568.0f, 1568.0f, 0.12f, 4, 750);
+    sfx_tone(mix, len, INTRO_LANDS * 1000.0f + 90, 1500, 2093.0f, 2093.0f, 0.06f, 4, 600);
+    sfx_tone(mix, len, INTRO_LANDS * 1000.0f + 90, 1200, 4186.0f, 4180.0f, 0.02f, 4, 400);
+    s_sfxStyle = keepStyle;
+    s_introPcm = (s16 *)malloc(len * sizeof(s16));
+    if (s_introPcm)
+        for (i = 0; i < len; i++)
+        {
+            float v = mix[i];
+            if (i + 2400 > len) v *= (len - i) / 2400.0f;   // the last 50 ms fade out
+            v = v > 1.0f ? 1.0f : v < -1.0f ? -1.0f : v;
+            s_introPcm[i] = (s16)(v * 32000.0f);
+        }
+    free(mix);
+    return s_introPcm ? len : 0;
+}
+
+// Leaving online play (online_intro's way out, 1.6 s): the rush already fast and opening further, beeps of data
+// racing by, swelling to 1.15 s (out into the light) and breathing out with a soft chord (G5 C6 E6).
+#define OUTRO_MS 1800
+#define OUTRO_OUT 1.15f
+static u32 outro_make(void)
+{
+    static const float notes[8] = { 1046.5f, 1318.5f, 1568.0f, 1760.0f, 2093.0f, 2349.3f, 2637.0f, 3136.0f };
+    const u32 len = OUTRO_MS * SFX_RATE / 1000;
+    const float pi2 = 6.2831853f;
+    const int keepStyle = s_sfxStyle;
+    float *mix = (float *)calloc(len, sizeof(float)), lp1 = 0, lp2 = 0, a1 = 0, a2 = 0, t;
+    double hum = 0;
+    u32 i, seed = 46;
+    if (!mix) return 0;
+    for (i = 0; i < len; i++)
+    {
+        const float ti = i / (float)SFX_RATE, open = ti < OUTRO_OUT ? ti / OUTRO_OUT : 1.0f;
+        float n, env, henv;
+        if (!(i & 63))
+        {
+            const float fc = 1500.0f + 5000.0f * open * open;
+            a1 = 1.0f - expf(-pi2 * fc / SFX_RATE);
+            a2 = 1.0f - expf(-pi2 * fc * 0.25f / SFX_RATE);
+        }
+        n = (intro_rand(&seed) & 0xFFFF) / 32768.0f - 1.0f;
+        lp1 += a1 * (n - lp1);
+        lp2 += a2 * (n - lp2);
+        env = ti < OUTRO_OUT ? 0.12f + 0.26f * open * open : 0.38f * expf(-(ti - OUTRO_OUT) / 0.22f);
+        mix[i] += (lp1 - lp2) * env * 1.6f;
+        hum += pi2 * (110.0f + 110.0f * open) / SFX_RATE;
+        henv = (ti < 0.1f ? ti / 0.1f : 1.0f) * (ti < OUTRO_OUT ? 1.0f : expf(-(ti - OUTRO_OUT) / 0.15f));
+        mix[i] += 0.08f * henv * (float)sin(hum) * (0.75f + 0.25f * sinf(pi2 * 12.0f * ti));
+    }
+    s_sfxStyle = XB_SFX_STYLE_GLASS;
+    for (t = 0.03f; t < OUTRO_OUT;)
+    {
+        const float d = 0.010f + (intro_rand(&seed) % 15) / 1000.0f, f = notes[intro_rand(&seed) % 8];
+        sfx_tone(mix, len, t * 1000.0f, d * 1000.0f, f, f * 1.08f, 0.05f + 0.05f * (t / OUTRO_OUT), 0.8f, d * 600.0f);
+        t += d + 0.03f * (0.5f + (intro_rand(&seed) % 100) / 100.0f);
+    }
+    sfx_tone(mix, len, OUTRO_OUT * 1000.0f, 600, 784.0f, 784.0f, 0.08f, 4, 450);
+    sfx_tone(mix, len, OUTRO_OUT * 1000.0f + 25, 580, 1046.5f, 1046.5f, 0.07f, 4, 450);
+    sfx_tone(mix, len, OUTRO_OUT * 1000.0f + 50, 560, 1318.5f, 1318.5f, 0.06f, 4, 450);
+    s_sfxStyle = keepStyle;
+    s_introPcm = (s16 *)malloc(len * sizeof(s16));
+    if (s_introPcm)
+        for (i = 0; i < len; i++)
+        {
+            float v = mix[i];
+            if (i + 2400 > len) v *= (len - i) / 2400.0f;
+            v = v > 1.0f ? 1.0f : v < -1.0f ? -1.0f : v;
+            s_introPcm[i] = (s16)(v * 32000.0f);
+        }
+    free(mix);
+    return s_introPcm ? len : 0;
+}
+
+void xb_audio_online_intro(int on)
+{
+    if (s_introVoice)
+    {
+        s_introVoice->Stop(0);
+        s_introVoice->FlushSourceBuffers();
+        s_introVoice->DestroyVoice();
+        s_introVoice = NULL;
+    }
+    free(s_introPcm);
+    s_introPcm = NULL;
+    if (on && s_xa && s_master && s_sfxVolume > 0.0f)
+    {
+        WAVEFORMATEX wf;
+        XAUDIO2_BUFFER b;
+        const u32 len = on == 2 ? outro_make() : intro_make();
+        if (!len) return;
+        memset(&wf, 0, sizeof(wf));
+        wf.wFormatTag = WAVE_FORMAT_PCM;
+        wf.nChannels = 1;
+        wf.nSamplesPerSec = SFX_RATE;
+        wf.wBitsPerSample = 16;
+        wf.nBlockAlign = 2;
+        wf.nAvgBytesPerSec = SFX_RATE * 2;
+        if (FAILED(s_xa->CreateSourceVoice(&s_introVoice, &wf, 0, XAUDIO2_DEFAULT_FREQ_RATIO, NULL, NULL, NULL))) { s_introVoice = NULL; return; }
+        memset(&b, 0, sizeof(b));
+        b.AudioBytes = len * 2;
+        b.pAudioData = (const BYTE *)s_introPcm;
+        b.Flags = XAUDIO2_END_OF_STREAM;
+        s_introVoice->SetVolume(SFX_GAIN * 1.3f * s_sfxVolume);
+        if (SUCCEEDED(s_introVoice->SubmitSourceBuffer(&b, NULL))) s_introVoice->Start(0, XAUDIO2_COMMIT_NOW);
+    }
+}

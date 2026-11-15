@@ -46,6 +46,8 @@ enum { XB_MUSIC_ORDER = 0, XB_MUSIC_RANDOM, XB_MUSIC_TRACK, XB_MUSIC_OFF };   //
 int xb_audio_music_start(const char *folder, int mode, const char *track);
 void xb_audio_music_tick(void);
 void xb_audio_music_stop(void);
+// 1: the music stops where it is (the online intro plays); 0: it goes on from there.
+void xb_audio_music_pause(int on);
 // The folder's tracks, for the menu: their number (sorted by name), each one's file name.
 int xb_audio_music_scan(const char *folder);
 const char *xb_audio_music_track(int i);
@@ -92,6 +94,9 @@ void xb_audio_ui_style(int style);
 // value_down, fav_on, fav_off, launch, save, notify, error, saver; PCM 8 or
 // 16-bit, mono or stereo, any rate) plays in place of the made-up one.
 void xb_audio_ui_folder(const char *folder);
+// The online intro's sound (4.3 s: data down a line, the logo landing at 2.2 s), at the interface sounds' volume;
+// 2 the way out instead (1.6 s, out into the light at 1.15 s); 0 stops it (also before playing it again).
+void xb_audio_online_intro(int on);
 
 // ---- Volume (Settings > Volumen) ----
 // 0..100, applied at once to whichever voice is live and remembered for the

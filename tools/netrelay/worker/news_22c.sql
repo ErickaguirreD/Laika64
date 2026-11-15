@@ -1,0 +1,9 @@
+-- Online play only with the latest version (2026-11-14). Each text at most 300 characters.
+INSERT INTO news (date, lang, title, text) VALUES
+ ('2026-11-14', 'es', 'En línea con la última versión', 'Al entrar al juego en línea LAIKA comprueba que tienes la última versión. Si no, te ofrece actualizar y vuelves a la lista de juegos o a Ajustes. Así todos juegan con la misma versión.'),
+ ('2026-11-14', 'en', 'Online with the latest version', 'Entering online play, LAIKA checks that you have the latest version. If not, it offers the update and takes you back to the game list or Settings. That way everyone plays on the same version.'),
+ ('2026-11-14', 'pt', 'Online com a última versão', 'Ao entrar no jogo online o LAIKA verifica se você tem a última versão. Se não, oferece a atualização e você volta para a lista de jogos ou para os Ajustes. Assim todos jogam com a mesma versão.'),
+ ('2026-11-14', 'fr', 'En ligne avec la dernière version', 'En entrant dans le jeu en ligne, LAIKA vérifie que tu as la dernière version. Sinon, il propose la mise à jour et te ramène à la liste des jeux ou aux Réglages. Ainsi tout le monde joue avec la même version.'),
+ ('2026-11-14', 'it', 'Online con l''ultima versione', 'Entrando nel gioco online LAIKA controlla che tu abbia l''ultima versione. Altrimenti propone l''aggiornamento e torni alla lista dei giochi o alle Impostazioni. Così tutti giocano con la stessa versione.'),
+ ('2026-11-14', 'de', 'Online mit der neuesten Version', 'Beim Öffnen des Online-Spiels prüft LAIKA, ob du die neueste Version hast. Wenn nicht, bietet es das Update an und bringt dich zur Spieleliste oder zu den Einstellungen zurück. So spielen alle mit derselben Version.'),
+ ('2026-11-14', 'ru', 'По сети только с последней версией', 'При входе в игру по сети LAIKA проверяет, что у тебя последняя версия. Если нет, предлагает обновиться и возвращает к списку игр или в Настройки. Так все играют на одной версии.');

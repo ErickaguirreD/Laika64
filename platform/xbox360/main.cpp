@@ -1011,6 +1011,7 @@ static int s_statePending;          // a save waits for a quiet point (no HLE ta
 static char s_osd[160];
 static DWORD s_osdUntil;
 #define OSD_MS 2000                 // how long a toast stays
+static DWORD s_osdLen = OSD_MS;     // ... this one (the online ones longer)
 
 // A toast from a menu text (T_*), with a number for its %d if it has one;
 // the log gets the English text.
@@ -1022,6 +1023,7 @@ static void OsdT(int id, int num)
     _snprintf(en, sizeof(en) - 1, TrIn(LANG_EN, id), num);
     en[sizeof(en) - 1] = 0;
     s_osdUntil = GetTickCount() + OSD_MS;
+    s_osdLen = OSD_MS;
     H64_INFO("[main] %s", en);
 }
 
@@ -1151,6 +1153,7 @@ static void NetOsd(const char *text, DWORD ms)
     _snprintf(s_osd, sizeof(s_osd) - 1, "%s", text);
     s_osd[sizeof(s_osd) - 1] = 0;
     s_osdUntil = GetTickCount() + ms;
+    s_osdLen = ms;
     H64_INFO("[net] %s", text);
 }
 
@@ -2245,7 +2248,7 @@ static void PlayersDraw(void)
         // The connection, the time (four bars and the ms), then the country, the name and what it does.
         if (conn != ONLINE_CONN_NONE)
         {
-            const char *t = conn == ONLINE_CONN_CABLE ? "LAN" : "Wi-Fi";
+            const char *t = conn == ONLINE_CONN_CABLE ? "LAN" : conn == ONLINE_CONN_WIFI ? "Wi-Fi" : Tr(T_ONLINE_CONN_OLD);
             const float tw = UiTextWidth(UI_BOLD, 13, t) + 12;
             UiRoundRect(right - tw, cy - 10, tw, 20, 6, UiAlpha(UI_COL_CARD, 0.9f), UiAlpha(UI_COL_CARD, 0.9f));
             UiText(UI_BOLD, 13, right - tw * 0.5f, cy, UI_COL_TEXT2, t, UI_CENTER);
@@ -2526,7 +2529,7 @@ static void OverlayHook(void *, IDirect3DDevice9 *dev)
         else if (s_confirmOpen == CONFIRM_SAVE_GAME) UiConfirmDraw(-1, T_SAVE_GAME_ASK, T_FOOT_SAVE_ASK);
         else if (s_confirmOpen == CONFIRM_SAVE_ALL) UiConfirmDraw(-1, T_SAVE_ALL_ASK, T_FOOT_SAVE_ASK);
     }
-    if (osd) UiToast(s_osd, (float)(OSD_MS - left), (float)OSD_MS);
+    if (osd) UiToast(s_osd, (float)((s32)s_osdLen - left), (float)s_osdLen);
     UiEnd();
 }
 
@@ -3239,9 +3242,11 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
         int queued;
         NetKeepAlive();
         {
-            // Online play's news (a friend came online, a friendship asked, a message): a toast over the game.
+            // Online play's news (a friend came online, a friendship asked, a message, an invitation to play - longer,
+            // so it can be read without stopping): a toast over the game.
             char notice[200];
-            if (OnlineNoticeTake(notice, sizeof(notice))) NetOsd(notice, 9000);
+            int invite = 0;
+            if (OnlineNoticeTake(notice, sizeof(notice), &invite)) NetOsd(notice, invite ? 12000 : 9000);
         }
         if (XInputGetState(0, &s_pad) == ERROR_SUCCESS) s_padValid = 1;
         else s_padValid = 0;
@@ -3262,6 +3267,7 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
             {
                 strcpy(s_osd, low);
                 s_osdUntil = GetTickCount() + OSD_MS;
+                s_osdLen = OSD_MS;
                 H64_INFO("[main] %s", low);
             }
         }

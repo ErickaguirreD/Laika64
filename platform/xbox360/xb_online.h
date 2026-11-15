@@ -55,13 +55,18 @@ struct OnlineUser
     int inRoom;         // in a room's lobby (Play online's players)
     int ms, conn;       // its time to the server and back (0: not known); its connection (ONLINE_CONN_*)
 };
-enum { ONLINE_CONN_NONE = 0, ONLINE_CONN_CABLE, ONLINE_CONN_WIFI };
+enum { ONLINE_CONN_NONE = 0, ONLINE_CONN_CABLE, ONLINE_CONN_WIFI, ONLINE_CONN_OLD };   // OLD: a LAIKA before 2.1 (tells neither)
 enum { ONLINE_LIST_USERS = 0, ONLINE_LIST_FRIENDS, ONLINE_LIST_RANK };
 int OnlineList(int kind, int offset, std::vector<OnlineUser> *out);   // 50 at a time from `offset` (friends: all)
 // add: asks for a friendship (*how "sent", or "accepted" when the other had asked too), else ends one.
 int OnlineFriend(const char *name, int add, char *how = NULL, size_t howSize = 0);
 int OnlineRequests(std::vector<OnlineUser> *out);   // the friendships asked of this player
 int OnlineAnswer(const char *name, int yes);
+// An invitation to the room `code` (waiting) for that player: told at once (*live 1) or when its console next
+// connects (*live 0). OnlineError "busy": invited a moment ago; "none": the room is not listed (yet).
+int OnlineInvite(const char *name, unsigned code, int *live);
+// The room of the last invitation received in the last ten minutes (Play online selects it), 0: none.
+unsigned OnlineInvitedTo(void);
 
 // ---- Messages between friends ----
 struct OnlineDmLine { int id, mine; std::string text; };
@@ -87,9 +92,10 @@ void OnlineWatchUsers(int on);
 int OnlineWatchedUsers(std::vector<OnlineUser> *out);
 int OnlineMyConn(void);                   // ONLINE_CONN_*
 void OnlinePlayed(const char *code, const char *game, int minutes);   // a game just left: sent soon
-// The next notice of the player's news (a friend came online, a friendship asked, a message): 1 with its
-// text in `out`, 0 when there is none. The ROM list and the game show them.
-int OnlineNoticeTake(char *out, size_t size);
+// The next notice of the player's news (a friend came online, a friendship asked, a message, an invitation
+// to play - this one at once, through a connection kept open to the server): 1 with its text in `out`, 0 when
+// there is none; *invite (may be NULL) 1 for an invitation (shown longer). The ROM list and the game show them.
+int OnlineNoticeTake(char *out, size_t size, int *invite = NULL);
 
 // ---- Public rooms and the general chat ----
 #define ONLINE_ROOM_NAME 24

@@ -11037,10 +11037,11 @@ static float online_ping_bars(float x, float cy, float h, int ms)
     return 4 * bw + 3 * gap;
 }
 
-// "LAN" or "Wi-Fi" (ONLINE_CONN_*), right-aligned at rx: its width (0: not known).
+// "LAN" or "Wi-Fi" (ONLINE_CONN_*), or "Old" for a LAIKA before 2.1 (which tells neither), right-aligned at rx:
+// its width (0: not known).
 static float online_conn_tag(float rx, float cy, int conn)
 {
-    const char *t = conn == ONLINE_CONN_CABLE ? "LAN" : conn == ONLINE_CONN_WIFI ? "Wi-Fi" : NULL;
+    const char *t = conn == ONLINE_CONN_CABLE ? "LAN" : conn == ONLINE_CONN_WIFI ? "Wi-Fi" : conn == ONLINE_CONN_OLD ? Tr(T_ONLINE_CONN_OLD) : NULL;
     float w;
     if (!t) return 0;
     w = UiTextWidth(UI_BOLD, 12, t) + 10;
@@ -11049,10 +11050,149 @@ static float online_conn_tag(float rx, float cy, int conn)
     return w;
 }
 
+// Invite to play, from a room's lobby: two lists side by side, the friends (online first) and the players online
+// lately who are not friends, neither with those already in the room. A invites the one selected: it is told at
+// once, in its menus or over its game ("<me> wants to play <game> with you"). LB and RB change list, Y reads
+// them again, B goes back. The room is kept alive meanwhile: what its poll says when not 0 or 1 (the game
+// starts, the room is over) ends the screen and is returned for the lobby; else 0.
+static void online_column(float x, float y, float w, float h, const char *title, int focused);
+static int online_invite(IDirect3DDevice9 *dev)
+{
+    static UiAnim selAnim;
+    std::vector<OnlineUser> list[2];
+    std::vector<std::string> invited;
+    UiInput in;
+    char note[120] = "";
+    DWORD noteAt = 0;
+    int sel[2] = { 0, 0 }, top[2] = { 0, 0 }, focus = 0, load = 1, k, j;
+    const int rows = 8;
+    UiInputInit(&in);
+    for (;;)
+    {
+        const float x = UI_SAFE_X, y = UI_SAFE_Y + 64, w = UI_WIDTH - 2 * UI_SAFE_X, h = 636 - 14 - y, gap = 20;
+        const float colW = (w - gap) * 0.5f, rowH = 56;
+        const OnlineLobby *lb = OnlineRoomLobby();
+        WORD down;
+        const int r = OnlineRoomPoll();
+        if (r < 0 || r == 2) return r;
+        if (load)
+        {
+            // Friends (all, online first) and the players online, less me, my friends and those in the room.
+            std::vector<OnlineUser> users;
+            online_busy(dev, Tr(T_ONLINE_INVITE), T_ONLINE_CONNECTING);
+            for (j = 0; j < 2; j++) list[j].clear();
+            if (OnlineList(ONLINE_LIST_FRIENDS, 0, &users)) list[0] = users;
+            if (OnlineList(ONLINE_LIST_USERS, 0, &users))
+                for (k = 0; k < (int)users.size(); k++)
+                    if (users[k].online && users[k].isFriend != 1 && _stricmp(users[k].name, OnlineMe()->tag)) list[1].push_back(users[k]);
+            for (j = 0; j < 2; j++)
+                for (k = (int)list[j].size() - 1; k >= 0; k--)
+                {
+                    int i, inRoom = 0;
+                    for (i = 0; i < lb->count; i++)
+                        if (!_stricmp(lb->tag[i], list[j][k].name)) inRoom = 1;
+                    if (inRoom) list[j].erase(list[j].begin() + k);
+                }
+            for (j = 0; j < 2; j++) if (sel[j] >= (int)list[j].size()) sel[j] = top[j] = 0;
+            if (list[0].empty() && !list[1].empty()) focus = 1;
+            load = 0;
+            UiInputInit(&in);
+            continue;
+        }
+        down = UiInputPoll(&in);
+        if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) { xb_audio_ui_sound(XB_SFX_BACK); return 0; }
+        if (down & XINPUT_GAMEPAD_Y) { xb_audio_ui_sound(XB_SFX_ACTION); load = 1; continue; }
+        if ((down & XINPUT_GAMEPAD_LEFT_SHOULDER) && focus) { focus = 0; xb_audio_ui_sound(XB_SFX_TAB); }
+        if ((down & XINPUT_GAMEPAD_RIGHT_SHOULDER) && !focus) { focus = 1; xb_audio_ui_sound(XB_SFX_TAB); }
+        {
+            std::vector<OnlineUser> &l = list[focus];
+            const int n = (int)l.size();
+            int &s = sel[focus];
+            if (n && (down & (XINPUT_GAMEPAD_DPAD_UP | XINPUT_GAMEPAD_DPAD_DOWN)))
+            {
+                s = (s + ((down & XINPUT_GAMEPAD_DPAD_DOWN) ? 1 : n - 1)) % n;
+                xb_audio_ui_sound(XB_SFX_MOVE);
+            }
+            if (n && (down & XINPUT_GAMEPAD_A))
+            {
+                int live = 0;
+                online_busy(dev, Tr(T_ONLINE_INVITE), T_ONLINE_CONNECTING);
+                if (OnlineInvite(l[s].name, lb->code, &live))
+                {
+                    xb_audio_ui_sound(XB_SFX_SELECT);
+                    _snprintf(note, sizeof(note) - 1, Tr(live ? T_ONLINE_INV_SENT : T_ONLINE_INV_LATER), l[s].name);
+                    invited.push_back(l[s].name);
+                }
+                else
+                {
+                    xb_audio_ui_sound(XB_SFX_ERROR);
+                    if (!strcmp(OnlineError(), "busy")) _snprintf(note, sizeof(note) - 1, Tr(T_ONLINE_INV_SOON), l[s].name);
+                    else _snprintf(note, sizeof(note) - 1, "%s", online_error_text());
+                }
+                note[sizeof(note) - 1] = 0;
+                noteAt = GetTickCount();
+                UiInputInit(&in);
+                continue;
+            }
+        }
+        for (j = 0; j < 2; j++)
+        {
+            if (sel[j] < top[j]) top[j] = sel[j];
+            if (sel[j] >= top[j] + rows) top[j] = sel[j] - rows + 1;
+        }
+        dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
+        UiBegin(dev);
+        UiBackdrop();
+        browser_effect();
+        UiText(UI_BOLD, 30, x, y - 40, UI_COL_TEXT, Tr(T_ONLINE_INVITE), UI_LEFT);
+        UiText(UI_REGULAR, 18, x + w, y - 40, UI_COL_ACCENT_HI, lb->game, UI_RIGHT);
+        for (j = 0; j < 2; j++)
+        {
+            const float cx = x + j * (colW + gap);
+            const std::vector<OnlineUser> &l = list[j];
+            const int n = (int)l.size();
+            char t[64];
+            _snprintf(t, sizeof(t) - 1, "%s (%d)", Tr(j ? T_ONLINE_INV_RECENT : T_ONLINE_FRIENDS), n);
+            t[sizeof(t) - 1] = 0;
+            online_column(cx, y, colW, h, t, focus == j);
+            if (!n) UiText(UI_REGULAR, 18, cx + colW * 0.5f, y + h * 0.5f, UI_COL_TEXT3, Tr(j ? T_ONLINE_INV_NO_RECENT : T_ONLINE_INV_NO_FRIENDS), UI_CENTER);
+            else if (focus == j) selection_bar(cx + 8, anim_step(&selAnim, y + 58 + (sel[j] - top[j]) * rowH, 0) + 1, colW - 16, rowH - 2);
+            for (k = 0; k < rows && top[j] + k < n; k++)
+            {
+                const OnlineUser *u = &l[top[j] + k];
+                const int s1 = focus == j && top[j] + k == sel[j];
+                const float cy = y + 58 + k * rowH + rowH * 0.5f;
+                int was = 0, i;
+                float fw;
+                char fit[80], st[80];
+                for (i = 0; i < (int)invited.size(); i++)
+                    if (!_stricmp(invited[i].c_str(), u->name)) was = 1;
+                online_avatar(cx + 40, cy, 20, u->avatar, u->name);
+                fw = online_flag(cx + 72, cy - 10, 14, online_country_index(u->country));
+                UiTextFit(s1 ? UI_BOLD : UI_REGULAR, 19, colW - 230 - fw, u->name, fit, sizeof(fit));
+                UiText(s1 ? UI_BOLD : UI_REGULAR, 19, cx + 72 + (fw ? fw + 8 : 0), cy - 10, s1 ? UI_COL_TEXT : UI_COL_TEXT2, fit, UI_LEFT);
+                // Under the name: where it is (playing what, in a room, online or not).
+                if (u->online && u->status[0]) _snprintf(st, sizeof(st) - 1, Tr(T_ONLINE_PLAYING), u->status);
+                else _snprintf(st, sizeof(st) - 1, "%s", Tr(u->online ? (u->inRoom ? T_ONLINE_ST_ROOM : T_ONLINE_ON) : T_ONLINE_OFF));
+                st[sizeof(st) - 1] = 0;
+                UiTextFit(UI_REGULAR, 14, colW - 230, st, fit, sizeof(fit));
+                UiCircle(cx + 77, cy + 12, 4, u->online ? ONLINE_GREEN : UI_COL_TEXT3);
+                UiText(UI_REGULAR, 14, cx + 88, cy + 12, u->online ? UI_COL_TEXT2 : UI_COL_TEXT3, fit, UI_LEFT);
+                if (was) UiText(UI_BOLD, 15, cx + colW - 22, cy, ONLINE_GREEN, Tr(T_ONLINE_INVITED), UI_RIGHT);
+            }
+        }
+        if (noteAt && GetTickCount() - noteAt < 4000) UiToast(note, (float)(GetTickCount() - noteAt), 4000.0f);
+        UiScreenFooter(Tr(T_FOOT_ONLINE_INVITE));
+        UiEnd();
+        dev->Present(NULL, NULL, NULL, NULL);
+        Sleep(16);
+    }
+}
+
 // A room's lobby, the whole screen: its players (up to four) with each one's time to this console, the
 // chat with the keyboard always under it. The host starts the game (START: a countdown, then the game;
-// two players at least) and can put a player out (LT chooses, BACK puts it out: it may come back). B
-// leaves the room. 1 when the game starts: its file in s_onlineLaunch (the host's own; the others look
+// two players at least) and can put a player out (LB chooses, BACK puts it out: it may come back). RS
+// invites friends or players online (online_invite). B leaves the room. 1 when the game starts: its file in s_onlineLaunch (the host's own; the others look
 // for the room's game in their list as they join).
 static int online_lobby(IDirect3DDevice9 *dev, const std::string &hostFile)
 {
@@ -11064,6 +11204,7 @@ static int online_lobby(IDirect3DDevice9 *dev, const std::string &hostFile)
     DWORD saidAt = 0;   // the host's START sent (again after a while: the server waits while the last game is played)
     DWORD newAt = 0;    // a player came in (its name shown, the chimes played from then)
     int chimes = 3;
+    int got = 0;        // what the room's poll said during Invite to play (the game starts, the room is over)
     char newTag[ONLINE_TAG_MAX + 1] = "";
     kbd_init(&kb, text, 1, 80, KBD_CHAT);
     UiInputInit(&in);
@@ -11075,8 +11216,9 @@ static int online_lobby(IDirect3DDevice9 *dev, const std::string &hostFile)
         const int host = lb->mine == 0, places = lb->max >= 2 && lb->max <= ONLINE_ROOM_PLAYERS ? lb->max : ONLINE_ROOM_PLAYERS;
         const int said = saidAt && GetTickCount() - saidAt < 5000;
         WORD down = UiInputPoll(&in);
-        int r = OnlineRoomPoll();
+        int r = got ? got : OnlineRoomPoll();
         char t[96];
+        got = 0;
         if (r < 0)
         {
             online_message(dev, Tr(T_ONLINE_PLAY), online_error_text());
@@ -11103,6 +11245,14 @@ static int online_lobby(IDirect3DDevice9 *dev, const std::string &hostFile)
         if (newAt && chimes < 3 && GetTickCount() - newAt >= (DWORD)chimes * 320) { xb_audio_ui_sound_instead(XB_SFX_NOTIFY); chimes++; }
         if (pick >= lb->count) pick = lb->count > 1 ? 1 : 0;
         if (down & XINPUT_GAMEPAD_B) { OnlineRoomClose(); xb_audio_ui_sound(XB_SFX_BACK); return 0; }
+        if ((down & XINPUT_GAMEPAD_RIGHT_THUMB) && !lb->countdown)
+        {
+            // RS: Invite to play (friends, players online lately).
+            xb_audio_ui_sound(XB_SFX_SELECT);
+            got = online_invite(dev);
+            UiInputInit(&in);
+            continue;
+        }
         if (host && !lb->countdown)
         {
             if ((down & XINPUT_GAMEPAD_START) && lb->count >= 2 && !said) { saidAt = GetTickCount() | 1; OnlineRoomStart(); xb_audio_ui_sound(XB_SFX_SELECT); }
@@ -11369,10 +11519,15 @@ static int online_play(IDirect3DDevice9 *dev)
     int sel = 0, top = 0, usel = 0, utop = 0, k, n, nu, last = 0, focus = COL_ROOMS;
     BYTE rtWas = 255, ltWas = 255;
     int rsWas = 0;   // the right stick's last side (-1 left, 1 right)
+    unsigned invited = OnlineInvitedTo();   // the room of an invitation: selected when listed
+    char note[200] = "";                    // online news while here (an invitation...), as a toast
+    DWORD noteAt = 0;
     kbd_init(&kb, text, 1, 80, KBD_CHAT);
     online_busy(dev, Tr(T_ONLINE_PLAY), T_ONLINE_CONNECTING);
     if (!OnlineLobbyGet(0, &rooms, &games, &users, &chat)) { online_message(dev, Tr(T_ONLINE_PLAY), online_error_text()); return 0; }
     if (!chat.empty()) last = chat.back().id;
+    for (k = 0; invited && k < (int)rooms.size(); k++)
+        if (rooms[k].code == invited) { sel = k; invited = 0; }
     readAt = GetTickCount() + ONLINE_ROOMS_EVERY_MS;
     UiInputInit(&in);
     for (;;)
@@ -11385,8 +11540,15 @@ static int online_play(IDirect3DDevice9 *dev)
         XINPUT_STATE st;
         const int padOk = XInputGetState(0, &st) == ERROR_SUCCESS;
         int coverLoads = 1;   // rooms' box art read this frame at most (room_cover)
+        int invite = 0;
         n = (int)rooms.size();
         nu = (int)users.size();
+        if (OnlineNoticeTake(note, sizeof(note), &invite))
+        {
+            noteAt = GetTickCount() | 1;
+            xb_audio_ui_sound(XB_SFX_NOTIFY);
+            if (invite) { invited = OnlineInvitedTo(); readAt = GetTickCount(); }   // the lists again: its room selected
+        }
         if ((int)(GetTickCount() - readAt) >= 0 || (focus == COL_ROOMS && (down & XINPUT_GAMEPAD_Y)))
         {
             // Everything again (one request), the same room and the same player kept selected.
@@ -11402,6 +11564,8 @@ static int online_play(IDirect3DDevice9 *dev)
                 sel = usel = 0;
                 for (k = 0; k < (int)rooms.size(); k++)
                     if (rooms[k].code == was) sel = k;
+                for (k = 0; invited && k < (int)rooms.size(); k++)
+                    if (rooms[k].code == invited) { sel = k; focus = COL_ROOMS; invited = 0; }
                 for (k = 0; k < (int)users.size(); k++)
                     if (uwas == users[k].name) usel = k;
                 n = (int)rooms.size();
@@ -11494,7 +11658,7 @@ static int online_play(IDirect3DDevice9 *dev)
         UiBegin(dev);
         UiBackdrop();
         browser_effect();
-        UiText(UI_BOLD, 30, x, y - 40, UI_COL_TEXT, Tr(T_ONLINE_PLAY), UI_LEFT);
+        UiOnlineLogo(UI_WIDTH * 0.5f, y - 34, 60);   // the title: the LAIKA 64 ONLINE logo, centred
         {
             // How many play online and how many rooms there are, top right.
             char t[96];
@@ -11525,18 +11689,17 @@ static int online_play(IDirect3DDevice9 *dev)
             IDirect3DTexture9 *cover = room_cover(dev, rm->art, &coverLoads, &cw, &chh);
             if (cover && chh > 0)
             {
-                // Its game's box, small, left of the name (the padlock on its corner when there is a password).
+                // Its game's box, small, left of the name.
                 const float ch = rowH - 16, cwv = ch * cw / chh;
                 UiImage(cover, x + 30 - cwv * 0.5f, cy - ch * 0.5f, cwv, ch, 3, D3DCOLOR_ARGB(255, 255, 255, 255));
-                if (rm->locked)
-                {
-                    UiCircle(x + 30 + cwv * 0.5f - 2, cy + ch * 0.5f - 6, 9, UI_COL_BG_BOTTOM);
-                    online_padlock(x + 30 + cwv * 0.5f - 2, cy + ch * 0.5f - 6, 11, s1 ? UI_COL_ACCENT_HI : UI_COL_TEXT);
-                }
             }
-            else if (rm->locked) online_padlock(x + 30, cy, 18, s1 ? UI_COL_ACCENT_HI : UI_COL_TEXT2);
-            UiTextFit(UI_BOLD, 18, leftW - 210, rm->name, fit, sizeof(fit));
-            UiText(UI_BOLD, 18, x + 50, cy - 10, s1 ? UI_COL_TEXT : UI_COL_TEXT2, fit, UI_LEFT);
+            {
+                // The name, and right after it a padlock when the room has a password.
+                float nw;
+                UiTextFit(UI_BOLD, 18, leftW - 210 - (rm->locked ? 26 : 0), rm->name, fit, sizeof(fit));
+                nw = UiText(UI_BOLD, 18, x + 50, cy - 10, s1 ? UI_COL_TEXT : UI_COL_TEXT2, fit, UI_LEFT);
+                if (rm->locked) online_padlock(x + 50 + nw + 14, cy - 11, 16, s1 ? UI_COL_ACCENT_HI : D3DCOLOR_ARGB(255, 240, 200, 70));
+            }
             UiTextFit(UI_REGULAR, 14, leftW - 210, rm->game, fit, sizeof(fit));
             UiText(UI_REGULAR, 14, x + 50, cy + 11, UI_COL_ACCENT_HI, fit, UI_LEFT);
             online_ping_bars(x + leftW - 150, cy, 16, ms);
@@ -11607,8 +11770,11 @@ static int online_play(IDirect3DDevice9 *dev)
             float right = usersX + usersW - 14;
             char fit[64];
             right -= online_conn_tag(right, cy, me ? OnlineMyConn() : u->conn) + 6;
-            right -= 18;
-            online_ping_bars(right, cy, 14, ms);
+            if (me || u->conn != ONLINE_CONN_OLD)   // an old LAIKA tells no time: no bars
+            {
+                right -= 18;
+                online_ping_bars(right, cy, 14, ms);
+            }
             right -= 8;
             UiTextFit(s1 || me ? UI_BOLD : UI_REGULAR, 16, right - usersX - 30 - fw, u->name, fit, sizeof(fit));
             UiText(s1 || me ? UI_BOLD : UI_REGULAR, 16, usersX + 22 + fw, cy - 7, me ? UI_COL_ACCENT_HI : s1 ? UI_COL_TEXT : UI_COL_TEXT2, fit, UI_LEFT);
@@ -11621,6 +11787,7 @@ static int online_play(IDirect3DDevice9 *dev)
             UiRect(usersX + usersW - 6, trackY, 3, trackH, UiAlpha(UI_COL_TEXT3, 0.3f));
             UiRect(usersX + usersW - 6, trackY + (trackH - barH) * utop / (nu - userRows), 3, barH, UI_COL_ACCENT_HI);
         }
+        if (noteAt && GetTickCount() - noteAt < 9000) UiToast(note, (float)(GetTickCount() - noteAt), 9000.0f);
         UiScreenFooter(Tr(focus == COL_CHAT ? T_FOOT_ONLINE_PLAY_CHAT : focus == COL_PLAYERS ? T_FOOT_ONLINE_PLAYERS : T_FOOT_ONLINE_ROOMS));
         UiEnd();
         dev->Present(NULL, NULL, NULL, NULL);
@@ -11808,6 +11975,328 @@ static void online_donate(IDirect3DDevice9 *dev)
     }
 }
 
+// The Telegram group's QR code of https://t.me/+RFVZZHEr_ZczYzAx (version 3, level M; made on a PC with
+// Python's qrcode and decoded back to check it).
+#define TELEGRAM_URL "t.me/+RFVZZHEr_ZczYzAx"
+static const char *const s_telegramQr[29] = {
+    "11111110001101001100001111111",
+    "10000010100000111011001000001",
+    "10111010010011101001101011101",
+    "10111010001011110111101011101",
+    "10111010110100100101001011101",
+    "10000010000111000001101000001",
+    "11111110101010101010101111111",
+    "00000000010001101101100000000",
+    "10101010011110110100100010010",
+    "11000101101110110101111101001",
+    "10111010000011000110110110111",
+    "11100001001010010111001000010",
+    "11011010100110001101101001011",
+    "01010101010011011011111001001",
+    "10101111000010111110100111011",
+    "11011000111101101100001011010",
+    "01011111010100110001011001011",
+    "00110100110100110011100001101",
+    "10111111100111000010101000011",
+    "01111000010000010110011011010",
+    "10011010001110001101111110000",
+    "00000000100111011010100010111",
+    "11111110000100111110101011011",
+    "10000010011101101100100011011",
+    "10111010100010111000111110010",
+    "10111010000010110101100110100",
+    "10111010101010101011101011001",
+    "10000010010100110110000100010",
+    "11111110111110110101100111011"
+};
+
+// Online play > Telegram group: what the group is for (agreeing on times for games, only that) beside its QR
+// code for a phone to scan.
+static void online_telegram(IDirect3DDevice9 *dev)
+{
+    UiInput in;
+    UiInputInit(&in);
+    for (;;)
+    {
+        const float w = 960, h = 520, x = (UI_WIDTH - w) * 0.5f, y = 112, tx = x + 40;
+        const float mod = 9, qs = mod * 33, qx = x + w - 40 - qs, qy = y + 60;
+        WORD down = UiInputPoll(&in);
+        int r, c;
+        if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK | XINPUT_GAMEPAD_A)) { xb_audio_ui_sound(XB_SFX_BACK); return; }
+        dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
+        UiBegin(dev);
+        hub_frame(Tr(T_ONLINE_TELEGRAM), NULL, x, y, w, h);
+        paragraph(UI_REGULAR, 18, tx, y + 60, qx - 40 - tx, 14, UI_COL_TEXT2, Tr(T_ONLINE_TELEGRAM_TEXT));
+        UiRoundRect(qx, qy, qs, qs, 10, 0xFFFFFFFF, 0xFFFFFFFF);
+        for (r = 0; r < 29; r++)
+            for (c = 0; s_telegramQr[r][c]; c++)
+                if (s_telegramQr[r][c] == '1') UiRect(qx + (c + 2) * mod, qy + (r + 2) * mod, mod, mod, D3DCOLOR_ARGB(255, 0, 0, 0));
+        UiText(UI_BOLD, 17, qx + qs * 0.5f, qy + qs + 24, UI_COL_ACCENT_HI, TELEGRAM_URL, UI_CENTER);
+        UiScreenFooter(Tr(T_FOOT_BACK_ONLY));
+        UiEnd();
+        dev->Present(NULL, NULL, NULL, NULL);
+        Sleep(16);
+    }
+}
+
+// ---- The online intro: down a tunnel of data, the LAIKA 64 ONLINE logo coming out of it ----
+// Every time online play opens: 4.2 s (A, B or START cut it short), the menus' music stopped meanwhile and its
+// own sound (xb_audio_online_intro, timed to it). The tunnel is drawn here: its wall in sectors and slices in
+// perspective, each sector a lane of words and numbers (xb_tunnel_data.h) flowing at its own speed, rings and
+// lines over it, packets of light racing out; its far end swings, so it bends. The logo comes from the far end
+// and lands in front at 2.2 s with a flash.
+#include "xb_tunnel_data.h"
+
+#define TUN_SECTORS 24
+#define TUN_SLICES 18
+#define TUN_SLICE 0.55f      // a slice's length (the tunnel's radius is 1)
+#define TUN_SUB 3            // each slice drawn in this many parts (the picture bent less across it)
+#define TUN_NEAR 0.16f       // the nearest depth drawn
+#define TUN_FAR (TUN_NEAR + TUN_SLICES * TUN_SLICE)
+#define TUN_FOCAL 330.0f     // pixels for a radius 1 at depth 1
+#define TUN_PACKETS 56
+#define INTRO_TOTAL 4.2f
+#define INTRO_LANDS 2.2f     // the logo in front (the sound's thump)
+#define INTRO_LOGO_H 180.0f
+#define OUTRO_TOTAL 1.6f
+#define OUTRO_OUT 1.15f      // out of the tunnel: its end's light fills the screen (the sound's swell)
+
+struct TunPacket { float ang, z, speed, len; D3DCOLOR col; };
+
+static float tun_frac(float v) { return v - floorf(v); }
+
+// The tunnel's speed at `t` (world units a second): 2 speeding up to 6 by the logo's landing ...
+static float tun_speed(float t) { return 2.0f + 4.0f * (t < INTRO_LANDS ? t / INTRO_LANDS : 1.0f); }
+
+// ... and how far it has gone.
+static float tun_dist(float t)
+{
+    return 2.0f * t + 4.0f * (t < INTRO_LANDS ? t * t / (2.0f * INTRO_LANDS) : INTRO_LANDS * 0.5f + (t - INTRO_LANDS));
+}
+
+// The centre of the tunnel at depth z on the screen: the far end swings slowly (the tunnel bends).
+static void tun_centre(float z, float t, float *x, float *y)
+{
+    const float k = (z / TUN_FAR) * (z / TUN_FAR);
+    *x = UI_WIDTH * 0.5f + 150.0f * sinf(t * 0.55f) * k;
+    *y = UI_HEIGHT * 0.5f + 90.0f * sinf(t * 0.8f + 1.0f) * k;
+}
+
+static void tun_point(float a, float z, float t, float *x, float *y)
+{
+    tun_centre(z, t, x, y);
+    *x += cosf(a) * TUN_FOCAL / z;
+    *y += sinf(a) * TUN_FOCAL / z;
+}
+
+// The light of the wall at depth z: dim far away, faded out very near (where its picture would be huge).
+static float tun_light(float z)
+{
+    float farF = 1.15f - z / TUN_FAR, nearF = (z - TUN_NEAR) / 0.45f;
+    if (farF > 1) farF = 1;
+    if (nearF > 1) nearF = 1;
+    return farF < nearF ? (farF < 0 ? 0 : farF) : (nearF < 0 ? 0 : nearF);
+}
+
+static unsigned tun_rand(unsigned *seed)
+{
+    *seed = *seed * 1664525u + 1013904223u;
+    return *seed >> 8;
+}
+
+static void tun_packet(TunPacket *p, unsigned *seed, int anywhere)
+{
+    // Its colour: mostly cyan and white, now and then one of the logo's (red, green, yellow, blue).
+    static const D3DCOLOR cols[8] = { D3DCOLOR_ARGB(255, 90, 230, 255), D3DCOLOR_ARGB(255, 230, 250, 255), D3DCOLOR_ARGB(255, 90, 230, 255),
+        D3DCOLOR_ARGB(255, 160, 240, 255), D3DCOLOR_ARGB(255, 255, 80, 70), D3DCOLOR_ARGB(255, 70, 230, 90),
+        D3DCOLOR_ARGB(255, 255, 220, 60), D3DCOLOR_ARGB(255, 70, 120, 255) };
+    p->ang = (tun_rand(seed) % TUN_SECTORS) * 6.2831853f / TUN_SECTORS;
+    p->z = anywhere ? TUN_NEAR + 0.3f + (tun_rand(seed) % 1000) / 1000.0f * (TUN_FAR - 0.5f) : TUN_FAR + (tun_rand(seed) % 100) / 50.0f;
+    p->speed = 5.0f + (tun_rand(seed) % 100) / 10.0f;
+    p->len = 0.5f + (tun_rand(seed) % 100) / 80.0f;
+    p->col = cols[tun_rand(seed) % 8];
+}
+
+// leaving: the way out when online play closes (1.6 s): already at full speed, the logo flying past, the
+// tunnel's end coming closer as a disc of light until it fills the screen, then fading to the menus.
+static void online_intro(IDirect3DDevice9 *dev, int leaving = 0)
+{
+    TunPacket packets[TUN_PACKETS];
+    float speedOf[TUN_SECTORS], last, end = leaving ? OUTRO_TOTAL : INTRO_TOTAL;
+    int laneOf[TUN_SECTORS], i, k, s;
+    unsigned seed = GetTickCount() | 1;
+    IDirect3DTexture9 *data = NULL;
+    const float start = UiTime();
+    UiInput in;
+    {
+        int w = 0, h = 0;
+        u8 *rgba = h64_png_decode(s_tunnelDataPng, sizeof(s_tunnelDataPng), &w, &h, 1024 * 1024);
+        if (rgba) { data = UiImageCreate(dev, rgba, w, h); free(rgba); }
+    }
+    for (i = 0; i < TUN_SECTORS; i++)
+    {
+        laneOf[i] = (i * 5) % TUNNEL_DATA_LANES;
+        speedOf[i] = 0.85f + (tun_rand(&seed) % 100) / 160.0f;   // each lane of data flows at its own speed
+    }
+    for (i = 0; i < TUN_PACKETS; i++) tun_packet(&packets[i], &seed, 1);
+    xb_audio_music_pause(1);
+    xb_audio_online_intro(leaving ? 2 : 1);
+    UiInputInit(&in);
+    last = 0;
+    for (;;)
+    {
+        const float t = UiTime() - start, dt = t - last > 0.1f ? 0.1f : t - last;
+        const WORD down = UiInputPoll(&in);
+        const float fade = leaving ? (t < 0.15f ? wiz_ease(t / 0.15f) : 1.0f)
+                                   : (t < 0.35f ? wiz_ease(t / 0.35f) : 1.0f) * (t > end - 0.45f ? 1.0f - wiz_ease((t - (end - 0.45f)) / 0.45f) : 1.0f);
+        const float rot = t * 0.22f;
+        // Leaving: at full speed and quickening; the tunnel's end (depth zx) coming in, nothing drawn past it.
+        const float dist = leaving ? 6.0f * t + 3.0f * t * t : tun_dist(t), speed = leaving ? 6.0f + 6.0f * t : tun_speed(t);
+        const float out = leaving ? (t < OUTRO_OUT ? t / OUTRO_OUT : 1.0f) : 0.0f;
+        const float zx = leaving ? TUN_NEAR * 0.7f + (TUN_FAR + 0.3f - TUN_NEAR * 0.7f) * (1.0f - out * out * out) : TUN_FAR + 10.0f;
+        float vx, vy, xy[8];
+        last = t;
+        if (t >= end) break;
+        if ((down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_START)) && t > 0.3f && end > t + 0.45f && !leaving)
+        {
+            end = t + 0.45f;   // cut short: a quick fade
+            xb_audio_online_intro(0);
+        }
+        dev->Clear(0, NULL, D3DCLEAR_TARGET, D3DCOLOR_ARGB(255, 2, 6, 12), 1.0f, 0);
+        UiBegin(dev);
+        if (leaving)
+        {
+            // The way out: a disc of light as wide as the tunnel at depth zx, behind the wall still before it.
+            tun_centre(zx, t, &vx, &vy);
+            UiCircle(vx, vy, TUN_FOCAL / zx, D3DCOLOR_ARGB((int)(fade * 255), 225, 245, 255));
+            UiCircle(vx, vy, TUN_FOCAL / zx * 0.6f, D3DCOLOR_ARGB((int)(fade * 255), 255, 255, 255));
+        }
+        else
+        {
+            // The far end's glow.
+            tun_centre(TUN_FAR, t, &vx, &vy);
+            for (k = 6; k >= 1; k--) UiCircle(vx, vy, 18.0f + k * k * 9.0f, D3DCOLOR_ARGB((int)(fade * (10 + 4 * (6 - k))), 40, 150, 255));
+            UiCircle(vx, vy, 10, D3DCOLOR_ARGB((int)(fade * 140), 200, 240, 255));
+        }
+        // The wall's data, far to near: each sector's lane in slices, eight slices a lane's length.
+        if (data)
+        {
+            UiQuadsBegin(data);
+            for (k = TUN_SLICES - 1; k >= 0; k--)
+                for (i = 0; i < TUN_SECTORS; i++)
+                {
+                    const float phase = dist * speedOf[i] / TUN_SLICE, z0 = TUN_NEAR + (k - tun_frac(phase)) * TUN_SLICE;
+                    const int cell = (k + (int)floorf(phase) + i * 3) & 7;
+                    const float a0 = rot + i * 6.2831853f / TUN_SECTORS, a1 = a0 + 6.2831853f / TUN_SECTORS;
+                    const float v0 = laneOf[i] / (float)TUNNEL_DATA_LANES, v1 = (laneOf[i] + 1) / (float)TUNNEL_DATA_LANES;
+                    for (s = 0; s < TUN_SUB; s++)
+                    {
+                        float za = z0 + TUN_SLICE * s / TUN_SUB, zb = z0 + TUN_SLICE * (s + 1) / TUN_SUB, ua, ub, light;
+                        if (zb <= TUN_NEAR || za >= zx) continue;
+                        if (za < TUN_NEAR) za = TUN_NEAR;
+                        if (zb > zx) zb = zx;
+                        ua = (cell + (za - z0) / TUN_SLICE) / 8.0f;
+                        ub = (cell + (zb - z0) / TUN_SLICE) / 8.0f;
+                        light = tun_light((za + zb) * 0.5f) * fade;
+                        if (light < 0.02f) continue;
+                        tun_point(a0, za, t, &xy[0], &xy[1]);
+                        tun_point(a0, zb, t, &xy[2], &xy[3]);
+                        tun_point(a1, za, t, &xy[4], &xy[5]);
+                        tun_point(a1, zb, t, &xy[6], &xy[7]);
+                        UiQuadsAdd(xy, ua, v0, ub, v1, D3DCOLOR_ARGB((int)(225 * light), 70, 220, 255));
+                    }
+                }
+            UiQuadsEnd();
+        }
+        {
+            // The rings (one a slice, every third one brighter) and the lines along the tunnel.
+            const float phase = dist / TUN_SLICE, lineFar = zx < TUN_FAR ? zx : TUN_FAR;
+            float ring[49 * 2];
+            for (k = TUN_SLICES - 1; k >= 0; k--)
+            {
+                const float z = TUN_NEAR + (k - tun_frac(phase)) * TUN_SLICE, light = tun_light(z) * fade;
+                const int bright = ((k + (int)floorf(phase)) % 3) == 0;
+                float thick;
+                if (z < 0.3f || z > zx || light < 0.02f) continue;
+                for (i = 0; i <= 48; i++) tun_point(rot + i * 6.2831853f / 48, z, t, &ring[i * 2], &ring[i * 2 + 1]);
+                thick = (bright ? 5.0f : 2.5f) / z;
+                if (thick < 1.0f) thick = 1.0f;
+                if (thick > 9.0f) thick = 9.0f;
+                UiPolyline(ring, 49, thick, 1.5f, D3DCOLOR_ARGB((int)(light * (bright ? 230 : 90)), 210, 245, 255));
+            }
+            for (i = 0; i < TUN_SECTORS && lineFar > 0.35f; i++)
+            {
+                float line[8 * 2];
+                for (k = 0; k < 8; k++) tun_point(rot + i * 6.2831853f / TUN_SECTORS, 0.3f + k * (lineFar - 0.3f) / 7, t, &line[k * 2], &line[k * 2 + 1]);
+                UiPolyline(line, 8, 1.5f, 1.0f, D3DCOLOR_ARGB((int)(fade * 45), 120, 200, 255));
+            }
+        }
+        // The packets of light, racing out of the tunnel (faster as it speeds up).
+        for (i = 0; i < TUN_PACKETS; i++)
+        {
+            TunPacket *p = &packets[i];
+            float x0, y0, x1, y1, thick, light;
+            p->z -= p->speed * dt * speed * 0.25f;
+            if (p->z < TUN_NEAR + 0.08f) { tun_packet(p, &seed, 0); continue; }
+            light = tun_light(p->z) * fade;
+            if (p->z > TUN_FAR || p->z + p->len > zx || light < 0.02f) continue;
+            tun_point(rot + p->ang, p->z, t, &x0, &y0);
+            tun_point(rot + p->ang, p->z + p->len, t, &x1, &y1);
+            thick = 3.5f / p->z;
+            if (thick < 1.2f) thick = 1.2f;
+            if (thick > 7.0f) thick = 7.0f;
+            UiLine(x1, y1, x0, y0, thick, UiAlpha(p->col, light * 0.9f));
+            UiCircle(x0, y0, thick * 0.9f, UiAlpha(D3DCOLOR_ARGB(255, 255, 255, 255), light));
+        }
+        if (leaving)
+        {
+            // The logo in front where the way in left it, flying past (bigger, fading) in 0.5 s; then, out of the
+            // tunnel, the light filling the screen and fading to the menus.
+            if (t < 0.5f)
+            {
+                const float e = t / 0.5f, h = INTRO_LOGO_H * (1.0f + 3.0f * e * e);
+                UiOnlineLogo(UI_WIDTH * 0.5f, UI_HEIGHT * 0.5f, h, 1.0f - e);
+            }
+            if (t > OUTRO_OUT - 0.25f)
+            {
+                const float w = t < OUTRO_OUT ? (t - (OUTRO_OUT - 0.25f)) / 0.25f : 1.0f;
+                const float dark = t > OUTRO_OUT ? wiz_ease((t - OUTRO_OUT) / (OUTRO_TOTAL - OUTRO_OUT)) : 0.0f;
+                UiRect(0, 0, UI_WIDTH, UI_HEIGHT, D3DCOLOR_ARGB((int)(255 * w), (int)(235 * (1 - dark) + 2 * dark),
+                                                                (int)(248 * (1 - dark) + 6 * dark), (int)(255 * (1 - dark) + 12 * dark)));
+            }
+        }
+        else if (t > 0.9f)
+        {
+            // The logo: from the far end (its depth eased in 1.3 s), landing in front with a flash and a ring.
+            const float e = wiz_ease((t - 0.9f) / (INTRO_LANDS - 0.9f)), inv = 1.0f / TUN_FAR + (1.0f - 1.0f / TUN_FAR) * e;
+            const float z = 1.0f / inv, since = t - INTRO_LANDS;
+            float lx, ly, h = INTRO_LOGO_H / z, a = (t - 0.9f) * 3.0f;
+            tun_centre(z, t, &lx, &ly);
+            if (a > 1) a = 1;
+            if (since > 0)
+            {
+                // Landed: a little bounce, a soft light behind, floating.
+                h *= 1.0f + 0.07f * sinf(since * 14.0f) * expf(-since * 5.0f);
+                ly += 3.0f * sinf(since * 2.2f);
+                UiShadow(lx - h * 2.4f, ly - h * 0.5f, h * 4.8f, h, h * 0.5f, 90, D3DCOLOR_ARGB((int)(fade * (70 + 30 * sinf(since * 3.0f))), 40, 170, 255));
+            }
+            UiOnlineLogo(lx, ly, h, a * fade);
+            if (since > 0 && since < 0.7f)
+            {
+                const float r = 120.0f + since * 1300.0f;
+                UiRoundRing(lx - r, ly - r, r * 2, r * 2, r, 4.0f, D3DCOLOR_ARGB((int)(200 * (1.0f - since / 0.7f) * fade), 160, 235, 255));
+            }
+            if (since > 0 && since < 0.5f) UiRect(0, 0, UI_WIDTH, UI_HEIGHT, D3DCOLOR_ARGB((int)(150 * expf(-since / 0.1f) * fade), 220, 245, 255));
+        }
+        UiRect(0, 0, UI_WIDTH, UI_HEIGHT, D3DCOLOR_ARGB((int)(255 * (1.0f - fade)), 0, 0, 0));
+        UiEnd();
+        dev->Present(NULL, NULL, NULL, NULL);
+        Sleep(8);
+    }
+    if (data) UiImageRelease(dev, data);
+    xb_audio_music_pause(0);
+}
+
 // Settings > Online play: the list of what it has, the general chat beside it to read (written in Play
 // online), read again every few seconds; the player's profile in the top right corner. 1 when a game starts.
 static int online_hub_run(IDirect3DDevice9 *dev, Config *c);
@@ -11815,21 +12304,59 @@ static int online_hub(IDirect3DDevice9 *dev, Config *c)
 {
     int r;
     if (!OnlineHasServer()) { online_message(dev, Tr(T_ONLINE), Tr(T_ONLINE_NOT_SET)); return 0; }
+    {
+        // Online play only with the latest LAIKA (asked of GitHub; a yes kept half an hour). An older one is told so,
+        // offered the update, and goes back where it came from (the ROM list, Settings). GitHub not answering lets
+        // it in.
+        static DWORD s_latestAt;
+        static int s_latest;
+        char version[32] = "", text[200];
+        if (!s_latest || GetTickCount() - s_latestAt > 30 * 60000)
+        {
+            int r;
+            online_busy(dev, Tr(T_ONLINE), T_ONLINE_CHECK_VER);
+            r = UpdateCheckNow(H64_VERSION_STRING, version, sizeof(version));
+            if (r > 0)
+            {
+                H64_INFO("[online] LAIKA 64 %s is out: online play refused to %s", version, H64_VERSION_STRING);
+                _snprintf(text, sizeof(text) - 1, Tr(T_ONLINE_NEED_UPDATE), version, H64_VERSION_STRING);
+                text[sizeof(text) - 1] = 0;
+                online_message(dev, Tr(T_ONLINE), text);
+                if (confirm_ask(dev, T_UPDATE_TITLE, T_UPDATE_ASK, T_FOOT_UPDATE))
+                {
+                    views_clear(dev);   // the memory for the download
+                    ArtPause(1);
+                    if (update_run(dev, version))
+                    {
+                        xb_audio_music_stop();
+                        XLaunchNewImage("game:\\default.xex", 0);   // the new version
+                    }
+                    ArtPause(0);
+                    online_message(dev, Tr(T_ONLINE_UPDATE), Tr(T_UPDATE_FAILED));
+                }
+                return 0;
+            }
+            s_latest = r == 0;   // asked again next time when GitHub did not answer
+            s_latestAt = GetTickCount();
+        }
+    }
+    online_intro(dev);
     online_avatars_load(dev);
     r = online_hub_run(dev, c);
     online_avatars_free(dev);
     room_covers_free(dev);
+    if (!r) online_intro(dev, 1);   // back to the menus: out of the tunnel (a game starting goes straight in)
     return r;
 }
 
 static int online_hub_run(IDirect3DDevice9 *dev, Config *c)
 {
     static UiAnim selAnim;
-    enum { OH_PLAY = 0, OH_MESSAGES, OH_PROFILE, OH_FRIENDS, OH_USERS, OH_STATS, OH_RANK, OH_NEWS, OH_UPDATE, OH_DONATE, OH_COUNT };
+    enum { OH_PLAY = 0, OH_MESSAGES, OH_PROFILE, OH_FRIENDS, OH_USERS, OH_STATS, OH_RANK, OH_NEWS, OH_UPDATE, OH_TELEGRAM, OH_DONATE, OH_COUNT };
     static const int labels[OH_COUNT] = { T_ONLINE_PLAY, T_ONLINE_MESSAGES, T_ONLINE_PROFILE, T_ONLINE_FRIENDS, T_ONLINE_USERS, T_ONLINE_STATS,
-                                          T_ONLINE_RANK, T_ONLINE_NEWS, T_ONLINE_UPDATE, T_DONATE_TAB };
+                                          T_ONLINE_RANK, T_ONLINE_NEWS, T_ONLINE_UPDATE, T_ONLINE_TELEGRAM, T_DONATE_TAB };
     static const unsigned char icons[OH_COUNT] = { UI_ICON_PLAY, UI_ICON_CHAT, UI_ICON_PERSON, UI_ICON_FRIENDS, UI_ICON_LIST, UI_ICON_CHART,
-                                                   UI_ICON_GLOBE, UI_ICON_INFO, UI_ICON_LOAD, UI_ICON_SUN };
+                                                   UI_ICON_GLOBE, UI_ICON_INFO, UI_ICON_LOAD, UI_ICON_CLOCK, UI_ICON_SUN };
     std::vector<OnlineChatLine> chat, fresh;
     UiInput in;
     DWORD readAt = 0;
@@ -11839,7 +12366,7 @@ static int online_hub_run(IDirect3DDevice9 *dev, Config *c)
     UiInputInit(&in);
     for (;;)
     {
-        const float w = UI_WIDTH - 2 * UI_SAFE_X, h = 520, x = UI_SAFE_X, y = 112, rowH = 47, pad = 24, listW = 420;
+        const float w = UI_WIDTH - 2 * UI_SAFE_X, h = 520, x = UI_SAFE_X, y = 112, rowH = 43, pad = 24, listW = 420;
         const float chatX = x + listW + 44, chatW = x + w - 24 - chatX;
         const int shown = 13;
         const OnlineProfile *me = OnlineMe();
@@ -11873,6 +12400,7 @@ static int online_hub_run(IDirect3DDevice9 *dev, Config *c)
             case OH_RANK: online_list(dev, ONLINE_LIST_RANK); break;
             case OH_NEWS: online_news(dev, c); break;
             case OH_UPDATE: online_update(dev); break;
+            case OH_TELEGRAM: online_telegram(dev); break;
             case OH_DONATE: online_donate(dev); break;
             }
             UiInputInit(&in);

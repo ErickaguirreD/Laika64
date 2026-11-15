@@ -17,7 +17,15 @@ database_id = "74aab990-8c3c-4e67-936f-cb7826fbcf1c"
 name = "ROOMS"
 class_name = "Room"
 
+[[durable_objects.bindings]]
+name = "INBOX"
+class_name = "Inbox"
+
 # The free plan's Durable Objects are the SQLite-backed ones.
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Room"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["Inbox"]

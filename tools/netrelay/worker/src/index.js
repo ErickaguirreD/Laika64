@@ -11,7 +11,8 @@
 //   /v1/whereami                              OK <country> (the country the request comes from)
 //   /v1/ping?g=&t=&status=&since=&ms=&conn=&room=
 //                                             "still here"; status: "" or the game played; ms: its time to the
-//                                             server and back; conn: 1 cable, 2 Wi-Fi (0 not known); room: 1 in a
+//                                             server and back; conn: 1 cable, 2 Wi-Fi (0 not known; not sent: kept
+//                                             as 3, a LAIKA before 2.1); room: 1 in a
 //                                             room's lobby. Answered with the player's news: "f name online" per
 //                                             friend, "r name avatar" per friendship asked, "m id name text" per
 //                                             message after `since`
@@ -29,6 +30,11 @@
 //                                             seconds tag,tag... art; art: the box art's key), the players online ("U" name country avatar
 //                                             status room ms conn) and the general chat after `since`
 //                                             ("C" id tag avatar text ago)
+//   /v1/invite?g=&t=&to=&code=                invites a player to the room `code` (waiting): told at once through
+//                                             its inbox ("OK live"), or when it next opens one ("OK later")
+//   /v1/inbox?g=&t=                           WebSocket kept open by each console: the server sends through it
+//                                             "invite\t<from>\t<game>\t<code>\t<room>" as soon as one is made;
+//                                             the console sends "p" every half minute (answered "q")
 //   /v1/played?g=&t=&code=&game=&minutes=     after a game
 //   /v1/stats?g=&t=&name=                     total minutes, games, rank; then game minutes ...
 //   /v1/rank?g=&t=&offset=                    position name country avatar minutes online
@@ -62,6 +68,10 @@ const CHAT_GAP_S = 3;            // a player's messages at least this far apart
 const CHAT_LEN = 80;
 const DM_LEN = 120;
 const MAX_REQUESTS = 50;         // friendships one player has asked and not been answered
+const INVITE_GAP_MS = 10000;     // one player's invitations to another at least this far apart
+const INVITE_KEEP_MS = 600000;   // an invitation to a player without its inbox open waits this long
+const INBOX_QUIET_MS = 90000;    // an inbox connection silent this long (no "p") is gone
+const INBOX_SOCKETS = 3;         // connections kept per player (its newest)
 
 const now = () => Math.floor(Date.now() / 1000);
 const clean = (text, limit) => String(text ?? "").replace(/[\t\r\n\x00-\x1f]/g, " ").trim().slice(0, limit);
@@ -138,7 +148,8 @@ async function profiles(cmd, q, request, env) {
   switch (cmd) {
     case "ping": {
       const ms = Math.max(0, Math.min(parseInt(q.get("ms") ?? "0", 10) || 0, 9999));
-      const conn = Math.max(0, Math.min(parseInt(q.get("conn") ?? "0", 10) || 0, 2));
+      // conn 3: a LAIKA before 2.1, which tells neither its time nor its connection (shown as an old version).
+      const conn = q.has("conn") ? Math.max(0, Math.min(parseInt(q.get("conn"), 10) || 0, 2)) : 3;
       // The country: where the connection comes from, kept up to date (told back as "c").
       const cc = country(request.cf?.country);
       await db.prepare("UPDATE users SET seen = ?, status = ?, ms = ?, conn = ?, room = ?, country = CASE WHEN ? <> '--' THEN ? ELSE country END WHERE id = ?")
@@ -244,6 +255,21 @@ async function profiles(cmd, q, request, env) {
         ...online.results.map((u) => ["U", u.name, u.country, u.avatar, u.status, u.room, u.ms, u.conn].join("\t")),
         ...chat.results.reverse().map((m) => ["C", m.id, m.tag, m.avatar, m.text, Math.max(0, t - m.at)].join("\t"))];
     }
+    case "invite": {
+      // The room must be waiting; the invitation names its game (as the room's list has it), not the sender's words.
+      const other = await db.prepare("SELECT id FROM users WHERE lower = ?").bind((q.get("to") ?? "").toLowerCase()).first();
+      if (!other || other.id === me) return ["ERR name"];
+      const code = q.get("code") ?? "";
+      const room = /^[0-9]{6}$/.test(code) &&
+        (await db.prepare("SELECT game, name FROM rooms WHERE code = ? AND started = 0 AND updated > ?").bind(code, t - ROOM_LIST_S).first());
+      if (!room) return ["ERR none"];
+      const who = await db.prepare("SELECT name FROM users WHERE id = ?").bind(me).first();
+      const line = ["invite", who.name, clean(room.game, 40), code, clean(room.name, 24)].join("\t");
+      const res = await env.INBOX.get(env.INBOX.idFromName("u" + other.id))
+        .fetch("https://inbox/push?" + new URLSearchParams({ from: String(me), line }));
+      const how = await res.text();
+      return how === "busy" ? ["ERR busy"] : ["OK\t" + how];
+    }
     case "played": {
       const minutes = Math.max(0, Math.min(parseInt(q.get("minutes") ?? "0", 10) || 0, 24 * 60));   // one sitting: a day at most
       const code = clean(q.get("code"), 24), game = clean(q.get("game"), 40);
@@ -311,6 +337,7 @@ export default {
     const m = /^\/v1\/([a-z]+)$/.exec(url.pathname);
     if (!m) return new Response("LAIKA 64 online\n", { headers: { "content-type": "text/plain" } });
     if (m[1] === "room") return room(request, url, env);
+    if (m[1] === "inbox") return inbox(request, url, env);
     try {
       return reply(await profiles(m[1], url.searchParams, request, env));
     } catch (e) {
@@ -379,6 +406,83 @@ async function room(request, url, env) {
   const code = q.get("code") ?? "";
   if (!/^[0-9]{6}$/.test(code)) return refuse("none");
   return env.ROOMS.get(env.ROOMS.idFromName(code)).fetch("https://room/join?" + args, request);
+}
+
+// ---- Inboxes: one Durable Object per player, holding its consoles' WebSockets (hibernated while quiet) ----
+async function inbox(request, url, env) {
+  if (request.headers.get("upgrade") !== "websocket") return new Response("WebSocket only\n", { status: 426 });
+  const me = await user(env.DB, url.searchParams);
+  if (me === null) return refuse("auth");
+  return env.INBOX.get(env.INBOX.idFromName("u" + me)).fetch("https://inbox/open", request);
+}
+
+export class Inbox {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+    this.sent = new Map();   // sender -> its last invitation (forgotten when the object sleeps: no harm)
+    state.setWebSocketAutoResponse(new WebSocketRequestResponsePair("p", "q"));   // answered without waking it
+  }
+
+  // The connections still alive: those that said "p" (or opened) within INBOX_QUIET_MS; the others closed.
+  alive() {
+    const t = Date.now();
+    return this.state.getWebSockets().filter((ws) => {
+      const at = Math.max(this.state.getWebSocketAutoResponseTimestamp(ws)?.getTime() ?? 0, ws.deserializeAttachment()?.at ?? 0);
+      if (t - at < INBOX_QUIET_MS) return true;
+      try {
+        ws.close(1000, "gone");
+      } catch (e) {}
+      return false;
+    });
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url), q = url.searchParams;
+    if (url.pathname === "/open") {
+      const pair = new WebSocketPair();
+      const open = this.alive().sort((a, b) => (a.deserializeAttachment()?.at ?? 0) - (b.deserializeAttachment()?.at ?? 0));
+      for (const ws of open.slice(0, Math.max(0, open.length - INBOX_SOCKETS + 1))) {
+        try {
+          ws.close(1000, "again");
+        } catch (e) {}
+      }
+      this.state.acceptWebSocket(pair[1]);
+      pair[1].serializeAttachment({ at: Date.now() });
+      // The invitations that came while no console listened, if still fresh.
+      const waiting = (await this.state.storage.get("waiting")) ?? [];
+      for (const w of waiting) if (Date.now() - w.at < INVITE_KEEP_MS) pair[1].send(w.line);
+      if (waiting.length) await this.state.storage.delete("waiting");
+      return new Response(null, { status: 101, webSocket: pair[0] });
+    }
+    if (url.pathname === "/push") {
+      const from = q.get("from") ?? "", line = q.get("line") ?? "";
+      if (Date.now() - (this.sent.get(from) ?? 0) < INVITE_GAP_MS) return new Response("busy");
+      this.sent.set(from, Date.now());
+      const open = this.alive();
+      for (const ws of open) {
+        try {
+          ws.send(line);
+        } catch (e) {}
+      }
+      if (open.length) return new Response("live");
+      const waiting = ((await this.state.storage.get("waiting")) ?? []).filter((w) => Date.now() - w.at < INVITE_KEEP_MS).slice(-4);
+      waiting.push({ at: Date.now(), line });
+      await this.state.storage.put("waiting", waiting);
+      return new Response("later");
+    }
+    return new Response("?", { status: 404 });
+  }
+
+  webSocketMessage() {}   // only "p", answered by itself
+
+  webSocketClose(ws, code, reason) {
+    try {
+      ws.close(code, reason);
+    } catch (e) {}
+  }
+
+  webSocketError() {}
 }
 
 // A WebSocket that says why and closes.

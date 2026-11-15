@@ -14,6 +14,7 @@
 #include "xb_audio.h"
 #include "xb_lang.h"
 #include "xb_logo.h"
+#include "xb_online_logo.h"
 #include "xb_logo_variants.h"
 #include "xb_ui_atlas.h"
 #include "xb_ui_fonts.h"
@@ -1120,6 +1121,38 @@ void UiImageQuad(IDirect3DTexture9 *tex, const float *xy, float u0, float v0, fl
     s_dev->SetTexture(1, s_atlas);
 }
 
+// Many quads of one picture in a row (the online intro's tunnel walls): between UiQuadsBegin and UiQuadsEnd only
+// UiQuadsAdd draws, each as UiImageQuad would, all of them sent together.
+void UiQuadsBegin(IDirect3DTexture9 *tex)
+{
+    if (!s_dev || !tex) return;
+    flush();
+    s_dev->SetTexture(1, tex);
+}
+
+void UiQuadsAdd(const float *xy, float u0, float v0, float u1, float v1, D3DCOLOR color)
+{
+    const float p[4] = { 0.5f, 0.5f, 0.0f, 0.004f };
+    UiVtx *v;
+    if (!s_dev) return;
+    if (s_quads == UI_MAX_QUADS) flush();
+    v = &s_vtx[s_quads * 6];
+    vtx(&v[0], xy[0], xy[1], color, u0 - 0.5f, v0 - 0.5f, 2.0f, 0.0f, p);
+    vtx(&v[1], xy[2], xy[3], color, u1 - 0.5f, v0 - 0.5f, 2.0f, 0.0f, p);
+    vtx(&v[2], xy[4], xy[5], color, u0 - 0.5f, v1 - 0.5f, 2.0f, 0.0f, p);
+    v[3] = v[1];
+    vtx(&v[4], xy[6], xy[7], color, u1 - 0.5f, v1 - 0.5f, 2.0f, 0.0f, p);
+    v[5] = v[2];
+    s_quads++;
+}
+
+void UiQuadsEnd(void)
+{
+    if (!s_dev) return;
+    flush();
+    s_dev->SetTexture(1, s_atlas);
+}
+
 // The picture drawn as one rectangle (x, y, w, h) of the screen, only where
 // it lies inside the clip (cx0, cy0)-(cx1, cy1).
 static void wall_rect(IDirect3DTexture9 *tex, float x, float y, float w, float h, float cx0, float cy0, float cx1, float cy1, D3DCOLOR c)
@@ -1892,6 +1925,25 @@ float UiBrand(float x, float cy, float size)
     if (tex) UiImage(tex, x, cy - lh * 0.5f, lw, lh, 0.0f, D3DCOLOR_ARGB(255, 255, 255, 255));
     else UiText(UI_BOLD, size, x, cy, UI_COL_TEXT, "LAIKA 64", UI_LEFT);
     return lw;
+}
+
+// The LAIKA 64 ONLINE logo (xb_online_logo.h), `h` pixels high and centred on (cx, cy); uploaded the first time.
+void UiOnlineLogo(float cx, float cy, float h, float alpha)
+{
+    static IDirect3DTexture9 *s_tex;
+    static int s_tried;
+    const float w = h * UI_ONLINE_LOGO_W / UI_ONLINE_LOGO_H;
+    if (!s_tried && s_dev)
+    {
+        int pw = 0, ph = 0;
+        unsigned char *rgba = h64_png_decode(s_onlineLogoPng, sizeof(s_onlineLogoPng), &pw, &ph, 1024 * 1024);
+        s_tried = 1;
+        if (rgba) { s_tex = UiImageCreate(s_dev, rgba, pw, ph); free(rgba); }
+    }
+    const int a = alpha <= 0 ? 0 : alpha >= 1 ? 255 : (int)(alpha * 255);
+    if (!a) return;
+    if (s_tex) UiImage(s_tex, cx - w * 0.5f, cy - h * 0.5f, w, h, 0.0f, D3DCOLOR_ARGB(a, 255, 255, 255));
+    else UiText(UI_BOLD, h * 0.5f, cx, cy, UiAlpha(UI_COL_TEXT, alpha), "LAIKA 64 ONLINE", UI_CENTER);
 }
 
 float UiBrandWidth(float size)

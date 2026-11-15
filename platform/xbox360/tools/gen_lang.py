@@ -347,6 +347,9 @@ def main():
             check(code, "panel bar " + key, width(t[key], 20, True) + width("100%", 20, True) + 24, 600 - 88)
         for key in ("FOOT_SELECT", "FOOT_PAUSED"):
             check(code, key, footer_width(t[key]), 660 - 80)
+        # Full-screen footers (UiScreenFooter): the width between the safe margins.
+        for key in ("FOOT_ONLINE_LOBBY_HOST", "FOOT_ONLINE_LOBBY", "FOOT_ONLINE_INVITE"):
+            check(code, key, footer_width(t[key]), 1280 - 2 * 64)
         # Controls page: 352-pixel columns, text 24 in, prompts 18 from the right.
         col = 352 - 24 - 18 - 12
         dirs = {"N64_DUP": "DIR_UP", "N64_DDOWN": "DIR_DOWN", "N64_DLEFT": "DIR_LEFT", "N64_DRIGHT": "DIR_RIGHT",
