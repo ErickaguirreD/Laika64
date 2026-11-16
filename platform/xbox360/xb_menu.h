@@ -54,7 +54,7 @@ void UiConfirmDraw(int title, int question, int footer);
 
 // ---- Settings (cpu, hle, audio margin, FPS display, the Graphics and Controls pages) ----
 enum { SET_NONE = 0, SET_CHANGED, SET_BACK, SET_SAVE_ALL, SET_SAVE_GAME, SET_ART_ASK, SET_LANGUAGE, SET_PREVIEW, SET_SAVER, SET_WIZARD, SET_PICK_PATH, SET_EXPLORER, SET_ABOUT,
-       SET_PATH_RESET, SET_HIRES_DL, SET_HIRES_PNG, SET_HIRES_HUB, SET_REPORT, SET_ONLINE, SET_SS_ACCOUNT };
+       SET_PATH_RESET, SET_HIRES_DL, SET_HIRES_PNG, SET_HIRES_HUB, SET_REPORT, SET_ONLINE, SET_SS_ACCOUNT, SET_UPDATE };
 // A question with a few answers in a list: D-pad (or the left stick) up/down, A picks one; B
 // returns -1 when `canSkip` (else B does nothing). `text` may be "" (no paragraph).
 int ChoiceScreen(IDirect3DDevice9 *dev, const char *title, const char *text, const char *const *labels, int n, int sel,

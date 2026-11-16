@@ -24,6 +24,29 @@ static const CicInfo s_cics[] = {
     { 0x0E018159u, H64_CIC_8303, 0xDD },
 };
 
+// ROM words a hack got wrong, put right when the words around them match. Ocarina of Time 4 Player
+// Edition (on the debug ROM): an overlay's relocations at 0xC010B0 hold one empty entry (section 0,
+// offset 0), and Overlay_Relocate reads address 0 for it - a TLB miss on the console too, black after
+// one frame. 0x40000000 (section 1, type 0) is read and writes nothing.
+struct RomFix { u32 crc1, crc2, offset, before, bad, after, good; };
+static const RomFix s_fixes[] = {
+    { 0x917D18F6u, 0x69BC5453u, 0xC24DDCu, 0x4400736Cu, 0x00000000u, 0x440074FCu, 0x40000000u },
+};
+
+static void rom_fix(H64Rom *rom)
+{
+    u32 i;
+    for (i = 0; i < H64_ARRAY_COUNT(s_fixes); i++)
+    {
+        const RomFix *f = &s_fixes[i];
+        u8 *p = rom->data + f->offset;
+        if (f->crc1 != rom->crc1 || f->crc2 != rom->crc2 || f->offset + 8 > rom->size) continue;
+        if (h64_load_be32(p - 4) != f->before || h64_load_be32(p) != f->bad || h64_load_be32(p + 4) != f->after) continue;
+        h64_store_be32(p, f->good);
+        H64_INFO("[rom] fixed word %08X: %08X -> %08X", f->offset, f->bad, f->good);
+    }
+}
+
 const char *h64_cic_name(int cic)
 {
     switch (cic)
@@ -116,6 +139,7 @@ int h64_rom_load(H64Rom *rom, const u8 *file, u32 size)
              rom->gameCode, (unsigned)rom->version, (unsigned)size,
              order == H64_ROM_ORDER_Z64 ? "z64" : order == H64_ROM_ORDER_V64 ? "v64" : "n64", rom->entryPoint,
              rom->ipl3Crc, h64_cic_name(rom->cic));
+    rom_fix(rom);
     return 0;
 }
 

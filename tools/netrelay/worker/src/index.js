@@ -53,8 +53,11 @@ const PAGE = 50;                 // rows of users and rank per request
 const MAX_FRIENDS = 100;
 const MAX_REGISTER_PER_HOUR = 5; // per address
 const TAG_RE = /^[A-Za-z0-9_]{3,15}$/;
-const PROTOCOLS = [2, 3, 4, 5];  // xb_online.cpp ONLINE_PROTO values the rooms serve (3: a room's size, back to its lobby;
-                                 // 4: each player's country and connection in "players"; 5: two or three on one console)
+const PROTOCOLS = [2, 3, 4, 5, 6];  // xb_online.cpp ONLINE_PROTO values the rooms serve (3: a room's size, back to its lobby;
+                                 // 4: each player's country and connection in "players"; 5: two or three on one console;
+                                 // 6: "left" lines saying why a player went)
+const LEAVE_WHY = ["left", "nogame", "gone", "kicked"];
+const ROOM_LOG_S = 7 * 86400;    // the rooms' comings and goings (room_log) kept this long
 const ROOM_PLAYERS = 4;
 const LOBBY_USERS = 60;          // players online listed in /v1/lobby
 const ROOM_WAIT_MS = 900000;     // a room nobody starts or talks in is closed after this long
@@ -359,6 +362,8 @@ export default {
 //                                           from proto 4 on also \t<country>\t<conn> each (conn: 1 cable, 2 Wi-Fi),
 //                                           from 5 on also \t<local> (how many play on that console)
 //     chat\t<tag>\t<text>                   a message of the room's chat (in the game too)
+//     left\t<tag>\t<why>                    from 6 on: a player went (before the new "players"); why: "left" (by
+//                                           itself), "nogame" (no such ROM), "gone" (silent too long), "kicked"
 //     count\t<seconds>                       the host started: the game begins in that many seconds
 //     start\t<players>\t<port>\t<local>\t<owners>   the game starts: how many play, this console's first N64 port
 //                                           (1..), how many ports it has, each port's console ("1,1,3")
@@ -366,8 +371,8 @@ export default {
 //     pong\t<n>                             the answer to this console's "ping\t<n>"
 //     p2p\t<port>\t<what>                    in the game: a console's word about talking directly (its addresses,
 //                                           the ports it reaches, or "off"): the consoles agree among themselves
-// and takes "chat\t<text>", "ping\t<n>", "rtt\t<ms>" (its time to the server, measured with the pings)
-// from anyone, "local\t<1-3>" (how many play on it) before the game, "status\t<what>", "p2p\t<what>" and "back" in
+// and takes "chat\t<text>", "ping\t<n>", "rtt\t<ms>" (its time to the server, measured with the pings),
+// "bye\t<why>" (why it is about to close: "nogame") from anyone, "local\t<1-3>" (how many play on it) before the game, "status\t<what>", "p2p\t<what>" and "back" in
 // the game, and "start" (two players at least) and "kick\t<place>" from
 // the host before the game. A player put out ("kicked") may come back. From the start on every binary
 // message of a console goes to all the others in the game with its first byte set to the sender's port:
@@ -519,8 +524,14 @@ export class Room {
           o.ws.close(1000, "again");
         } catch (e) {}
       }
-      if (this.total() >= this.size) return refuse("full");
-      if (this.pass && (await sha256(this.code + (q.get("pass") ?? ""))) !== this.pass) return refuse("password");
+      if (this.total() >= this.size) {
+        await this.log(q.get("tag"), "refused full");
+        return refuse("full");
+      }
+      if (this.pass && (await sha256(this.code + (q.get("pass") ?? ""))) !== this.pass) {
+        await this.log(q.get("tag"), "refused password");
+        return refuse("password");
+      }
     }
     const pair = new WebSocketPair();
     const ws = pair[1];
@@ -541,6 +552,7 @@ export class Room {
       this.players = [p];
       ws.send("created " + this.code);
     } else this.players.push(p);
+    await this.log(p.tag, create ? "created" : "joined");
     ws.send(["game", this.game.crc1, this.game.crc2, this.game.name, this.name, this.size].join("\t"));
     this.roster();
     await this.list();
@@ -556,6 +568,17 @@ export class Room {
     try {
       p.ws.send(data);
     } catch (e) {}
+  }
+
+  // A coming or going of this room in room_log (who, what, how many were in it then); older rows dropped now and then.
+  async log(tag, what) {
+    try {
+      await this.env.DB.prepare("INSERT INTO room_log (at, code, tag, what, players, started) VALUES (?, ?, ?, ?, ?, ?)")
+        .bind(now(), this.code ?? "", tag ?? "", what, this.players.length, this.started ? 1 : 0).run();
+      if (Math.random() < 0.02) await this.env.DB.prepare("DELETE FROM room_log WHERE at < ?").bind(now() - ROOM_LOG_S).run();
+    } catch (e) {
+      console.log("room log: " + e);
+    }
   }
 
   playing() {
@@ -602,6 +625,10 @@ export class Room {
         const text = clean(data.slice(5), CHAT_LEN);
         if (text) for (const o of this.players) this.send(o, ["chat", p.tag, text].join("\t"));
       } else if (data.startsWith("ping\t")) this.send(p, "pong\t" + clean(data.slice(5), 12));
+      else if (data.startsWith("bye\t")) {
+        const why = data.slice(4);
+        if (LEAVE_WHY.includes(why)) p.why = why;
+      }
       else if (data.startsWith("rtt\t")) {
         const ms = Math.max(0, Math.min(parseInt(data.slice(4), 10) || 0, 9999));
         if (Math.abs(ms - p.rtt) >= 5) {
@@ -643,7 +670,7 @@ export class Room {
           try {
             o.ws.close(1000, "kicked");
           } catch (e) {}
-          this.leave(o);
+          this.leave(o, "kicked");
         }
       }
       return;
@@ -693,10 +720,14 @@ export class Room {
     await this.state.storage.setAlarm(Date.now() + ROOM_BEAT_MS);
   }
 
-  async leave(p) {
+  async leave(p, why) {
     const i = this.players.indexOf(p);
     if (i < 0) return;
+    why = why || p.why || "left";
     this.players.splice(i, 1);
+    // Those in the lobby (from protocol 6 on) read who went and why.
+    for (const o of this.players) if (!o.playing && o.proto >= 6) this.send(o, ["left", p.tag, why].join("\t"));
+    await this.log(p.tag, (i === 0 ? "host " : "") + why);
     if (this.started) {
       this.quit(p);
       if (!this.players.length) this.end("over");
@@ -722,7 +753,7 @@ export class Room {
       try {
         p.ws.close(1000, "gone");
       } catch (e) {}
-      await this.leave(p);
+      await this.leave(p, "gone");
       if (!this.open) return;
     }
     if (!this.started && t - this.last >= ROOM_WAIT_MS) {

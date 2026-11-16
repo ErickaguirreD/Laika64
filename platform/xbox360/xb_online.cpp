@@ -14,8 +14,9 @@
 #define ONLINE_SERVER "laika64.laikaemu.workers.dev"   // LAIKA 64's own (online.txt's server= names another)
 #define ONLINE_ANSWER_MS 8000
 #define ONLINE_PING_MS 90000        // the server calls a player online for 5 minutes after one (the news come with it)
-#define ONLINE_PROTO 5              // the rooms' (the server's PROTOCOLS): 3 has their size and "back" to the lobby, 4 each
-                                    // player's country and connection, 5 two or three playing on one console
+#define ONLINE_PROTO 6              // the rooms' (the server's PROTOCOLS): 3 has their size and "back" to the lobby, 4 each
+                                    // player's country and connection, 5 two or three playing on one console, 6 "left"
+                                    // lines (who went and why)
 
 static OnlineProfile s_me;
 static char s_file[96];             // <drive>:\config\online.txt
@@ -1034,6 +1035,21 @@ static int room_line(char *line)
         }
         return 1;
     }
+    if (f[0] == "left" && f.size() >= 3)
+    {
+        // A player went: said in the chat, with why (no such ROM, its connection lost, put out, or by itself).
+        OnlineChatLine m;
+        m.id = 0;
+        copy(m.tag, sizeof(m.tag), f[1].c_str());
+        m.avatar = 0;
+        for (size_t k = 0; k < (size_t)s_lobby.count; k++)
+            if (!strcmp(s_lobby.tag[k], m.tag)) m.avatar = s_lobby.avatar[k];
+        m.text = Tr(f[2] == "nogame" ? T_ONLINE_LEFT_NOGAME : f[2] == "gone" ? T_ONLINE_LEFT_GONE : f[2] == "kicked" ? T_ONLINE_LEFT_KICKED : T_ONLINE_LEFT);
+        chat_when(m.when, 0);
+        s_lobby.chat.push_back(m);
+        if (s_lobby.chat.size() > ONLINE_ROOM_CHAT) s_lobby.chat.erase(s_lobby.chat.begin());
+        return 1;
+    }
     if (f[0] == "count" && f.size() >= 2)
     {
         s_lobby.countdown = atoi(f[1].c_str());
@@ -1170,6 +1186,15 @@ int OnlineRoomSay(const char *text)
     _snprintf(line, sizeof(line) - 1, "chat\t%s", text);
     line[sizeof(line) - 1] = 0;
     return s_room && NetWsSend(s_room, line, (int)strlen(line), 1);
+}
+
+void OnlineRoomLeave(const char *why)
+{
+    char line[24];
+    _snprintf(line, sizeof(line) - 1, "bye\t%s", why);
+    line[sizeof(line) - 1] = 0;
+    if (s_room) NetWsSend(s_room, line, (int)strlen(line), 1);
+    OnlineRoomClose();
 }
 
 int OnlineRoomStart(void) { return s_room && NetWsSend(s_room, "start", 5, 1); }

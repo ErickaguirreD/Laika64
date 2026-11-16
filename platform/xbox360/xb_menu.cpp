@@ -800,12 +800,13 @@ static int s_kodiTile;   // the main page's tile last selected (back up from its
 // Tiles a row: all of them up to 5, else two rows (the first the longer).
 static int kodi_cols(int nt) { return nt <= 5 ? nt : (nt + 1) / 2; }
 
-// The rows of the main page that are tiles: up to the first save row (those go in a list under the tiles).
+// The rows of the main page that are tiles: up to the first save row or Check for updates (those go in a list
+// under the tiles).
 static int kodi_tiles(const UiMenu *m)
 {
     int i;
     for (i = 0; i < m->count; i++)
-        if (!strcmp(m->label[i], Tr(T_SAVE_GAME)) || !strcmp(m->label[i], Tr(T_SAVE_ALL))) return i;
+        if (!strcmp(m->label[i], Tr(T_SAVE_GAME)) || !strcmp(m->label[i], Tr(T_SAVE_ALL)) || !strcmp(m->label[i], Tr(T_ONLINE_UPDATE))) return i;
     return m->count;
 }
 
@@ -1231,7 +1232,8 @@ void UiMenuNavigate(UiMenu *m, WORD down)
 // The most used first: the picture and the controls, then the rest.
 enum { S_GRAPHICS = 0, S_SCREEN, S_CONTROLS, S_SOUND, S_SYSTEM, S_INTERFACE };   // S_INTERFACE: ROM list only (Paths is in System)
 #define S_ROW(r) ((r) + (s_browser ? 1 : 0))   // a main page row's place: from the ROM list Online play comes first
-static int s_rowAbout = -1;   // Settings' About row (the last)
+static int s_rowAbout = -1;   // Settings' About row (the last tile)
+static int s_rowUpdate = -1;  // Settings' Check for updates row (ROM list only: a row under the tiles, online_update)
 static int s_rowHires = -1;   // Settings' HD textures row (ROM list only: hires_hub)
 static int s_rowReport = -1;  // Settings' Report a game row (ROM list only: report_screen)
 static int s_rowOnline = -1;  // Settings' Online play row (ROM list only: online_hub)
@@ -1833,7 +1835,7 @@ static void settings_main(UiMenu *m, const Config *c)
     s_soundPage = 0;
     s_systemPage = 0;
     UiMenuClear(m, Tr(T_SETTINGS), Tr(T_FOOT_SELECT));   // just "Settings", from the ROM list too
-    s_rowSaveGame = s_rowSaveAll = s_rowAbout = s_rowHires = s_rowReport = s_rowOnline = -1;
+    s_rowSaveGame = s_rowSaveAll = s_rowAbout = s_rowHires = s_rowReport = s_rowOnline = s_rowUpdate = -1;
     // From the ROM list Online play first (its own screens: online_hub); then the pages, as S_* (S_ROW).
     if (s_browser) m->icon[s_rowOnline = UiMenuAdd(m, Tr(T_ONLINE), "")] = UI_ICON_GLOBE;
     m->icon[UiMenuAdd(m, Tr(T_GRAPHICS), "")] = UI_ICON_GRAPHICS;
@@ -1848,6 +1850,7 @@ static void settings_main(UiMenu *m, const Config *c)
         m->icon[s_rowHires = UiMenuAdd(m, Tr(T_HIRES_SECTION), "")] = UI_ICON_HD;   // its own screen (hires_hub)
         m->icon[s_rowReport = UiMenuAdd(m, Tr(T_REPORT_GAME), "")] = UI_ICON_CHART;   // a game's report sent at once (settings_loop)
         m->icon[s_rowAbout = UiMenuAdd(m, Tr(T_ABOUT), "")] = UI_ICON_INFO;
+        m->icon[s_rowUpdate = UiMenuAdd(m, Tr(T_ONLINE_UPDATE), "")] = UI_ICON_LOAD;   // not a tile: a row under them
     }
     else
     {
@@ -6132,6 +6135,7 @@ static int settings_input(UiMenu *m, Config *c, int perGame, WORD down)
     if (s_browser && m->sel == s_rowReport && (down & XINPUT_GAMEPAD_A)) return SET_REPORT;
     if (s_browser && m->sel == s_rowOnline && (down & XINPUT_GAMEPAD_A)) return SET_ONLINE;
     if (m->sel == s_rowAbout && (down & XINPUT_GAMEPAD_A)) return SET_ABOUT;
+    if (s_browser && m->sel == s_rowUpdate && (down & XINPUT_GAMEPAD_A)) return SET_UPDATE;
     settings_values(m, c);
     if (down & XINPUT_GAMEPAD_A)
     {
@@ -6259,7 +6263,7 @@ static int update_run(IDirect3DDevice9 *dev, const char *version)
 // after an update: the first start of a version newer than lastver= (the
 // first start of all goes through the welcome and its set-up instead). A, B or
 // START go on. Each release changes the NEWS_* texts (and NEWS_COUNT).
-#define NEWS_COUNT 7
+#define NEWS_COUNT 4
 static void news_screen(IDirect3DDevice9 *dev)
 {
     UiInput in;
@@ -11226,8 +11230,8 @@ static int online_lobby(IDirect3DDevice9 *dev, const std::string &hostFile)
         }
         if (lb->haveGame && file.empty() && !online_find_rom(lb->crc1, lb->crc2, &file))
         {
-            // This console does not have the room's game: out of the room at once.
-            OnlineRoomClose();
+            // This console does not have the room's game: out of the room at once (the others told why).
+            OnlineRoomLeave("nogame");
             online_message(dev, Tr(T_ONLINE_PLAY), Tr(T_ONLINE_NO_GAME));
             return 0;
         }
@@ -12352,11 +12356,11 @@ static int online_hub(IDirect3DDevice9 *dev, Config *c)
 static int online_hub_run(IDirect3DDevice9 *dev, Config *c)
 {
     static UiAnim selAnim;
-    enum { OH_PLAY = 0, OH_MESSAGES, OH_PROFILE, OH_FRIENDS, OH_USERS, OH_STATS, OH_RANK, OH_NEWS, OH_UPDATE, OH_TELEGRAM, OH_DONATE, OH_COUNT };
+    enum { OH_PLAY = 0, OH_MESSAGES, OH_PROFILE, OH_FRIENDS, OH_USERS, OH_STATS, OH_RANK, OH_NEWS, OH_TELEGRAM, OH_DONATE, OH_COUNT };
     static const int labels[OH_COUNT] = { T_ONLINE_PLAY, T_ONLINE_MESSAGES, T_ONLINE_PROFILE, T_ONLINE_FRIENDS, T_ONLINE_USERS, T_ONLINE_STATS,
-                                          T_ONLINE_RANK, T_ONLINE_NEWS, T_ONLINE_UPDATE, T_ONLINE_TELEGRAM, T_DONATE_TAB };
+                                          T_ONLINE_RANK, T_ONLINE_NEWS, T_ONLINE_TELEGRAM, T_DONATE_TAB };
     static const unsigned char icons[OH_COUNT] = { UI_ICON_PLAY, UI_ICON_CHAT, UI_ICON_PERSON, UI_ICON_FRIENDS, UI_ICON_LIST, UI_ICON_CHART,
-                                                   UI_ICON_GLOBE, UI_ICON_INFO, UI_ICON_LOAD, UI_ICON_CLOCK, UI_ICON_SUN };
+                                                   UI_ICON_GLOBE, UI_ICON_INFO, UI_ICON_CLOCK, UI_ICON_SUN };
     std::vector<OnlineChatLine> chat, fresh;
     UiInput in;
     DWORD readAt = 0;
@@ -12366,7 +12370,7 @@ static int online_hub_run(IDirect3DDevice9 *dev, Config *c)
     UiInputInit(&in);
     for (;;)
     {
-        const float w = UI_WIDTH - 2 * UI_SAFE_X, h = 520, x = UI_SAFE_X, y = 112, rowH = 43, pad = 24, listW = 420;
+        const float w = UI_WIDTH - 2 * UI_SAFE_X, h = 520, x = UI_SAFE_X, y = 112, rowH = 47, pad = 24, listW = 420;
         const float chatX = x + listW + 44, chatW = x + w - 24 - chatX;
         const int shown = 13;
         const OnlineProfile *me = OnlineMe();
@@ -12399,7 +12403,6 @@ static int online_hub_run(IDirect3DDevice9 *dev, Config *c)
             case OH_STATS: online_stats(dev, me->tag); break;
             case OH_RANK: online_list(dev, ONLINE_LIST_RANK); break;
             case OH_NEWS: online_news(dev, c); break;
-            case OH_UPDATE: online_update(dev); break;
             case OH_TELEGRAM: online_telegram(dev); break;
             case OH_DONATE: online_donate(dev); break;
             }
@@ -12586,6 +12589,15 @@ static void settings_loop(IDirect3DDevice9 *dev, Config *c, const char *settings
             report_screen(dev, k ? drive : "game");
             settings_main(&m, c);
             m.sel = s_rowReport;
+            UiInputInit(&in);
+            continue;
+        }
+        if (r == SET_UPDATE)
+        {
+            // Settings > Check for updates (online play refuses an old LAIKA: this is where it is updated later).
+            online_update(dev);
+            settings_main(&m, c);
+            m.sel = s_rowUpdate;
             UiInputInit(&in);
             continue;
         }

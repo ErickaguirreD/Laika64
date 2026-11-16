@@ -159,6 +159,7 @@ int OnlineRoomStart(void);   // the host only, with two players at least (a coun
 int OnlineRoomKick(int place);   // the host only, before the game: that player out of the room (it may come back)
 int OnlineRoomNewPlayer(char *tag, size_t size);   // 1 once after a player came into the room, its gamertag in `tag` (the lobby's alert)
 void OnlineRoomClose(void);
+void OnlineRoomLeave(const char *why);   // the room closed saying why first ("nogame": no such ROM here), told to the others
 int OnlineRoomLocal(int count);   // how many play on this console (1-3), before the game: refused when the room has no places
 NetWs *OnlineRoomTake(int *port, int *players, int *local, unsigned char *owner);   // owner: ONLINE_ROOM_PLAYERS + 1 entries
 void OnlineRoomGiveBack(NetWs *w);   // the game's connection back: "back" said, the room's lobby again
