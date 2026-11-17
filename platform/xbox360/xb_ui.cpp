@@ -320,10 +320,36 @@ static unsigned s_uiFrames;   // UiEnd calls so far (UiFrameCount)
 
 unsigned UiFrameCount(void) { return s_uiFrames; }
 
+void UiPresent(IDirect3DDevice9 *dev)
+{
+    static DWORD last;
+    DWORD was = D3DPRESENT_INTERVAL_IMMEDIATE, now = GetTickCount(), spent = now - last;
+    // A frame made quicker than ~14 ms waits the rest here; the refresh does the rest of the pacing
+    // (the old Sleep(16) after each present, added to the wait for the refresh, would halve the rate).
+    if (spent < 14) Sleep(14 - spent);
+    if (dev)
+    {
+        dev->GetRenderState(D3DRS_PRESENTINTERVAL, &was);
+        dev->SetRenderState(D3DRS_PRESENTINTERVAL, D3DPRESENT_INTERVAL_ONE);
+        dev->Present(NULL, NULL, NULL, NULL);
+        dev->SetRenderState(D3DRS_PRESENTINTERVAL, was);
+    }
+    last = GetTickCount();
+}
+
+static void (*s_endHook)(void);
+void UiSetEndHook(void (*hook)(void)) { s_endHook = hook; }
+
 void UiEnd(void)
 {
     if (!s_dev) return;
     s_uiFrames++;
+    if (s_endHook)
+    {
+        UiSetShift(0, 0, 1);
+        UiSetScale(0, 0, 1.0f);
+        s_endHook();
+    }
     if (s_shotMsg[0])
     {
         s32 left = (s32)(s_shotUntil - GetTickCount());
@@ -345,6 +371,14 @@ void UiEnd(void)
 // UiSetScale: what is drawn next is scaled by k around (cx, cy) - the shapes keep
 // their look (their edges are worked out in their own units).
 static float s_scaleX, s_scaleY, s_scaleK = 1.0f;
+static float s_shiftX, s_shiftY, s_fade = 1.0f;
+
+void UiSetShift(float dx, float dy, float fade)
+{
+    s_shiftX = dx;
+    s_shiftY = dy;
+    s_fade = fade < 0.0f ? 0.0f : fade > 1.0f ? 1.0f : fade;
+}
 
 void UiSetScale(float cx, float cy, float k)
 {
@@ -360,6 +394,9 @@ static void vtx(UiVtx *v, float x, float y, D3DCOLOR c, float t0, float t1, floa
         x = s_scaleX + (x - s_scaleX) * s_scaleK;
         y = s_scaleY + (y - s_scaleY) * s_scaleK;
     }
+    x += s_shiftX;
+    y += s_shiftY;
+    if (s_fade < 1.0f) c = (c & 0x00FFFFFFu) | ((D3DCOLOR)((c >> 24) * s_fade) << 24);
     v->x = x * (2.0f / UI_WIDTH) - 1.0f;
     v->y = 1.0f - y * (2.0f / UI_HEIGHT);
     v->color = c;

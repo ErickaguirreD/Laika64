@@ -36,7 +36,9 @@
 //                                             "invite\t<from>\t<game>\t<code>\t<room>" as soon as one is made;
 //                                             the console sends "p" every half minute (answered "q")
 //   /v1/played?g=&t=&code=&game=&minutes=     after a game
-//   /v1/stats?g=&t=&name=                     total minutes, games, rank; then game minutes ...
+//   /v1/stats?g=&t=&name=                     total minutes, games, rank, friend (1 friends), days friends (-1 not known),
+//                                             games played together, avatar, country, online, status, ms, conn, in a room;
+//                                             then "game minutes code" per game (the code "NALE / 1234ABCD": its box art)
 //   /v1/rank?g=&t=&offset=                    position name country avatar minutes online
 //   /v1/news?lang=                            date title text
 //   /v1/rooms?g=&t=                           rooms waiting: code host avatar players game name locked
@@ -53,6 +55,8 @@ const PAGE = 50;                 // rows of users and rank per request
 const MAX_FRIENDS = 100;
 const MAX_REGISTER_PER_HOUR = 5; // per address
 const TAG_RE = /^[A-Za-z0-9_]{3,15}$/;
+const NAME_HOLD_S = 30 * 86400;  // a gamertag given up by a rename stays its old owner's this long (held_names): nobody
+                                 // else takes it at once and gets the invitations and messages sent to that name
 const PROTOCOLS = [2, 3, 4, 5, 6];  // xb_online.cpp ONLINE_PROTO values the rooms serve (3: a room's size, back to its lobby;
                                  // 4: each player's country and connection in "players"; 5: two or three on one console;
                                  // 6: "left" lines saying why a player went)
@@ -79,7 +83,7 @@ const INBOX_SOCKETS = 3;         // connections kept per player (its newest)
 const now = () => Math.floor(Date.now() / 1000);
 const clean = (text, limit) => String(text ?? "").replace(/[\t\r\n\x00-\x1f]/g, " ").trim().slice(0, limit);
 const country = (text) => (/^[A-Za-z]{2}$/.test(text ?? "") ? text.toUpperCase() : "--");
-const avatar = (text) => Math.max(0, Math.min(parseInt(text ?? "0", 10) || 0, 63));
+const avatar = (text) => Math.max(0, Math.min(parseInt(text ?? "0", 10) || 0, 255));   // 63 the team's, the colour ones from 64
 const reply = (lines, status = 200) =>
   new Response(lines.join("\n") + "\n.\n", { status, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" } });
 
@@ -111,6 +115,14 @@ async function rows(db, me, where, args, order, offset) {
   });
 }
 
+// Whether a gamertag (lower case) is held for another player than `me` (0: a new player), given up
+// by a rename less than NAME_HOLD_S ago; expired holds are dropped now and then.
+async function nameHeld(db, lower, me) {
+  if (Math.random() < 0.02) await db.prepare("DELETE FROM held_names WHERE until < ?").bind(now()).run();
+  const row = await db.prepare("SELECT owner FROM held_names WHERE lower = ? AND until >= ?").bind(lower, now()).first();
+  return !!row && row.owner !== me;
+}
+
 async function register(db, q, request, env) {
   const tag = q.get("tag") ?? "";
   if (!TAG_RE.test(tag)) return ["ERR name"];
@@ -120,6 +132,7 @@ async function register(db, q, request, env) {
   const made = await db.prepare("SELECT COUNT(*) AS n FROM registered WHERE place = ?").bind(place).first();
   if (made.n >= MAX_REGISTER_PER_HOUR) return ["ERR busy"];
   if (await db.prepare("SELECT 1 FROM users WHERE lower = ?").bind(tag.toLowerCase()).first()) return ["ERR taken"];
+  if (await nameHeld(db, tag.toLowerCase(), 0)) return ["ERR taken"];
   const token = [...crypto.getRandomValues(new Uint8Array(12))].map((b) => b.toString(16).padStart(2, "0")).join("");
   try {
     await db.batch([
@@ -150,6 +163,8 @@ async function profiles(cmd, q, request, env) {
   const t = now();
   switch (cmd) {
     case "ping": {
+      // The latest LAIKA 64 release (GitHub's, kept 10 minutes): told back as "u" - each console says so as a notice.
+      const latest = await latestRelease();
       const ms = Math.max(0, Math.min(parseInt(q.get("ms") ?? "0", 10) || 0, 9999));
       // conn 3: a LAIKA before 2.1, which tells neither its time nor its connection (shown as an old version).
       const conn = q.has("conn") ? Math.max(0, Math.min(parseInt(q.get("conn"), 10) || 0, 2)) : 3;
@@ -163,16 +178,24 @@ async function profiles(cmd, q, request, env) {
         db.prepare("SELECT u.name, u.avatar FROM requests r JOIN users u ON u.id = r.from_id WHERE r.to_id = ? ORDER BY r.at LIMIT 20").bind(me),
         db.prepare("SELECT d.id, u.name, d.text FROM dm d JOIN users u ON u.id = d.from_id WHERE d.to_id = ? AND d.id > ? ORDER BY d.id LIMIT 20").bind(me, since),
       ]);
-      return ["OK", ...(cc !== "--" ? ["c\t" + cc] : []), ...friends.results.map((f) => ["f", f.name, t - f.seen < ONLINE_S ? 1 : 0].join("\t")),
+      return ["OK", ...(cc !== "--" ? ["c\t" + cc] : []), ...(latest ? ["u\t" + latest] : []), ...friends.results.map((f) => ["f", f.name, t - f.seen < ONLINE_S ? 1 : 0].join("\t")),
         ...asked.results.map((r) => ["r", r.name, r.avatar].join("\t")), ...msgs.results.map((m) => ["m", m.id, m.name, m.text].join("\t"))];
     }
     case "rename": {
       const tag = q.get("tag") ?? "";
       if (!TAG_RE.test(tag)) return ["ERR name"];
-      const taken = await db.prepare("SELECT id FROM users WHERE lower = ?").bind(tag.toLowerCase()).first();
+      const lower = tag.toLowerCase();
+      const taken = await db.prepare("SELECT id FROM users WHERE lower = ?").bind(lower).first();
       if (taken && taken.id !== me) return ["ERR taken"];
+      if (await nameHeld(db, lower, me)) return ["ERR taken"];
+      const old = await db.prepare("SELECT lower FROM users WHERE id = ?").bind(me).first();
+      const steps = [db.prepare("UPDATE users SET name = ?, lower = ? WHERE id = ?").bind(tag, lower, me),
+        db.prepare("DELETE FROM held_names WHERE lower = ?").bind(lower)];   // its own old name taken back: no longer held
+      // The name given up stays this player's for a while (a new spelling of the same name holds nothing).
+      if (old && old.lower !== lower)
+        steps.push(db.prepare("INSERT OR REPLACE INTO held_names (lower, owner, until) VALUES (?, ?, ?)").bind(old.lower, me, now() + NAME_HOLD_S));
       try {
-        await db.prepare("UPDATE users SET name = ?, lower = ? WHERE id = ?").bind(tag, tag.toLowerCase(), me).run();
+        await db.batch(steps);
       } catch (e) {
         return ["ERR taken"];
       }
@@ -237,9 +260,10 @@ async function profiles(cmd, q, request, env) {
       const other = await db.prepare("SELECT id FROM users WHERE lower = ?").bind((q.get("with") ?? "").toLowerCase()).first();
       if (!other) return ["ERR name"];
       const since = Math.max(0, parseInt(q.get("since") ?? "0", 10) || 0);
-      const { results } = await db.prepare("SELECT id, from_id, text FROM dm WHERE ((from_id = ?1 AND to_id = ?2) OR (from_id = ?2 AND to_id = ?1)) AND id > ?3 " +
+      const { results } = await db.prepare("SELECT id, from_id, text, at FROM dm WHERE ((from_id = ?1 AND to_id = ?2) OR (from_id = ?2 AND to_id = ?1)) AND id > ?3 " +
         "ORDER BY id DESC LIMIT 40").bind(me, other.id, since).all();
-      return ["OK", ...results.reverse().map((m) => [m.id, m.from_id === me ? 1 : 0, m.text].join("\t"))];
+      // How long ago each was sent (seconds; as the general chat's): the console shows its time and day.
+      return ["OK", ...results.reverse().map((m) => [m.id, m.from_id === me ? 1 : 0, m.text, Math.max(0, t - m.at)].join("\t"))];
     }
     case "lobby": {
       const since = Math.max(0, parseInt(q.get("since") ?? "0", 10) || 0);
@@ -285,12 +309,21 @@ async function profiles(cmd, q, request, env) {
       return ["OK"];
     }
     case "stats": {
-      const who = await db.prepare("SELECT id, minutes FROM users WHERE lower = ?").bind((q.get("name") ?? "").toLowerCase()).first();
+      const who = await db.prepare("SELECT id, minutes, avatar, country, seen, status, ms, conn, room FROM users WHERE lower = ?")
+        .bind((q.get("name") ?? "").toLowerCase()).first();
       if (!who) return ["ERR name"];
-      const games = await db.prepare("SELECT game, minutes FROM played WHERE user = ? ORDER BY minutes DESC LIMIT 20").bind(who.id).all();
-      const count = await db.prepare("SELECT COUNT(*) AS n FROM played WHERE user = ?").bind(who.id).first();
-      const above = await db.prepare("SELECT COUNT(*) AS n FROM users WHERE minutes > ?").bind(who.minutes).first();
-      return ["OK", [who.minutes, count.n, above.n + 1].join("\t"), ...games.results.map((g) => g.game + "\t" + g.minutes)];
+      const [games, count, above, friend, together] = await db.batch([
+        db.prepare("SELECT game, minutes, code FROM played WHERE user = ? ORDER BY minutes DESC LIMIT 20").bind(who.id),
+        db.prepare("SELECT COUNT(*) AS n FROM played WHERE user = ?").bind(who.id),
+        db.prepare("SELECT COUNT(*) AS n FROM users WHERE minutes > ?").bind(who.minutes),
+        db.prepare("SELECT at FROM friends WHERE user = ? AND friend = ?").bind(me, who.id),
+        db.prepare("SELECT games FROM together WHERE a = ? AND b = ?").bind(Math.min(me, who.id), Math.max(me, who.id)),
+      ]);
+      const f = friend.results[0], online = t - who.seen < ONLINE_S;
+      const head = [who.minutes, count.results[0].n, above.results[0].n + 1, f ? 1 : 0, f && f.at ? Math.floor((t - f.at) / 86400) : -1,
+        together.results[0] ? together.results[0].games : 0, who.avatar, who.country, online ? 1 : 0, online ? who.status : "",
+        online ? who.ms : 0, online ? who.conn : 0, online && who.room ? 1 : 0];
+      return ["OK", head.join("\t"), ...games.results.map((g) => [g.game, g.minutes, g.code].join("\t"))];
     }
     case "rooms": {
       const { results } = await db.prepare("SELECT code, host, avatar, players, game, name, locked FROM rooms WHERE updated > ? AND started = 0 ORDER BY updated DESC LIMIT 40")
@@ -328,10 +361,28 @@ async function profiles(cmd, q, request, env) {
 // Two players friends both ways; what either had asked is answered.
 async function befriend(db, a, b) {
   await db.batch([
-    db.prepare("INSERT OR IGNORE INTO friends (user, friend) VALUES (?, ?)").bind(a, b),
-    db.prepare("INSERT OR IGNORE INTO friends (user, friend) VALUES (?, ?)").bind(b, a),
+    db.prepare("INSERT OR IGNORE INTO friends (user, friend, at) VALUES (?, ?, ?)").bind(a, b, now()),
+    db.prepare("INSERT OR IGNORE INTO friends (user, friend, at) VALUES (?, ?, ?)").bind(b, a, now()),
     db.prepare("DELETE FROM requests WHERE (from_id = ?1 AND to_id = ?2) OR (from_id = ?2 AND to_id = ?1)").bind(a, b),
   ]);
+}
+
+// The latest release's version, from GitHub's redirect to its tag (as each console's own check reads it); asked again
+// after 10 minutes, the last one known kept meanwhile and when GitHub does not answer.
+const LATEST_URL = "https://github.com/ErickaguirreD/Laika64/releases/latest";
+let latestCache = { v: "", at: 0 };
+async function latestRelease() {
+  const t = Date.now();
+  if (t - latestCache.at < 600000) return latestCache.v;
+  latestCache.at = t;
+  try {
+    const r = await fetch(LATEST_URL, { redirect: "manual", headers: { "User-Agent": "laika64-server" } });
+    const m = (r.headers.get("Location") || "").match(/\/tag\/v?([0-9]+(?:\.[0-9]+){1,2})$/);
+    if (m) latestCache.v = m[1];
+  } catch (e) {
+    // (the last one known stays)
+  }
+  return latestCache.v;
 }
 
 export default {
@@ -696,8 +747,24 @@ export class Room {
       next += p.local;
     }
     for (const p of this.players) this.send(p, ["start", owner.length, p.port, p.local, owner.join(",")].join("\t"));
+    await this.together();
     await this.list();
     await this.state.storage.setAlarm(Date.now() + ROOM_BEAT_MS);
+  }
+
+  // A game started: one more played together for each two of its players (the profile's "played together").
+  async together() {
+    const lower = [...new Set(this.players.map((p) => (p.tag ?? "").toLowerCase()).filter((x) => x))];
+    if (lower.length < 2) return;
+    try {
+      const db = this.env.DB;
+      const { results } = await db.prepare("SELECT id FROM users WHERE lower IN (" + lower.map(() => "?").join(",") + ")").bind(...lower).all();
+      const ids = results.map((r) => r.id).sort((x, y) => x - y), pairs = [];
+      for (let i = 0; i < ids.length; i++)
+        for (let j = i + 1; j < ids.length; j++)
+          pairs.push(db.prepare("INSERT INTO together (a, b, games) VALUES (?, ?, 1) ON CONFLICT (a, b) DO UPDATE SET games = games + 1").bind(ids[i], ids[j]));
+      if (pairs.length) await db.batch(pairs);
+    } catch (e) { /* a count missed changes nothing of the game */ }
   }
 
   // A console out of the game: the others play on without it, its port's controller let go.

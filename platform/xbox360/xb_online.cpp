@@ -9,7 +9,9 @@
 #include "xb_net.h"
 #include "xb_online.h"
 #include "xb_lang.h"
+#include "../../core/common/h64_version.h"
 #include <map>
+#include <set>
 
 #define ONLINE_SERVER "laika64.laikaemu.workers.dev"   // LAIKA 64's own (online.txt's server= names another)
 #define ONLINE_ANSWER_MS 8000
@@ -23,12 +25,27 @@ static char s_file[96];             // <drive>:\config\online.txt
 static int s_serverSet;             // online.txt names the server (kept when the file is written again)
 static char s_error[24];
 static CRITICAL_SECTION s_lock;     // s_status, s_played, the news below
-struct Notice { std::string text; int invite; };
+struct Notice { std::string text; int invite, kind; };
+static volatile int s_notify = 15 | 16;   // Config::notify (OnlineSetNotify)
+static char s_newer[32];                  // the newer release the server told of (told once a session)
+
+const char *OnlineNewerRelease(void) { return s_newer; }
+
+// Whether version a ("2.3", "2.2.1") is after b.
+static int version_after(const char *a, const char *b)
+{
+    int x[3] = { 0, 0, 0 }, y[3] = { 0, 0, 0 }, k;
+    sscanf(a, "%d.%d.%d", &x[0], &x[1], &x[2]);
+    sscanf(b, "%d.%d.%d", &y[0], &y[1], &y[2]);
+    for (k = 0; k < 3; k++)
+        if (x[k] != y[k]) return x[k] > y[k];
+    return 0;
+}
 static std::vector<Notice> s_notices;               // the news not shown yet
 static std::map<std::string, int> s_unread;         // per friend: messages not read yet
 static std::map<std::string, int> s_friendOnline;   // per friend: online at the last ping
 static std::vector<std::string> s_askedSeen;        // friendships asked already told
-static int s_dmSeen;                                // the last message told
+static int s_dmSeen;                                // the last message told (kept in the profile: dmseen=, or each start told the last ones again)
 static unsigned s_invitedTo;                        // the room of the last invitation received ...
 static DWORD s_invitedAt;                           // ... and when
 static char s_status[44];
@@ -62,7 +79,7 @@ static void profile_write(void)
     FILE *f = fopen(s_file, "w");
     if (!f) { H64_INFO("[online] %s NOT written", s_file); return; }
     if (s_serverSet) fprintf(f, "server=%s\n", s_me.server);
-    fprintf(f, "gamertag=%s\ntoken=%s\ncountry=%s\navatar=%d\n", s_me.tag, s_me.token, s_me.country, s_me.avatar);
+    fprintf(f, "gamertag=%s\ntoken=%s\ncountry=%s\navatar=%d\ndmseen=%d\n", s_me.tag, s_me.token, s_me.country, s_me.avatar, s_dmSeen);
     fclose(f);
 }
 
@@ -86,6 +103,7 @@ static void profile_read(void)
         else if (!strcmp(line, "token")) copy(s_me.token, sizeof(s_me.token), eq);
         else if (!strcmp(line, "country")) copy(s_me.country, sizeof(s_me.country), eq);
         else if (!strcmp(line, "avatar")) s_me.avatar = atoi(eq) % ONLINE_AVATARS;
+        else if (!strcmp(line, "dmseen")) s_dmSeen = atoi(eq);
     }
     fclose(f);
 }
@@ -175,6 +193,20 @@ static void chat_when(char *out, int ago)
     FileTimeToSystemTime(&ft, &st);
     _snprintf(out, 7, "%02d:%02d", st.wHour, st.wMinute);
     out[7] = 0;
+}
+
+// How many days before today (this console's) a moment `ago` seconds before now was: 0 today, 1 yesterday...
+static int days_ago(int ago)
+{
+    SYSTEMTIME st;
+    FILETIME ft;
+    ULARGE_INTEGER now, then;
+    GetLocalTime(&st);
+    SystemTimeToFileTime(&st, &ft);
+    now.LowPart = ft.dwLowDateTime;
+    now.HighPart = ft.dwHighDateTime;
+    then.QuadPart = now.QuadPart - (ULONGLONG)(ago > 0 ? ago : 0) * 10000000ull;
+    return (int)(now.QuadPart / (86400ull * 10000000ull) - then.QuadPart / (86400ull * 10000000ull));
 }
 
 static std::string field(const std::string &row, int k)
@@ -337,6 +369,15 @@ int OnlineConv(const char *with, int since, std::vector<OnlineDmLine> *out)
         m.id = atoi(field(rows[k], 0).c_str());
         m.mine = atoi(field(rows[k], 1).c_str());
         m.text = field(rows[k], 2);
+        m.when[0] = 0;
+        m.daysAgo = -1;
+        if (!field(rows[k], 3).empty())
+        {
+            // Its time and day on this console's clock (a server before 2.2.2 tells neither).
+            const int ago = atoi(field(rows[k], 3).c_str());
+            chat_when(m.when, ago);
+            m.daysAgo = days_ago(ago);
+        }
         if (m.id) out->push_back(m);
     }
     return 1;
@@ -362,7 +403,9 @@ void OnlineUnreadClear(const char *name)
     LeaveCriticalSection(&s_lock);
 }
 
-int OnlineNoticeTake(char *out, size_t size, int *invite)
+void OnlineSetNotify(int bits) { s_notify = bits; }
+
+int OnlineNoticeTake(char *out, size_t size, int *invite, int *kind)
 {
     int got = 0;
     if (!s_thread) return 0;
@@ -371,6 +414,7 @@ int OnlineNoticeTake(char *out, size_t size, int *invite)
     {
         copy(out, size, s_notices[0].text.c_str());
         if (invite) *invite = s_notices[0].invite;
+        if (kind) *kind = s_notices[0].kind;
         s_notices.erase(s_notices.begin());
         got = 1;
     }
@@ -379,12 +423,16 @@ int OnlineNoticeTake(char *out, size_t size, int *invite)
 }
 
 // A notice for the screens (under s_lock): invitations before the other news, the last eight kept.
-static void notice_add(const char *text, int invite)
+static void notice_add(const char *text, int invite, int kind)
 {
     Notice n;
     size_t at = 0;
+    if ((kind == ONLINE_NOTE_ROOM && !(s_notify & 1)) || (kind == ONLINE_NOTE_FRIEND && !(s_notify & 2)) || (kind == ONLINE_NOTE_DM && !(s_notify & 4)) ||
+        (kind == ONLINE_NOTE_UPDATE && !(s_notify & 16)))
+        return;   // turned off (Settings > Interface > Notifications)
     n.text = text;
     n.invite = invite;
+    n.kind = kind;
     if (invite)
         while (at < s_notices.size() && s_notices[at].invite) at++;
     else at = s_notices.size();
@@ -423,6 +471,7 @@ static void ping_news(const std::vector<std::string> &rows)
     static int first = 1;   // the first ping only learns who is online (no notice for everyone at once)
     size_t k;
     char t[200];
+    const int dmWas = s_dmSeen;
     EnterCriticalSection(&s_lock);
     for (k = 0; k < rows.size(); k++)
     {
@@ -435,7 +484,7 @@ static void ping_news(const std::vector<std::string> &rows)
             {
                 _snprintf(t, sizeof(t) - 1, Tr(T_ONLINE_N_FRIEND_ON), name.c_str());
                 t[sizeof(t) - 1] = 0;
-                notice_add(t, 0);
+                notice_add(t, 0, ONLINE_NOTE_FRIEND);
             }
             s_friendOnline[name] = on;
         }
@@ -450,7 +499,18 @@ static void ping_news(const std::vector<std::string> &rows)
                 s_askedSeen.push_back(name);
                 _snprintf(t, sizeof(t) - 1, Tr(T_ONLINE_N_REQUEST), name.c_str());
                 t[sizeof(t) - 1] = 0;
-                notice_add(t, 0);
+                notice_add(t, 0, ONLINE_NOTE_REQUEST);
+            }
+        }
+        else if (kind == "u")
+        {
+            // The latest release: a newer one than this, told once.
+            if (version_after(name.c_str(), H64_VERSION_STRING) && strcmp(name.c_str(), s_newer))
+            {
+                copy(s_newer, sizeof(s_newer), name.c_str());
+                _snprintf(t, sizeof(t) - 1, Tr(T_ONLINE_N_UPDATE), name.c_str());
+                t[sizeof(t) - 1] = 0;
+                notice_add(t, 0, ONLINE_NOTE_UPDATE);
             }
         }
         else if (kind == "c")
@@ -472,11 +532,12 @@ static void ping_news(const std::vector<std::string> &rows)
                 s_unread[from]++;
                 _snprintf(t, sizeof(t) - 1, Tr(T_ONLINE_N_DM), from.c_str(), text.c_str());
                 t[sizeof(t) - 1] = 0;
-                notice_add(t, 0);
+                notice_add(t, 0, ONLINE_NOTE_DM);
             }
         }
     }
     first = 0;
+    if (s_dmSeen != dmWas) profile_write();   // the messages told stay told after LAIKA 64 is closed
     LeaveCriticalSection(&s_lock);
 }
 
@@ -485,18 +546,34 @@ int OnlineStatsOf(const char *name, OnlineStats *out)
     std::vector<std::string> rows;
     std::string q;
     size_t k;
-    out->minutes = out->games = out->rank = 0;
+    out->minutes = out->games = out->rank = out->isFriend = out->together = out->avatar = out->online = out->ms = out->conn = out->inRoom = 0;
+    out->friendDays = -1;
+    out->country[0] = out->status[0] = 0;
     out->list.clear();
     add(&q, "name", name);
     if (!request_me("stats", q, &rows) || rows.empty()) return 0;
     out->minutes = atoi(field(rows[0], 0).c_str());
     out->games = atoi(field(rows[0], 1).c_str());
     out->rank = atoi(field(rows[0], 2).c_str());
+    // The profile's (a server before 2.2.2 sends none of these: an empty field reads 0).
+    out->isFriend = atoi(field(rows[0], 3).c_str());
+    if (!field(rows[0], 4).empty()) out->friendDays = atoi(field(rows[0], 4).c_str());
+    out->together = atoi(field(rows[0], 5).c_str());
+    out->avatar = atoi(field(rows[0], 6).c_str()) % ONLINE_AVATARS;
+    _snprintf(out->country, sizeof(out->country) - 1, "%s", field(rows[0], 7).c_str());
+    out->country[sizeof(out->country) - 1] = 0;
+    out->online = atoi(field(rows[0], 8).c_str());
+    _snprintf(out->status, sizeof(out->status) - 1, "%s", field(rows[0], 9).c_str());
+    out->status[sizeof(out->status) - 1] = 0;
+    out->ms = atoi(field(rows[0], 10).c_str());
+    out->conn = atoi(field(rows[0], 11).c_str());
+    out->inRoom = atoi(field(rows[0], 12).c_str());
     for (k = 1; k < rows.size(); k++)
     {
         OnlineGameTime g;
         g.game = field(rows[k], 0);
         g.minutes = atoi(field(rows[k], 1).c_str());
+        g.code = field(rows[k], 2);
         out->list.push_back(g);
     }
     return 1;
@@ -617,9 +694,139 @@ static void watch_read(void)
     LeaveCriticalSection(&s_lock);
 }
 
+static void lobby_parse(const std::vector<std::string> &rows, std::vector<OnlineRoomInfo> *rooms, std::vector<OnlineGameInfo> *games,
+                        std::vector<OnlineUser> *users, std::vector<OnlineChatLine> *chat);   // below
+
+// The lobby read by the thread for a screen (OnlineLobbyWatch); all under s_lock.
+static volatile int s_lobbyWatch;
+static DWORD s_lobbyAt;
+static int s_lobbySince, s_lobbyReady;
+static std::vector<OnlineRoomInfo> s_lobbyRooms;
+static std::vector<OnlineGameInfo> s_lobbyGames;
+static std::vector<OnlineUser> s_lobbyUsers;
+static std::vector<OnlineChatLine> s_lobbyChat;
+
+void OnlineLobbyWatch(int on, int since)
+{
+    if (!s_thread) return;
+    EnterCriticalSection(&s_lock);
+    if (on)
+    {
+        s_lobbySince = since;
+        s_lobbyAt = GetTickCount();   // the first read at once
+        s_lobbyReady = 0;
+        s_lobbyChat.clear();
+    }
+    s_lobbyWatch = on;
+    LeaveCriticalSection(&s_lock);
+}
+
+void OnlineLobbyRefresh(void)
+{
+    EnterCriticalSection(&s_lock);
+    s_lobbyAt = GetTickCount();
+    LeaveCriticalSection(&s_lock);
+}
+
+int OnlineLobbyTake(std::vector<OnlineRoomInfo> *rooms, std::vector<OnlineGameInfo> *games, std::vector<OnlineUser> *users,
+                    std::vector<OnlineChatLine> *chat)
+{
+    int r;
+    if (!s_thread) return 0;
+    EnterCriticalSection(&s_lock);
+    r = s_lobbyReady;
+    if (r)
+    {
+        *rooms = s_lobbyRooms;
+        *games = s_lobbyGames;
+        *users = s_lobbyUsers;
+        chat->swap(s_lobbyChat);
+        s_lobbyChat.clear();
+        s_lobbyReady = 0;
+    }
+    LeaveCriticalSection(&s_lock);
+    return r;
+}
+
+// A room another player opened since the rooms were last looked at: "<host> opened a room of <game>". The first
+// list only learns them (no notice for every room there already is); the rooms gone are forgotten.
+static void rooms_news(const std::vector<OnlineRoomInfo> &rooms)
+{
+    static std::set<unsigned> seen;
+    static int learnt;
+    std::set<unsigned> now;
+    size_t k;
+    char t[200];
+    EnterCriticalSection(&s_lock);
+    for (k = 0; k < rooms.size(); k++)
+    {
+        now.insert(rooms[k].code);
+        if (learnt && !seen.count(rooms[k].code) && _stricmp(rooms[k].host, s_me.tag))
+        {
+            _snprintf(t, sizeof(t) - 1, Tr(T_ONLINE_N_ROOM), rooms[k].host, rooms[k].game);
+            t[sizeof(t) - 1] = 0;
+            notice_add(t, 0, ONLINE_NOTE_ROOM);
+        }
+    }
+    seen.swap(now);
+    learnt = 1;
+    LeaveCriticalSection(&s_lock);
+}
+
+// The rooms alone (the general chat not wanted), for rooms_news while no screen reads the lobby.
+static void rooms_look(void)
+{
+    std::vector<std::string> rows;
+    std::vector<OnlineRoomInfo> rooms;
+    std::vector<OnlineGameInfo> games;
+    std::vector<OnlineUser> users;
+    std::vector<OnlineChatLine> chat;
+    std::string q;
+    char err[sizeof(s_error)];
+    add(&q, "since", 0x7FFFFFFF);
+    if (!request_me("lobby", q, &rows, err)) return;
+    lobby_parse(rows, &rooms, &games, &users, &chat);
+    rooms_news(rooms);
+}
+
+static void lobby_read(void)
+{
+    std::vector<std::string> rows;
+    std::vector<OnlineRoomInfo> rooms;
+    std::vector<OnlineGameInfo> games;
+    std::vector<OnlineUser> users;
+    std::vector<OnlineChatLine> chat;
+    std::string q;
+    char err[sizeof(s_error)];
+    int since;
+    size_t k;
+    EnterCriticalSection(&s_lock);
+    since = s_lobbySince;
+    LeaveCriticalSection(&s_lock);
+    add(&q, "since", since);
+    if (!request_me("lobby", q, &rows, err)) return;   // not reached: the screen keeps what it has
+    lobby_parse(rows, &rooms, &games, &users, &chat);
+    rooms_news(rooms);
+    EnterCriticalSection(&s_lock);
+    if (s_lobbyWatch && s_lobbySince == since)   // (not a read for a screen gone, or one that started again)
+    {
+        s_lobbyRooms.swap(rooms);
+        s_lobbyGames.swap(games);
+        s_lobbyUsers.swap(users);
+        for (k = 0; k < chat.size(); k++)
+        {
+            s_lobbyChat.push_back(chat[k]);
+            if (chat[k].id > s_lobbySince) s_lobbySince = chat[k].id;
+        }
+        s_lobbyReady = 1;
+    }
+    LeaveCriticalSection(&s_lock);
+}
+
 static DWORD WINAPI online_thread(LPVOID)
 {
     DWORD pingAt = GetTickCount();   // the first one at once
+    DWORD roomsAt = GetTickCount() + 5000;   // the rooms first looked at a little after the start
     char sent[44] = "\1";            // the status last told (never this one)
     int sentRoom = -1;               // ... and whether in a room
     for (;;)
@@ -628,8 +835,23 @@ static DWORD WINAPI online_thread(LPVOID)
         std::string q;
         Played p;
         int have = 0;
-        Sleep(s_watch ? 250 : 2000);
+        Sleep(s_watch || s_lobbyWatch ? 100 : 2000);
         if (!OnlineRegistered() || !s_me.server[0]) continue;
+        if ((s_notify & 1) && !s_lobbyWatch && !s_watch && !s_inRoom && (int)(GetTickCount() - roomsAt) >= 0)
+        {
+            // New rooms (Settings > Interface > Notifications): a look every 20 s (the lobby's reads do it while open).
+            roomsAt = GetTickCount() + ONLINE_ROOMS_LOOK_MS;
+            rooms_look();
+            continue;
+        }
+        if (s_lobbyWatch && (int)(GetTickCount() - s_lobbyAt) >= 0)
+        {
+            EnterCriticalSection(&s_lock);
+            s_lobbyAt = GetTickCount() + ONLINE_LOBBY_MS;
+            LeaveCriticalSection(&s_lock);
+            lobby_read();
+            continue;
+        }
         if (s_watch && (int)(GetTickCount() - s_watchAt) >= 0)
         {
             watch_read();
@@ -690,7 +912,7 @@ static void inbox_line(const char *line)
     t[sizeof(t) - 1] = 0;
     H64_INFO("[online] %s", t);
     EnterCriticalSection(&s_lock);
-    notice_add(t, 1);
+    notice_add(t, 1, ONLINE_NOTE_INVITE);
     s_invitedTo = (unsigned)atoi(field(l, 3).c_str());
     s_invitedAt = GetTickCount();
     LeaveCriticalSection(&s_lock);
@@ -819,18 +1041,29 @@ static int user_row(const std::string &r, OnlineUser *u)
     return u->name[0] != 0;
 }
 
+static void lobby_parse(const std::vector<std::string> &rows, std::vector<OnlineRoomInfo> *rooms, std::vector<OnlineGameInfo> *games,
+                        std::vector<OnlineUser> *users, std::vector<OnlineChatLine> *chat);
+
 int OnlineLobbyGet(int since, std::vector<OnlineRoomInfo> *rooms, std::vector<OnlineGameInfo> *games, std::vector<OnlineUser> *users,
                    std::vector<OnlineChatLine> *chat)
 {
     std::vector<std::string> rows;
     std::string q;
-    size_t k;
     rooms->clear();
     games->clear();
     users->clear();
     chat->clear();
     add(&q, "since", since);
     if (!request_me("lobby", q, &rows)) return 0;
+    lobby_parse(rows, rooms, games, users, chat);
+    return 1;
+}
+
+// The lobby's rows: rooms (R), games being played (G), players (U), the chat (C).
+static void lobby_parse(const std::vector<std::string> &rows, std::vector<OnlineRoomInfo> *rooms, std::vector<OnlineGameInfo> *games,
+                        std::vector<OnlineUser> *users, std::vector<OnlineChatLine> *chat)
+{
+    size_t k;
     for (k = 0; k < rows.size(); k++)
     {
         const std::string &r = rows[k];
@@ -890,7 +1123,6 @@ int OnlineLobbyGet(int since, std::vector<OnlineRoomInfo> *rooms, std::vector<On
             if (m.id) chat->push_back(m);
         }
     }
-    return 1;
 }
 
 int OnlineChatSay(const char *text)

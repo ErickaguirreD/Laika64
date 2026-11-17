@@ -6,7 +6,7 @@ LAIKA 64 is built on [Harissa64](#credits-and-licence) by kernel64. On top of it
 
 Use it only with games you own. No ROMs are included, and none will be.
 
-![The game list in spotlight view](docs/images/library_spotlight.jpg)
+![The game list in LAIKA 64 3.0](docs/images/library_list.jpg)
 
 ## What you need
 
@@ -26,19 +26,39 @@ In Aurora LAIKA 64 shows up with its own cover and background: they are in the `
 
 ## The game library
 
-- **Six views**: detailed list, grid, big covers, carousel, mosaic and spotlight. B switches between them.
-- **Pictures for every game**: box art (flat or as a 3D box), a screenshot, the title screen and the logo. The right stick goes through them; stay on a game for a moment and they take turns by themselves, with a soft fade.
+- **Ten views**: detailed list, grid, big covers, carousel, mosaic, cinema, cartridges, 3D boxes, single game and logo. B switches between them, and A starts the game in every one of them.
+- **Pictures and videos for every game**: box art (flat or as a 3D box), a screenshot, the title screen, the logo and a preview video with its sound (ScreenScraper). The right stick goes through them; with **Pictures take turns** on they change by themselves, after the video has played once. **Game music** plays only the video's sound, and background videos can play with or without it.
 - **Game info**: real title, year, developer, genre, players, region, a description, the ROM size and its save type.
 - **Translated descriptions**: the games' descriptions show in the menus' language when Wikipedia has the article in it (**Settings > Interface > Translate descriptions**; off, in English).
 - **Favourites and categories**: X marks a favourite; LT/RT go through the tabs. You can make your own categories by genre, region, players, developer, publisher or year.
 - **USB memories**: plug one in while the game list is up and LAIKA 64 offers to add its games (from any folder on it). They get their own **USB** tab, and leave the list when the memory is taken out.
 - **File explorer** (Settings > System > Tools): two panels over the hard drive and USB memories, to copy, move and delete files on the console.
 - **Screenshots of the menus** with L3 + R3.
-- **About and Credits** pages: X in the game list.
+- **About**, with a **What's new** tab that lists everything LAIKA 64 brought, the credits and the donations.
+- **Report a game** (Settings): how a game runs, sent at once, and a QR code to GitHub's issues, which get priority.
 
-| | |
-|---|---|
-| ![Mosaic view](docs/images/library_mosaic.jpg) | ![Credits](docs/images/credits.jpg) |
+| | | |
+|---|---|---|
+| ![Grid](docs/images/view_grid.jpg) | ![Big covers](docs/images/view_big_covers.jpg) | ![Carousel](docs/images/view_carousel.jpg) |
+| ![Cinema](docs/images/view_cinema.jpg) | ![Cartridges](docs/images/view_cartridges.jpg) | ![3D boxes](docs/images/view_boxes3d.jpg) |
+| ![Single game](docs/images/view_single.jpg) | ![Logo view](docs/images/view_logo.jpg) | ![What's new in About](docs/images/about_whats_new.jpg) |
+
+![Report a game, with GitHub's issues on the right](docs/images/report_game.jpg)
+
+## Online play
+
+Play with friends over the internet, up to four players, from **START** in the game list:
+
+- **Rooms** for 2 to 4 players, public or with a password, a **quick match** and **invitations** that reach your friends at once, even in the middle of a game.
+- A **direct connection** between the consoles when the routers allow it (the server as the fallback). It rides out short drops and comes back by itself.
+- **Up to three local players** on one console with the others online.
+- **Friends, private messages, ranking and profiles** with statistics, the games played most (with their covers) and **133 avatars** (pixel art, robots and characters).
+- A **lobby chat** with an on-screen keyboard, **emojis** and **32 quick phrases** during a game, shown in each player's language.
+- **Alerts** for new rooms, friends online and messages, anywhere in the interface, with a short rumble.
+
+| | | |
+|---|---|---|
+| ![The online menu](docs/images/online_hub.jpg) | ![Rooms, chat and players](docs/images/online_lobby.jpg) | ![A player's profile](docs/images/online_profile.jpg) |
 
 ## Box art and game info
 
@@ -58,7 +78,7 @@ The pictures and the text come from [libretro-thumbnails](https://github.com/lib
 
 ## Make it yours
 
-Everything is in **Settings > Interface**, and the welcome assistant goes through the main ones:
+Settings are a grid of sections, each with its own colour, an animation of its own when selected and what it holds at a glance; every page opens with a short animation. Everything about the look is in **Settings > Interface**, and the welcome assistant goes through the main ones:
 
 - **29 animated backgrounds**: Nebula, Hyperspace, Aurora, XMB wave, Flow, Bokeh, Lava, Fractal, Hologram and more, each with its own colours, opacity and speed.
 - **Your own wallpapers**: JPG or PNG files in the `wallpapers` folder, changing by themselves with fade, slide, zoom, wipe, blinds or random transitions.
@@ -67,11 +87,9 @@ Everything is in **Settings > Interface**, and the welcome assistant goes throug
 - Selection colour, settings style, text size, borders (colour, width, glow: steady, pulsing, snake, fade, rainbow), panel opacity and corners.
 - **Menu music** (in order, random or one track, from the `music` folder) and interface sounds in four styles.
 
-| | | |
-|---|---|---|
-| ![Settings with a wallpaper and red selection](docs/images/skin_red.jpg) | ![Dark wallpaper, violet selection](docs/images/skin_dark.jpg) | ![The moon wallpaper](docs/images/skin_moon.jpg) |
-
-![The background effect page](docs/images/backgrounds.jpg)
+| | |
+|---|---|
+| ![Settings](docs/images/settings.jpg) | ![Settings > Graphics](docs/images/settings_graphics.jpg) |
 
 ## HD textures
 
@@ -109,13 +127,10 @@ Names look like `SUPER MARIO 64#3C2D8A1F#0#2_all.png` (and a palette checksum af
 | D-pad | D-pad |
 | START | START |
 
-You can change these in **Settings > Controls**, where the N64 controller is drawn on screen: pick a button, press A, then press the Xbox button or stick direction you want for it. Y adds a second button, X clears it. **Auto setup** asks for each N64 button in turn. Each player (1 to 4) has their own controls, and you can save them for all games or for one game. The same page has the **stick calibration** (dead zone, sensitivity, response curve, a guided calibration and a test) and the Rumble Pak switch.
+You can change these in **Settings > Controls**, where the N64 controller is drawn on screen: pick a button, press A, then press the Xbox button or stick direction you want for it. Y adds a second button, X clears it. **Auto setup** asks for each N64 button in turn. Each player (1 to 4) has their own controls, and you can save them for all games or for one game. The same page has the **stick calibration** (dead zone, sensitivity, response curve, a guided calibration and a test) and the rumble's strength (A, then left and right: the controllers vibrate at each step).
 
 ![The Controls page with the N64 controller](docs/images/controls.jpg)
 
-| | | |
-|---|---|---|
-| ![Stick calibration](docs/images/calibration.jpg) | ![Calibration wizard](docs/images/calibration_wizard.jpg) | ![Calibration results](docs/images/calibration_results.jpg) |
 
 While playing:
 

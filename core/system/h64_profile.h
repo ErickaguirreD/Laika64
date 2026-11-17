@@ -61,5 +61,8 @@ void h64_apply_profile_flags(H64System *sys, u32 flags);
 // The CPU cycles per instruction a game runs best at when the setting is left
 // at its default (`cpi`): its own value, or `cpi` itself.
 u32 h64_game_cpi(const char *gameCode, u32 cpi);
+// 1 when a game runs a frame ahead of the TV with V-Sync (the front end's frame in reserve) unless the
+// player chose otherwise: a game whose frames now and then take longer than a refresh.
+int h64_game_frame_reserve(const char *gameCode);
 
 #endif

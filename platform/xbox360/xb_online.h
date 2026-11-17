@@ -22,7 +22,7 @@
 
 #define ONLINE_TAG_MIN 3
 #define ONLINE_TAG_MAX 15
-#define ONLINE_AVATARS 64   // avatar numbers the server keeps (0-63); xb_avatars.h has the pictures of the first ones
+#define ONLINE_AVATARS 256   // avatar numbers the server keeps (0-255): xb_avatars.h's (63 the team's), xb_avatars2.h's from 64
 
 struct OnlineProfile
 {
@@ -69,14 +69,21 @@ int OnlineInvite(const char *name, unsigned code, int *live);
 unsigned OnlineInvitedTo(void);
 
 // ---- Messages between friends ----
-struct OnlineDmLine { int id, mine; std::string text; };
+struct OnlineDmLine { int id, mine; std::string text; char when[8]; int daysAgo; };   // when "HH:MM" ("" not known), daysAgo -1 not known
 int OnlineDm(const char *to, const char *text);   // OnlineError "busy": too soon after the last one
 int OnlineConv(const char *with, int since, std::vector<OnlineDmLine> *out);   // the messages with a friend after `since`
 int OnlineUnread(const char *name);   // messages of that friend not read yet ("" : all of them)
 void OnlineUnreadClear(const char *name);
 
-struct OnlineGameTime { std::string game; int minutes; };
-struct OnlineStats { int minutes, games, rank; std::vector<OnlineGameTime> list; };
+struct OnlineGameTime { std::string game, code; int minutes; };   // code "NALE / 1234ABCD" (ArtKeyFromCode: its box art), "" from an old server
+// A player's profile: the time, games and place; whether friends (and for how many days, -1 not known), the games
+// played together; avatar, country, and online: what it does, its time to the server and connection, in a room.
+struct OnlineStats
+{
+    int minutes, games, rank, isFriend, friendDays, together, avatar, online, ms, conn, inRoom;
+    char country[4], status[48];
+    std::vector<OnlineGameTime> list;
+};
 int OnlineStatsOf(const char *name, OnlineStats *out);
 
 struct OnlineNews { std::string date, title, text; };
@@ -95,7 +102,15 @@ void OnlinePlayed(const char *code, const char *game, int minutes);   // a game 
 // The next notice of the player's news (a friend came online, a friendship asked, a message, an invitation
 // to play - this one at once, through a connection kept open to the server): 1 with its text in `out`, 0 when
 // there is none; *invite (may be NULL) 1 for an invitation (shown longer). The ROM list and the game show them.
-int OnlineNoticeTake(char *out, size_t size, int *invite = NULL);
+// What a notice is about (OnlineNoticeTake's *kind): the screens draw each with its own symbol.
+enum { ONLINE_NOTE_OTHER = 0, ONLINE_NOTE_ROOM, ONLINE_NOTE_FRIEND, ONLINE_NOTE_REQUEST, ONLINE_NOTE_DM, ONLINE_NOTE_INVITE, ONLINE_NOTE_UPDATE };
+// The newer LAIKA 64 the server told of (ONLINE_NOTE_UPDATE's), "" none.
+const char *OnlineNewerRelease(void);
+int OnlineNoticeTake(char *out, size_t size, int *invite = NULL, int *kind = NULL);
+// Which news become notices (Config::notify's bits: 1 a room opened by another player, 2 a friend online, 4 a message;
+// 16 a newer LAIKA 64 - Settings' update check; invitations and friendship requests always). With 1 the online thread looks at the rooms every ONLINE_ROOMS_LOOK_MS.
+#define ONLINE_ROOMS_LOOK_MS 20000
+void OnlineSetNotify(int bits);
 
 // ---- Public rooms and the general chat ----
 #define ONLINE_ROOM_NAME 24
@@ -113,6 +128,15 @@ int OnlineChatSay(const char *text);                              // OnlineError
 // request (the Play online screen's).
 int OnlineLobbyGet(int since, std::vector<OnlineRoomInfo> *rooms, std::vector<OnlineGameInfo> *games, std::vector<OnlineUser> *users,
                    std::vector<OnlineChatLine> *chat);
+// The same read again and again by the online thread while a screen shows it (the online menu's, Play online's):
+// every ONLINE_LOBBY_MS, at once after OnlineLobbyRefresh. Read on the screen's own thread it held the screen each
+// time (a stutter every 8 s). Watch(1, since): from the chat's message `since`; Take: 1 with a new read (the chat's
+// lines after the last ones taken), 0 none yet.
+#define ONLINE_LOBBY_MS 8000
+void OnlineLobbyWatch(int on, int since);
+void OnlineLobbyRefresh(void);
+int OnlineLobbyTake(std::vector<OnlineRoomInfo> *rooms, std::vector<OnlineGameInfo> *games, std::vector<OnlineUser> *users,
+                    std::vector<OnlineChatLine> *chat);
 
 // ---- A game in a room (the server's): up to four consoles ----
 // Create: a room for a game, its name (and a password: "" for none) - listed in OnlineRooms, a password

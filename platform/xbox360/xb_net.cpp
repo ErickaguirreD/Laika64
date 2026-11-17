@@ -378,6 +378,10 @@ static int connect_tls(const char *host, SOCKET *ps, NetTls **pt)
     return 1;
 }
 
+// A request's path as the log shows it: without its query, which may carry account names and passwords
+// (ScreenScraper's devid, devpassword, ssid, sspassword).
+static int path_shown(const char *path) { return (int)strcspn(path, "?"); }
+
 // One GET (no redirects). Returns the status or 0; see NetGet. With `sink`
 // the body goes into that file as it arrives (NetDownload), `cancel` set
 // stops it.
@@ -547,7 +551,7 @@ static int request(const char *host, const char *path, u8 **body, u32 *bodyLen, 
             free(chunk);
             if (bad || (cancel && *cancel) || (want && got < want) || (chunked && cs != CS_DONE) || (!got && cs != CS_DONE))
             {
-                H64_INFO("[net] %s%s: stopped at %u of %u bytes%s", host, path, got, want, chunked ? " (chunked)" : "");
+                H64_INFO("[net] %s%.*s: stopped at %u of %u bytes%s", host, path_shown(path), path, got, want, chunked ? " (chunked)" : "");
                 goto done;
             }
             if (bodyLen) *bodyLen = got;
@@ -556,7 +560,7 @@ static int request(const char *host, const char *path, u8 **body, u32 *bodyLen, 
             keep = !closeAsked && cs == CS_DONE && !chunked && cl;
             goto done;
         }
-        if (want > maxLen) { H64_INFO("[net] %s%s: %u bytes, more than %u", host, path, want, maxLen); goto done; }
+        if (want > maxLen) { H64_INFO("[net] %s%.*s: %u bytes, more than %u", host, path_shown(path), path, want, maxLen); goto done; }
         cap = want ? want : 64 * 1024;
         buf = (u8 *)malloc(cap + 1);
         if (!buf) goto done;
@@ -578,7 +582,7 @@ static int request(const char *host, const char *path, u8 **body, u32 *bodyLen, 
             {
                 u8 *nb;
                 // A chunked answer carries its framing on top of the data.
-                if (cap >= maxLen + (chunked ? maxLen / 16 + 4096 : 0)) { H64_INFO("[net] %s%s: more than %u bytes", host, path, maxLen); goto done; }
+                if (cap >= maxLen + (chunked ? maxLen / 16 + 4096 : 0)) { H64_INFO("[net] %s%.*s: more than %u bytes", host, path_shown(path), path, maxLen); goto done; }
                 cap *= 2;
                 nb = (u8 *)realloc(buf, cap + 1);
                 if (!nb) goto done;
@@ -589,11 +593,11 @@ static int request(const char *host, const char *path, u8 **body, u32 *bodyLen, 
             got += (u32)r;
             if (pr) InterlockedExchange(&pr->got, (LONG)got);
         }
-        if (want && got < want) { H64_INFO("[net] %s%s: cut at %u of %u bytes", host, path, got, want); keep = 0; goto done; }
+        if (want && got < want) { H64_INFO("[net] %s%.*s: cut at %u of %u bytes", host, path_shown(path), path, got, want); keep = 0; goto done; }
         if (chunked)
         {
             int d = dechunk(buf, got);
-            if (d < 0) { H64_INFO("[net] %s%s: bad chunked answer", host, path); keep = 0; goto done; }
+            if (d < 0) { H64_INFO("[net] %s%.*s: bad chunked answer", host, path_shown(path), path); keep = 0; goto done; }
             got = (u32)d;
         }
         if (got > maxLen) { keep = 0; goto done; }
@@ -898,7 +902,7 @@ NetWs *NetWsOpen(const char *host, const char *path)
         {
             if (w->inLen < 12 || memcmp(w->in, "HTTP/1.1 101", 12))
             {
-                H64_INFO("[net] %s%s: not a WebSocket (%.12s)", host, path, (const char *)w->in);
+                H64_INFO("[net] %s%.*s: not a WebSocket (%.12s)", host, path_shown(path), path, (const char *)w->in);
                 goto fail;
             }
             memmove(w->in, w->in + end, w->inLen - end);

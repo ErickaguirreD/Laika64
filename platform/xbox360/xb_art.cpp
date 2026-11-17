@@ -19,6 +19,7 @@
 #include "xb_lang.h"
 #include "xb_menu.h"
 #include "xb_net.h"
+#include "xb_preview.h"
 
 #define ART_MAX_PNG (4u << 20)          // bytes of a downloaded or cached picture
 #define ART_MAX_PIXELS (2048u * 2048u)   // pixels of a picture we decode
@@ -35,6 +36,7 @@ struct RomId
     char key[16], code[8];
     int version;
     char stem[128];
+    char hack[32];   // a hack keeping its original's game code: its ScreenScraper title (s_hacks), else ""
 };
 
 static CRITICAL_SECTION s_lock;
@@ -45,10 +47,11 @@ static volatile LONG s_extrasAllowed = 1;   // ArtSetExtras
 static volatile LONG s_kind, s_kindGen;      // ArtSetKind; s_kindGen counts its changes
 
 // Each kind's folder in libretro-thumbnails, and its files in the cache (<key>.<ext>).
-static const char *const s_kindFolder[ART_KIND_COUNT] = { "Named_Boxarts", "Named_Snaps", "Named_Titles", "Named_Logos" };
-static const char *const s_kindPng[ART_KIND_COUNT] = { "png", "snap.png", "title.png", "logo.png" };
-static const char *const s_kindCov[ART_KIND_COUNT] = { "cov", "snap.cov", "title.cov", "logo.cov" };
-static const char *const s_kindNone[ART_KIND_COUNT] = { "", "snap.none", "title.none", "logo.none" };   // "looked for, not there"
+// (The 3D box and the cartridge are not in libretro-thumbnails: ScreenScraper's, download_missing.)
+static const char *const s_kindFolder[ART_KIND_COUNT] = { "Named_Boxarts", "Named_Snaps", "Named_Titles", "Named_Logos", "Box3D", "Cartridge" };
+static const char *const s_kindPng[ART_KIND_COUNT] = { "png", "snap.png", "title.png", "logo.png", "box3d.png", "cart.png" };
+static const char *const s_kindCov[ART_KIND_COUNT] = { "cov", "snap.cov", "title.cov", "logo.cov", "box3d.cov", "cart.cov" };
+static const char *const s_kindNone[ART_KIND_COUNT] = { "", "snap.none", "title.none", "logo.none", "box3d.none", "cart.none" };   // "looked for, not there"
 
 // Shared with the UI thread (under s_lock).
 static std::vector<std::string> s_wants;
@@ -207,6 +210,32 @@ static void file_delete(const char *path)
     names_set(path, 0, 0);
 }
 
+// A file written by someone else (xb_preview.cpp's ScreenScraper pictures) into the names known:
+// file_exists believed what it knew before, "not there", and the picture never showed.
+static void file_noted(const char *path)
+{
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    int ok = GetFileAttributesExA(path, GetFileExInfoStandard, &fa) != 0;
+    names_set(path, ok ? fa.nFileSizeLow : 0, ok);
+}
+
+// "Not on ScreenScraper" markers hold SS_NONE: those of an older lookup ("-": by the file and title
+// only) do not count for the pictures only ScreenScraper has (the 3D box, the cartridge, the box
+// libretro lacks), which are asked for once more - the No-Intro name and the title's parts find many.
+#define SS_NONE "-2"
+static int ss_marker(const char *path)
+{
+    u32 size = 0;
+    int r = names_find(path, &size);
+    if (r < 0)
+    {
+        WIN32_FILE_ATTRIBUTE_DATA fa;
+        r = GetFileAttributesExA(path, GetFileExInfoStandard, &fa) != 0;
+        size = r ? fa.nFileSizeLow : 0;
+    }
+    return r > 0 && size >= sizeof(SS_NONE) - 1;
+}
+
 // Days since the file was written (a large number when it is missing).
 static int file_age_days(const char *path)
 {
@@ -229,6 +258,30 @@ static void art_path(const char *key, const char *ext, char *out, size_t size)
 }
 
 // ---- ROM identity ----
+// Hacks that keep their original's game code (Smash Remix: NALE, Super Smash Bros.'s), known by the
+// name in their header: the databases would give them the original's box. They get a key of their
+// own (by CRC, as a ROM without a game code) and their box from ScreenScraper, found by `title`.
+static const struct { const char *header, *title; } s_hacks[] = {
+    { "SMASH REMIX", "Smash Remix" },
+    { "REMIX EXTRA", "Smash Remix" },   // not on ScreenScraper itself: Smash Remix's box
+    { "ZELDA MASTER QUEST", "Ocarina of Time Master Quest" },   // Ocarina of Time's NZLE
+};
+
+static const char *hack_title(const H64Rom *rom)
+{
+    size_t i;
+    for (i = 0; i < sizeof(s_hacks) / sizeof(s_hacks[0]); i++)
+        if (!_stricmp(rom->name, s_hacks[i].header)) return s_hacks[i].title;
+    return NULL;
+}
+
+// The key of a ROM's files in the cache (h64_gameinfo_key, or the CRC for a hack above).
+static void art_key(const H64Rom *rom, char *key)
+{
+    if (hack_title(rom)) sprintf(key, "X%08X", (unsigned)rom->crc1);
+    else h64_gameinfo_key(rom->gameCode, rom->crc1, key);
+}
+
 static const RomId *rom_id(const std::string &path)
 {
     std::map<std::string, RomId>::iterator it = s_ids.find(path);
@@ -240,7 +293,8 @@ static const RomId *rom_id(const std::string &path)
     if (RomReadHeader(path.c_str(), &rom))
     {
         id.ok = 1;
-        h64_gameinfo_key(rom.gameCode, rom.crc1, id.key);
+        art_key(&rom, id.key);
+        if (hack_title(&rom)) strncpy(id.hack, hack_title(&rom), sizeof(id.hack) - 1);
         strncpy(id.code, rom.gameCode, sizeof(id.code) - 1);
         id.version = rom.version;
         h64_rom_free(&rom);
@@ -488,29 +542,88 @@ static int score_for(const char *key)
 
 static void set_busy(const std::string &path);
 
+// The title a game is looked for by on ScreenScraper when its file name does not find it: a hack's
+// (s_hacks), the databases' name, else the file name - without their tags ("Dinosaur Planet (USA)
+// (Proto)" -> "Dinosaur Planet").
+static void search_title(const RomId *id, const H64GameInfo *info, char *title, size_t size)
+{
+    const char *from = id->hack[0] ? id->hack : info->found && info->name[0] ? info->name : id->stem;
+    size_t n = strcspn(from, "(["), k;
+    _snprintf(title, size - 1, "%.*s", (int)n, from);
+    title[size - 1] = 0;
+    for (k = 0; title[k]; k++)
+        if (title[k] == '_') title[k] = ' ';
+    while (k > 0 && title[k - 1] == ' ') title[--k] = 0;
+}
+
+// The file name the databases give a game (No-Intro's, with .z64), which ScreenScraper knows a GoodN64
+// name by when it does not know the file's own ("1080 Snowboarding (Japan, USA) (En,Ja).z64" for
+// "N64 1080 Snowboarding (JU).z64"); "" for a hack (that name is its original's) or a game not in them.
+static void alt_name(const RomId *id, const H64GameInfo *info, char *out, size_t size)
+{
+    out[0] = 0;
+    if (id->hack[0] || !info->found || !info->name[0]) return;
+    _snprintf(out, size - 1, "%s.z64", info->name);
+    out[size - 1] = 0;
+}
+
+// Each kind of picture on ScreenScraper (PreviewFetchMedia): the box, the picture from the game, the
+// title screen, the logo (the "wheel"; some games have only its HD one), the 3D box, the cartridge.
+static const char *const s_kindSs[ART_KIND_COUNT] = { "box-2D", "ss", "sstitle", "wheel,wheel-hd", "box-3D", "support-2D" };
+
+// A picture other than the box from ScreenScraper (libretro's thumbnails did not have it, or never
+// can: the 3D box, a game not in the databases, a hack): saved, or its "not there" marker written.
+// 1 when it came.
+static int ss_picture(const RomId *id, const H64GameInfo *info, const std::string &path, int kind, const char *png, const char *none)
+{
+    char title[128], alt[160];
+    int r;
+    search_title(id, info, title, sizeof(title));
+    alt_name(id, info, alt, sizeof(alt));
+    r = PreviewFetchMedia(path.c_str(), alt, title, s_kindSs[kind], png);
+    H64_INFO("[art] %s (%s): ScreenScraper %s for \"%s\": %s", id->key, id->stem, s_kindSs[kind], title, r > 0 ? "saved" : r == 0 ? "none" : "no answer");
+    if (r > 0)
+    {
+        file_noted(png);
+        file_delete(none);
+        return 1;
+    }
+    if (r == 0) file_write(none, SS_NONE, sizeof(SS_NONE) - 1);   // not there: asked again only by "download all"
+    return 0;
+}
+
 // Downloads what a ROM is missing. `bulk`: also retries what was not found
 // before. Returns 1 when its files changed.
 static int download_missing(const std::string &path, int bulk, int kind)
 {
     const RomId *id = rom_id(path);
     H64GameInfo info;
-    char png[128], none[128], covers[8][128];
-    int have, hasPng, nc = 0, changed = 0, missing;
+    char png[128], none[128], ssNone[128], covers[8][128];
+    int have, hasPng, nc = 0, changed = 0, missing, ssTried = 0;
     if (!id->ok) return 0;
-    if (kind != ART_KIND_BOX && !s_extrasAllowed) return 0;   // the box art only (Game images > downloads)
+    if (kind != ART_KIND_BOX && !ART_KIND_VIEW_ONLY(kind) && !s_extrasAllowed) return 0;   // the box art only (Game images > downloads)
+    if (ART_KIND_VIEW_ONLY(kind) && s_kind != kind) return 0;   // only while their view shows them
     have = load_info(id, &info);
     art_path(id->key, s_kindPng[kind], png, sizeof(png));
     hasPng = file_exists(png);
     // Known not to be there: the box in the game's information, the others by a marker file.
-    if (kind == ART_KIND_BOX) missing = info.cover == 0;
+    // A box libretro did not have was looked for on ScreenScraper once too (marker <key>.ssbox.none).
+    if (kind == ART_KIND_BOX)
+    {
+        missing = info.cover == 0;
+        art_path(id->key, "ssbox.none", ssNone, sizeof(ssNone));
+        ssTried = ss_marker(ssNone);
+    }
     else
     {
         art_path(id->key, s_kindNone[kind], none, sizeof(none));
-        missing = file_exists(none);
+        missing = ART_KIND_VIEW_ONLY(kind) ? ss_marker(none) : file_exists(none);
     }
-    // What is known to be missing is only retried by "download all".
-    if (have && !info.found && !bulk) return 0;
-    if (have && info.found && (hasPng || (missing && !bulk)) && info.wiki >= 0) return 0;
+    // What is known to be missing is only retried by "download all" (a game not in the databases:
+    // once more for its box while that is unknown, and for each other picture, ScreenScraper's below).
+    if (have && !info.found && !bulk && (hasPng || (kind == ART_KIND_BOX ? info.cover >= 0 : missing)))
+        return 0;
+    if (have && info.found && (hasPng || (missing && !bulk && (kind != ART_KIND_BOX || ssTried))) && info.wiki >= 0) return 0;
     // (The first call waits for the network; "download all" retried it when it started.)
     if (!NetStart(0))
     {
@@ -544,7 +657,36 @@ static int download_missing(const std::string &path, int bulk, int kind)
         }
     }
     if (!have) return changed;
-    if (info.found && !hasPng && (!missing || bulk))
+    if (ART_KIND_VIEW_ONLY(kind))
+    {
+        // ScreenScraper's 3D box or cartridge (libretro has none), the game found as for the box below.
+        if (hasPng || (missing && !bulk)) return changed;
+        return changed | ss_picture(id, &info, path, kind, png, none);
+    }
+    if (kind == ART_KIND_BOX && !hasPng &&
+        (id->hack[0] || !info.found ? !missing || bulk : missing && (!ssTried || bulk)))
+    {
+        // Not in the databases, or a hack the databases take for its original, or a game libretro has
+        // no box of under the databases' name (Dinosaur Planet): ScreenScraper's box, the game found
+        // by file name and size, else by title.
+        char title[128], alt[160];
+        int r;
+        search_title(id, &info, title, sizeof(title));
+        alt_name(id, &info, alt, sizeof(alt));
+        r = PreviewFetchMedia(path.c_str(), alt, title, "box-2D", png);
+        if (r > 0) { file_noted(png); pak_drop(id->key, kind); }
+        if (r == 0 && info.found && !id->hack[0]) file_write(ssNone, SS_NONE, sizeof(SS_NONE) - 1);   // libretro's miss, ScreenScraper's too
+        H64_INFO("[art] %s (%s): ScreenScraper box for \"%s\": %s", id->key, id->stem, title, r > 0 ? "saved" : r == 0 ? "none" : "no answer");
+        if (r >= 0 || info.cover != r)
+        {
+            info.cover = r > 0 ? 1 : r == 0 ? 0 : -1;
+            save_info(id, &info);
+            changed = 1;
+        }
+    }
+    else if (kind != ART_KIND_BOX && (id->hack[0] || !info.found) && !hasPng && (!missing || bulk))
+        changed |= ss_picture(id, &info, path, kind, png, none);   // libretro's would be the original's, or it has none
+    else if (info.found && !id->hack[0] && !hasPng && (!missing || bulk))
     {
         int r;
         if (!nc && info.name[0]) { strcpy(covers[0], info.name); nc = 1; }
@@ -563,7 +705,8 @@ static int download_missing(const std::string &path, int bulk, int kind)
             file_delete(none);
             changed = 1;
         }
-        else if (r == 0) file_write(none, "-", 1);   // not there: asked again only by "download all"
+        else if (r == 0)
+            changed |= ss_picture(id, &info, path, kind, png, none);   // not in libretro's: ScreenScraper's, else marked missing
     }
     if (info.found && info.wiki < 0)
     {
@@ -787,7 +930,133 @@ static void result_free(ArtResult *r)
     free(r->cover);
     free(r->glow);
     free(r->dxt);
-    r->cover = r->glow = r->dxt = NULL;
+    free(r->outline);
+    r->cover = r->glow = r->dxt = r->outline = NULL;
+}
+
+// ---- The 3D boxes' and cartridges' cache: <key>.box3d.raw, <key>.cart.raw ----
+// Their pictures keep their alpha (not DXT1, not in covers.pak), and ScreenScraper's are large: decoding
+// each PNG every time it was shown made the cartridges view slow and the selection's late. Kept scaled
+// as they are drawn: a header (the PNG's size, to know it is that one's), the picture, its glow.
+#define RAW_MAGIC 0x4C523031u   // "LR01"
+static const char *const s_kindRaw[ART_KIND_COUNT] = { "", "", "", "", "box3d.raw", "cart.raw" };
+
+static int raw_load(const char *key, int kind, const char *png, ArtResult *r)
+{
+    char p[128];
+    u8 *data;
+    u32 len, size = 0, hdr[4];
+    const u32 glowBytes = ART_GLOW_W * ART_GLOW_H * 4;
+    if (!s_kindRaw[kind][0] || names_find(png, &size) <= 0) return 0;
+    art_path(key, s_kindRaw[kind], p, sizeof(p));
+    if (!file_read(p, &data, &len, 4u << 20)) return 0;
+    if (len >= sizeof(hdr)) memcpy(hdr, data, sizeof(hdr));
+    if (len < sizeof(hdr) || hdr[0] != RAW_MAGIC || hdr[1] != size || !hdr[2] || !hdr[3] || hdr[2] > ART_COVER_W || hdr[3] > ART_COVER_H ||
+        len != sizeof(hdr) + hdr[2] * hdr[3] * 4 + glowBytes)
+    {
+        free(data);
+        return 0;
+    }
+    r->coverW = (int)hdr[2];
+    r->coverH = (int)hdr[3];
+    r->cover = (u8 *)malloc(hdr[2] * hdr[3] * 4);
+    r->glow = (u8 *)malloc(glowBytes);
+    if (!r->cover || !r->glow)
+    {
+        free(r->cover); free(r->glow); free(data);
+        r->cover = r->glow = NULL;
+        return 0;
+    }
+    memcpy(r->cover, data + sizeof(hdr), hdr[2] * hdr[3] * 4);
+    memcpy(r->glow, data + sizeof(hdr) + hdr[2] * hdr[3] * 4, glowBytes);
+    free(data);
+    return 1;
+}
+
+static void raw_save(const char *key, int kind, const char *png, const ArtResult *r)
+{
+    char p[128];
+    u32 size = 0, hdr[4], n;
+    const u32 glowBytes = ART_GLOW_W * ART_GLOW_H * 4;
+    u8 *data;
+    if (!s_kindRaw[kind][0] || !r->cover || !r->glow || names_find(png, &size) <= 0) return;
+    n = (u32)r->coverW * r->coverH * 4;
+    data = (u8 *)malloc(sizeof(hdr) + n + glowBytes);
+    if (!data) return;
+    hdr[0] = RAW_MAGIC; hdr[1] = size; hdr[2] = (u32)r->coverW; hdr[3] = (u32)r->coverH;
+    memcpy(data, hdr, sizeof(hdr));
+    memcpy(data + sizeof(hdr), r->cover, n);
+    memcpy(data + sizeof(hdr) + n, r->glow, glowBytes);
+    art_path(key, s_kindRaw[kind], p, sizeof(p));
+    file_write(p, data, (u32)sizeof(hdr) + n + glowBytes);
+    free(data);
+}
+
+// The outline's glow (ArtOutline): each pixel's distance to the picture's shape (alpha 128 and over in
+// any of the 2 x 2 it stands for), in thirds of a pixel (3 straight, 4 diagonally: two passes), then lit by it.
+u8 *ArtOutline(const u8 *rgba, int w, int h, int *ow, int *oh)
+{
+    const int P = ART_OUTLINE_PAD / 2, hw = (w + 1) / 2, hh = (h + 1) / 2, W = hw + 2 * P, H = hh + 2 * P, beyond = 3 * (P + 2);
+    int x, y;
+    unsigned short *d = (unsigned short *)malloc((size_t)W * H * sizeof(unsigned short));
+    u8 *out = (u8 *)malloc((size_t)W * H * 4);
+    if (!d || !out) { free(d); free(out); return NULL; }
+    for (y = 0; y < H; y++)
+        for (x = 0; x < W; x++)
+        {
+            const int sx = (x - P) * 2, sy = (y - P) * 2;
+            int in = 0, i, j;
+            if (x >= P && y >= P && x < P + hw && y < P + hh)
+                for (j = 0; j < 2 && !in; j++)
+                    for (i = 0; i < 2 && !in; i++)
+                        if (sx + i < w && sy + j < h && rgba[((size_t)(sy + j) * w + sx + i) * 4 + 3] >= 128) in = 1;
+            d[y * W + x] = (unsigned short)(in ? 0 : beyond);
+        }
+#define DT(xx, yy, c) { int v_ = d[(yy) * W + (xx)] + (c); if (v_ < m) m = v_; }
+    for (y = 0; y < H; y++)
+        for (x = 0; x < W; x++)
+        {
+            int m = d[y * W + x];
+            if (!m) continue;
+            if (x > 0) DT(x - 1, y, 3);
+            if (y > 0)
+            {
+                DT(x, y - 1, 3);
+                if (x > 0) DT(x - 1, y - 1, 4);
+                if (x < W - 1) DT(x + 1, y - 1, 4);
+            }
+            d[y * W + x] = (unsigned short)m;
+        }
+    for (y = H - 1; y >= 0; y--)
+        for (x = W - 1; x >= 0; x--)
+        {
+            int m = d[y * W + x];
+            if (!m) continue;
+            if (x < W - 1) DT(x + 1, y, 3);
+            if (y < H - 1)
+            {
+                DT(x, y + 1, 3);
+                if (x < W - 1) DT(x + 1, y + 1, 4);
+                if (x > 0) DT(x - 1, y + 1, 4);
+            }
+            d[y * W + x] = (unsigned short)m;
+        }
+#undef DT
+    for (y = 0; y < W * H; y++)
+    {
+        // Lit up to 1 pixel out (the ring: 2 of the picture's), then fading out to nothing at P.
+        const float t = d[y] / 3.0f;
+        float a;
+        if (t <= 1.0f) a = 1.0f;
+        else if (t >= P) a = 0.0f;
+        else { a = 1.0f - (t - 1.0f) / (P - 1.0f); a = 0.55f * a * a; }
+        out[y * 4] = out[y * 4 + 1] = out[y * 4 + 2] = 255;
+        out[y * 4 + 3] = (u8)(255.0f * a);
+    }
+    free(d);
+    *ow = W;
+    *oh = H;
+    return out;
 }
 
 // ---- Cover cache: covers.pak ----
@@ -1041,6 +1310,7 @@ static u8 *dxt1_decode(const u8 *dxt, int dw, int dh, int w, int h)
 // Reads a ROM's files and queues them for the UI.
 static void deliver(const std::string &path)
 {
+    const DWORD startedAt = GetTickCount();
     const RomId *id = rom_id(path);
     ArtResult r;
     memset(&r, 0, sizeof(r));
@@ -1058,7 +1328,7 @@ static void deliver(const std::string &path)
         LeaveCriticalSection(&s_lock);
         strcpy(r.key, id->key);
         r.kind = kind;
-        for (k = 0; k < ART_KIND_COUNT; k++)
+        for (k = 0; k < ART_KIND_BOX3D; k++)   // (the 3D box and the cartridge are not ones the right stick goes through)
         {
             char p[128];
             art_path(id->key, s_kindPng[k], p, sizeof(p));
@@ -1074,9 +1344,12 @@ static void deliver(const std::string &path)
             art_path(id->key, "png", png, sizeof(png));
         }
         r.shownKind = kind;
-        // The packed copy when there is one (one read, ready for the GPU), else the
-        // PNG: decoded, scaled, compressed and packed for next time.
-        if (!pak_load(id->key, kind, png, &r) && file_read(png, &data, &len, ART_MAX_PNG))
+        // The packed copy when there is one (one read, ready for the GPU; the 3D box's and the
+        // cartridge's: their own, raw_load), else the PNG: decoded, scaled, compressed and packed
+        // for next time.
+        if (ART_KIND_VIEW_ONLY(kind) && raw_load(id->key, kind, png, &r))
+            ;
+        else if (!pak_load(id->key, kind, png, &r) && file_read(png, &data, &len, ART_MAX_PNG))
         {
             int w, h;
             u8 *px = h64_png_decode(data, len, &w, &h, ART_MAX_PIXELS);
@@ -1088,7 +1361,12 @@ static void deliver(const std::string &path)
                 rgba = h64_image_scale(px, w, h, r.coverW, r.coverH);
                 r.glow = h64_image_scale(px, w, h, ART_GLOW_W, ART_GLOW_H);
                 free(px);
-                if (rgba)
+                if (rgba && ART_KIND_VIEW_ONLY(kind))
+                {
+                    r.cover = rgba;   // its alpha kept: not compressed, kept raw
+                    raw_save(id->key, kind, png, &r);
+                }
+                else if (rgba)
                 {
                     r.dxt = dxt1_encode(rgba, r.coverW, r.coverH, &r.dxtW, &r.dxtH);
                     if (r.dxt)
@@ -1105,6 +1383,10 @@ static void deliver(const std::string &path)
             else
                 H64_INFO("[art] %s: cannot decode %s", id->key, png);
         }
+        // The cartridge's selection glow, made here (the menu's thread drew its shape 88 times a frame).
+        if (r.cover && kind == ART_KIND_CART) r.outline = ArtOutline(r.cover, r.coverW, r.coverH, &r.outlineW, &r.outlineH);
+        if (GetTickCount() - startedAt > 150)   // what makes a picture late (the cartridges view was)
+            H64_INFO("[art] %s: %s read in %u ms", id->key, s_kindPng[r.shownKind], (unsigned)(GetTickCount() - startedAt));
     }
     else
         h64_gameinfo_clear(&r.info);
@@ -1288,6 +1570,8 @@ static int step_bulk(void)
         for (k = 0; k < ART_KIND_COUNT; k++)
             if (k != (int)s_kind) got |= download_missing(path, retry, k);
     }
+    else if (ART_KIND_VIEW_ONLY(s_kind))
+        got |= download_missing(path, retry, ART_KIND_BOX);   // their views draw the box (art) where there is none of theirs
     if (got | download_desc(path))
     {
         EnterCriticalSection(&s_lock);
@@ -1319,19 +1603,28 @@ static int step_bulk(void)
                 for (k = 0; k < ART_KIND_COUNT; k++)
                 {
                     char p[128];
-                    if (!all && k != kind) continue;
+                    if (!all && k != kind && !(ART_KIND_VIEW_ONLY(kind) && k == ART_KIND_BOX)) continue;
+                    if (ART_KIND_VIEW_ONLY(k) && k != kind) continue;   // only asked for by its view
                     art_path(id->key, s_kindPng[k], p, sizeof(p));
-                    if (!info.found || file_exists(p)) continue;
-                    if (k == ART_KIND_BOX) { if (info.cover != 0) settled = 0; continue; }
+                    if (file_exists(p)) continue;
+                    // Each picture settled once there, or once marked missing (libretro's and ScreenScraper's asked).
+                    if (k == ART_KIND_BOX)
+                    {
+                        // (A known game without libretro's box: until ScreenScraper was asked too.)
+                        art_path(id->key, "ssbox.none", p, sizeof(p));
+                        if (info.cover != 0 || (info.found && !ss_marker(p))) settled = 0;
+                        continue;
+                    }
                     art_path(id->key, s_kindNone[k], p, sizeof(p));
-                    if (!file_exists(p)) settled = 0;
+                    if (!(ART_KIND_VIEW_ONLY(k) ? ss_marker(p) : file_exists(p))) settled = 0;
                 }
             }
             if (settled)
             {
                 char line[16];
                 std::string k;
-                if (all) strcpy(line, "a|");
+                if (all && ART_KIND_VIEW_ONLY(kind)) sprintf(line, "a%d|", kind);   // (a view of its own kind: those pictures too)
+                else if (all) strcpy(line, "a|");
                 else sprintf(line, "%d|", kind);
                 k = line + path;
                 int fresh;
@@ -1583,7 +1876,7 @@ int ArtReadCover(const char *romPath, int kind, u8 **rgba, int *w, int *h, int *
     *rgba = NULL;
     // Its own header read and file reads, like ArtReadInfo: nothing of the worker's is touched.
     if (!s_started || !RomReadHeader(romPath, &rom)) return 0;
-    h64_gameinfo_key(rom.gameCode, rom.crc1, key);
+    art_key(&rom, key);
     h64_rom_free(&rom);
     return ArtReadCoverKey(key, kind, rgba, w, h, gotKind);
 }
@@ -1630,8 +1923,22 @@ int ArtKeyOf(const char *romPath, char *key)
 {
     H64Rom rom;
     if (!s_started || !RomReadHeader(romPath, &rom)) return 0;
-    h64_gameinfo_key(rom.gameCode, rom.crc1, key);
+    art_key(&rom, key);
     h64_rom_free(&rom);
+    return 1;
+}
+
+int ArtKeyFromCode(const char *name, const char *code, char *key)
+{
+    H64Rom rom;
+    unsigned crc = 0;
+    char gc[8] = "";
+    if (sscanf(code, "%7s / %X", gc, &crc) != 2) return 0;
+    memset(&rom, 0, sizeof(rom));
+    strncpy(rom.name, name, sizeof(rom.name) - 1);
+    strncpy(rom.gameCode, gc, sizeof(rom.gameCode) - 1);
+    rom.crc1 = (u32)crc;
+    art_key(&rom, key);
     return 1;
 }
 
@@ -1647,7 +1954,7 @@ int ArtReadPicture(const char *romPath, int kind, int maxW, int maxH, u8 **rgba,
     *rgba = NULL;
     // As ArtReadCover, but the PNG itself (its alpha kept: a logo) and up to maxW x maxH.
     if (!s_started || kind < 0 || kind >= ART_KIND_COUNT || !RomReadHeader(romPath, &rom)) return 0;
-    h64_gameinfo_key(rom.gameCode, rom.crc1, key);
+    art_key(&rom, key);
     h64_rom_free(&rom);
     art_path(key, s_kindPng[kind], png, sizeof(png));
     if (!file_read(png, &data, &len, ART_MAX_PNG)) return 0;
@@ -1688,7 +1995,8 @@ void ArtBulkStart(const char *const *paths, int count, int retry)
     if (!s_status.bulk && count > 0)
     {
         char pre[16];
-        if (s_extrasAllowed) strcpy(pre, "a|");   // every kind of picture settled (step_bulk)
+        if (s_extrasAllowed && ART_KIND_VIEW_ONLY(s_kind)) sprintf(pre, "a%d|", (int)s_kind);   // every kind of picture settled (step_bulk)
+        else if (s_extrasAllowed) strcpy(pre, "a|");
         else sprintf(pre, "%d|", (int)s_kind);
         s_bulk.clear();
         // The automatic pass leaves out what is settled (s_complete); "download all" takes everything.
@@ -1721,7 +2029,7 @@ int ArtReadInfo(const char *romPath, H64GameInfo *info)
     h64_gameinfo_clear(info);
     // Its own header read and file read: nothing of the worker's is touched.
     if (!s_started || !RomReadHeader(romPath, &rom)) return 0;
-    h64_gameinfo_key(rom.gameCode, rom.crc1, key);
+    art_key(&rom, key);
     h64_rom_free(&rom);
     ok = info_read(key, info) && info->found;
     if (ok) desc_for_lang(key, info);   // the description in the menus' language, when there is one

@@ -31,6 +31,7 @@
 #include "xb_stats.h"
 #include "xb_online.h"
 #include "xb_avatars.h"
+#include "xb_avatars2.h"
 #include "xb_country_flags.h"
 #include "xb_wizref.h"
 #include "xb_ui.h"
@@ -351,6 +352,8 @@ static int kodi_grid(const UiMenu *m)
 {
     return s_kodi && m->page == UI_PAGE_LIST && !strcmp(m->title, Tr(T_SETTINGS)) && !strcmp(m->footer, Tr(T_FOOT_SELECT));
 }
+static int s_noteOwned;   // a screen showed the online notices itself this frame (global_notes leaves them)
+static int s_rsOwned;     // a page used the right stick itself this frame (no music volume from it: global_notes)
 static int s_browser;   // opened from the ROM list: the box art rows are shown (also: UiMenuDraw skips the dim behind it in-game, over the frozen frame)
 
 // A small solid triangle pointing `dir` (0 up, 1 right, 2 down, 3 left), `s`
@@ -376,12 +379,79 @@ void UiMenuIcons(UiMenu *m, const unsigned char *icons, int n)
 }
 
 // A row's small line symbol (UI_ICON_*), about 22 pixels across, centred on (cx, cy).
+// A convex polygon (n corners, xy[2n]) filled: vertical strips between its corners' x (UiStrip; the UI
+// has no triangles).
+static void fill_convex(const float *xy, int n, D3DCOLOR c)
+{
+    float xs[8], lo[8], hi[8];
+    int i, j, m = 0;
+    if (n > 8) return;
+    for (i = 0; i < n; i++)
+    {
+        for (j = 0; j < m && xs[j] != xy[i * 2]; j++) {}
+        if (j == m) xs[m++] = xy[i * 2];
+    }
+    for (i = 1; i < m; i++)
+        for (j = i; j > 0 && xs[j] < xs[j - 1]; j--) { float t = xs[j]; xs[j] = xs[j - 1]; xs[j - 1] = t; }
+    for (i = 0; i < m; i++)
+    {
+        // Where the outline crosses x = xs[i]: its top and bottom there.
+        lo[i] = 1e9f;
+        hi[i] = -1e9f;
+        for (j = 0; j < n; j++)
+        {
+            const float *p = &xy[j * 2], *q = &xy[((j + 1) % n) * 2];
+            float t, yy;
+            if (p[0] == q[0])
+            {
+                if (p[0] != xs[i]) continue;
+                if (p[1] < lo[i]) lo[i] = p[1];
+                if (q[1] < lo[i]) lo[i] = q[1];
+                if (p[1] > hi[i]) hi[i] = p[1];
+                if (q[1] > hi[i]) hi[i] = q[1];
+                continue;
+            }
+            t = (xs[i] - p[0]) / (q[0] - p[0]);
+            if (t < -0.0001f || t > 1.0001f) continue;
+            yy = p[1] + (q[1] - p[1]) * t;
+            if (yy < lo[i]) lo[i] = yy;
+            if (yy > hi[i]) hi[i] = yy;
+        }
+    }
+    for (i = 0; i + 1 < m; i++) UiStrip(xs[i], lo[i], hi[i], xs[i + 1], lo[i + 1], hi[i + 1], c, c);
+}
+
+// The heart's beat: a strong thump and a weaker one, every 1.1 s (0..1).
+static float heart_beat(void)
+{
+    const float t = fmodf(UiTime(), 1.1f), a = (t - 0.08f) / 0.07f, b = (t - 0.3f) / 0.07f;
+    return expf(-a * a) + 0.6f * expf(-b * b);
+}
+
 static void menu_icon(int icon, float cx, float cy, D3DCOLOR c)
 {
     const D3DCOLOR soft = UiAlpha(c, 0.45f);
     int k;
     switch (icon)
     {
+    case UI_ICON_PLANE:       // Telegram: a paper plane, its fold lighter
+    {
+        const float a[6] = { cx - 10, cy - 1, cx + 10, cy - 9, cx - 1, cy + 3 }, b[6] = { cx + 10, cy - 9, cx + 4, cy + 9, cx - 1, cy + 3 };
+        fill_convex(a, 3, c);
+        fill_convex(b, 3, c);
+        UiLine(cx - 1, cy + 3, cx + 10, cy - 9, 1.6f, D3DCOLOR_ARGB((int)((c >> 24) * 200 / 255), 255, 255, 255));
+        UiLine(cx - 1, cy + 3, cx - 1, cy + 8, 2.0f, c);
+        break;
+    }
+    case UI_ICON_HEART:       // donate: a heart, beating
+    {
+        const float s = 1.2f + 0.2f * heart_beat();
+        const float tri[6] = { cx - 9.6f * s, cy - 1.4f * s, cx + 9.6f * s, cy - 1.4f * s, cx, cy + 9.5f * s };
+        UiCircle(cx - 4.7f * s, cy - 3.2f * s, 5.3f * s, c);
+        UiCircle(cx + 4.7f * s, cy - 3.2f * s, 5.3f * s, c);
+        fill_convex(tri, 3, c);
+        break;
+    }
     case UI_ICON_PLAY:        // resume: a ring around a triangle
         UiRoundRing(cx - 11, cy - 11, 22, 22, 11, 2.0f, c);
         icon_tri(cx + 1, cy, 9, 1, c);
@@ -646,6 +716,7 @@ static const struct { int label, desc; } s_rowDesc[] = {
     { T_ART_DOWNLOADS, T_D_ART_DOWNLOADS },
     { T_ART_EXTRAS, T_D_ART_EXTRAS },
     { T_ART_BACKGROUND, T_D_ART_BACKGROUND },
+    { T_ART_BOX3D_SS, T_D_ART_BOX3D_SS },
     { T_ABOUT, T_D_ABOUT },
     { T_AUDIO_MARGIN, T_D_AUDIO_MARGIN },
     { T_AUDIO_OUTPUT, T_D_AUDIO_OUTPUT },
@@ -718,15 +789,19 @@ static const struct { int label, desc; } s_rowDesc[] = {
     { T_UI_SOUNDS, T_D_UI_SOUNDS },
     { T_VOLUME, T_D_VOLUME },
     { T_VSYNC, T_D_VSYNC },
+    { T_FRAME_RESERVE, T_D_FRAME_RESERVE },
     { T_WALLPAPERS, T_D_WALLPAPERS },
     { T_WIZARD, T_D_WIZARD },
     { T_REPORT_GAME, T_D_REPORT_GAME },
     { T_ONLINE, T_D_ONLINE },
     { T_PREVIEW_VIDEO, T_D_PREVIEW_VIDEO },
+    { T_ART_CYCLE, T_D_ART_CYCLE },
+    { T_GAME_MUSIC, T_D_GAME_MUSIC },
     { T_PREVIEW_SOUND, T_D_PREVIEW_SOUND },
     { T_SS_ACCOUNT, T_D_SS_ACCOUNT },
     { T_VIDEO_BG, T_D_VIDEO_BG },
-    { T_HIDE_HINTS, T_D_HIDE_HINTS }
+    { T_HIDE_HINTS, T_D_HIDE_HINTS },
+    { T_NOTIFY, T_D_NOTIFY }
 };
 
 // What a row does (by its label as shown), NULL when there is no text for it.
@@ -755,11 +830,11 @@ static const KodiPage s_kodiPages[] = {
                     { T_KC_EFFECTS, { T_SCREEN_EFFECT } } } },
     { T_SCREEN, { { T_KC_IMAGE, { T_RESOLUTION, T_RES_169, T_STRETCH, T_PIC_CAL } },
                   { T_KC_COLOR, { T_BRIGHTNESS, T_COLOR_STYLE } },
-                  { T_KC_DISPLAY, { T_VSYNC } } } },
+                  { T_KC_DISPLAY, { T_VSYNC, T_FRAME_RESERVE } } } },
     { T_SOUND, { { T_VOLUME, { T_VOLUME } },
                  { T_KC_OUTPUT, { T_AUDIO_MARGIN, T_AUDIO_OUTPUT } },
                  { T_KC_MENUS, { T_UI_SOUNDS, T_SFX_STYLE, T_MUSIC, T_PREVIEW_SOUND } } } },
-    { T_INTERFACE, { { T_KC_LOOK, { T_LANGUAGE, T_SETVIEW, T_FONT, T_HIDE_HINTS } },
+    { T_INTERFACE, { { T_KC_LOOK, { T_LANGUAGE, T_SETVIEW, T_FONT, T_HIDE_HINTS, T_NOTIFY } },
                      { T_KC_COLORS, { T_SEL_COLOR, T_BORDERS } },
                      { T_KC_BACKGROUNDS, { T_WALLPAPERS, T_BG_EFFECT, T_SAVER } },
                      { T_KC_GAMELIST, { T_DESIGN, T_GAME_IMAGES, T_TRANSLATE_DESC, T_CATEGORIES, T_START_ROM, T_GAME_BG, T_VIDEO_BG } } } },
@@ -883,6 +958,281 @@ static void dd_draw(float right, float yBelow, float rowH)
     if (s_kodiDdTop + vis < s_kodiDdN) icon_tri(x + w * 0.5f, yy + h + 4, 8, 2, UI_COL_TEXT3);
 }
 
+// ---- The settings' sections, redesigned (2.2.2): each its colour (its tile and its pages), a line under its tile
+// with what it holds now, and a moving background on the selected tile, its own for each section.
+static D3DCOLOR kodi_colour(unsigned char icon)
+{
+    switch (icon)
+    {
+    case UI_ICON_GLOBE: return D3DCOLOR_ARGB(255, 80, 210, 120);
+    case UI_ICON_GRAPHICS: return D3DCOLOR_ARGB(255, 90, 160, 255);
+    case UI_ICON_SCREEN: return D3DCOLOR_ARGB(255, 60, 200, 220);
+    case UI_ICON_CONTROLS: return D3DCOLOR_ARGB(255, 255, 160, 60);
+    case UI_ICON_SOUND: return D3DCOLOR_ARGB(255, 240, 90, 140);
+    case UI_ICON_SYSTEM: return D3DCOLOR_ARGB(255, 150, 175, 225);
+    case UI_ICON_INTERFACE: return D3DCOLOR_ARGB(255, 190, 120, 255);
+    case UI_ICON_HD: return D3DCOLOR_ARGB(255, 240, 200, 70);
+    case UI_ICON_CHART: return D3DCOLOR_ARGB(255, 255, 110, 90);
+    case UI_ICON_INFO: return D3DCOLOR_ARGB(255, 120, 200, 160);
+    }
+    return SEL_HI(255);
+}
+
+// `c` with its channels times k (0..: darker under 1) and alpha a.
+static D3DCOLOR kodi_shade(D3DCOLOR c, float k, int a)
+{
+    int r = (int)(((c >> 16) & 255) * k), g = (int)(((c >> 8) & 255) * k), b = (int)((c & 255) * k);
+    return D3DCOLOR_ARGB(a < 0 ? 0 : a > 255 ? 255 : a, r > 255 ? 255 : r, g > 255 ? 255 : g, b > 255 ? 255 : b);
+}
+// `c` lighter: towards white by t.
+static D3DCOLOR kodi_light(D3DCOLOR c, float t, int a)
+{
+    int r = (c >> 16) & 255, g = (c >> 8) & 255, b = c & 255;
+    return D3DCOLOR_ARGB(a, r + (int)((255 - r) * t), g + (int)((255 - g) * t), b + (int)((255 - b) * t));
+}
+
+static char s_tileSub[UI_MENU_MAX][48];             // under each tile's name: what it holds now (settings_main)
+static unsigned char s_kodiIcon = UI_ICON_GEAR;     // the section opened last (its tile): its pages take its colour and symbol
+static char s_kodiSub[48];                          // ... and what it holds, under the page's name
+
+// A segment kept inside a box (Liang-Barsky): 0 when nothing of it is.
+static int kodi_clip(float *x0, float *y0, float *x1, float *y1, float bx0, float by0, float bx1, float by1)
+{
+    float t0 = 0, t1 = 1, dx = *x1 - *x0, dy = *y1 - *y0, p[4], q[4];
+    int k;
+    p[0] = -dx; q[0] = *x0 - bx0; p[1] = dx; q[1] = bx1 - *x0; p[2] = -dy; q[2] = *y0 - by0; p[3] = dy; q[3] = by1 - *y0;
+    for (k = 0; k < 4; k++)
+    {
+        if (p[k] == 0) { if (q[k] < 0) return 0; continue; }
+        {
+            const float r = q[k] / p[k];
+            if (p[k] < 0) { if (r > t1) return 0; if (r > t0) t0 = r; }
+            else { if (r < t0) return 0; if (r < t1) t1 = r; }
+        }
+    }
+    *x1 = *x0 + t1 * dx; *y1 = *y0 + t1 * dy; *x0 = *x0 + t0 * dx; *y0 = *y0 + t0 * dy;
+    return 1;
+}
+static void kodi_cline(float x0, float y0, float x1, float y1, float thick, D3DCOLOR c, float bx0, float by0, float bx1, float by1)
+{
+    if (kodi_clip(&x0, &y0, &x1, &y1, bx0, by0, bx1, by1)) UiLine(x0, y0, x1, y1, thick, c);
+}
+
+// The selected tile's background (x, y, w, h its box; c its colour; t seconds): kept inside the box, away from
+// its round corners. Online play: a tunnel of data; graphics: a wireframe; screen: scanlines and a light passing;
+// controls: the buttons floating; sound: an equalizer; system: a circuit with pulses; interface: little windows;
+// HD textures: pixels sharpening; report: a chart growing; about: stars.
+static void kodi_tile_fx(unsigned char icon, float x, float y, float w, float h, D3DCOLOR c, float t)
+{
+    const float bx0 = x + 10, by0 = y + 10, bx1 = x + w - 10, by1 = y + h - 10, cx = x + w * 0.5f, cy = y + h * 0.5f;
+    const D3DCOLOR hi = kodi_light(c, 0.55f, 255);
+    int k;
+    switch (icon)
+    {
+    case UI_ICON_GLOBE:
+    {
+        const float rx = w * 0.5f - 12, ry = h * 0.5f - 12;
+        for (k = 0; k < 7; k++)
+        {
+            const float z = fmodf(k / 7.0f + t * 0.55f, 1.0f), sc = z * z, rw = 12 + sc * (w - 24), rh = 9 + sc * (h - 24);
+            UiRoundRing(cx - rw * 0.5f, cy - rh * 0.5f, rw, rh, rh * 0.2f, 1.5f, kodi_shade(hi, 1.0f, (int)(255 * 2.4f * z * (1 - z))));
+        }
+        for (k = 0; k < 28; k++)
+        {
+            const float a = k * 2.3999f, z = fmodf(k * 0.137f + t * (0.5f + 0.02f * (k % 7)), 1.0f), z2 = z + 0.09f > 1 ? 1 : z + 0.09f;
+            kodi_cline(cx + cosf(a) * rx * z * z, cy + sinf(a) * ry * z * z, cx + cosf(a) * rx * z2 * z2, cy + sinf(a) * ry * z2 * z2, 1.5f,
+                       D3DCOLOR_ARGB((int)(230 * z), 220, 255, 230), bx0, by0, bx1, by1);
+        }
+        for (k = 0; k < 12; k++)
+        {
+            const float a = k * 2.399f + 0.7f, z = fmodf(k * 0.13f + t * 0.42f, 1.0f);
+            UiText(UI_BOLD, 8 + 9 * z, cx + cosf(a) * rx * z * z * 0.92f, cy + sinf(a) * ry * z * z * 0.92f, D3DCOLOR_ARGB((int)(210 * z), 200, 255, 215),
+                   k & 1 ? "1" : "0", UI_CENTER);
+        }
+        break;
+    }
+    case UI_ICON_GRAPHICS:
+    {
+        // a lattice of triangles drifting, and one big one breathing
+        const float step = 34, off = fmodf(t * 26, step), hh = step * 0.866f;
+        for (k = -2; k < (int)(w / step) + 4; k++)
+        {
+            const float px = x + k * step - off;
+            kodi_cline(px, by0, px + (h - 20) * 0.577f, by1, 1.0f, kodi_shade(hi, 1, 60), bx0, by0, bx1, by1);
+            kodi_cline(px, by0, px - (h - 20) * 0.577f, by1, 1.0f, kodi_shade(hi, 1, 60), bx0, by0, bx1, by1);
+        }
+        for (k = 0; by0 + k * hh < by1; k++) UiLine(bx0, by0 + k * hh, bx1, by0 + k * hh, 1.0f, kodi_shade(hi, 1, 45));
+        {
+            const float g = 0.5f + 0.5f * sinf(t * 3), r = h * 0.36f;
+            float xy[8];
+            xy[0] = cx; xy[1] = cy - r; xy[2] = cx + r * 0.866f; xy[3] = cy + r * 0.5f; xy[4] = cx - r * 0.866f; xy[5] = cy + r * 0.5f; xy[6] = xy[0]; xy[7] = xy[1];
+            UiPolyline(xy, 4, 2.0f, 1.0f, kodi_shade(hi, 1, (int)(90 + 90 * g)));
+        }
+        break;
+    }
+    case UI_ICON_SCREEN:
+    {
+        const float sx = x + fmodf(t * 0.8f, 1.4f) * w - 0.2f * w;
+        for (k = 0; by0 + k * 4 < by1; k++) UiRect(bx0, by0 + k * 4, bx1 - bx0, 1, D3DCOLOR_ARGB(46, 0, 0, 0));
+        for (k = 0; k < 16; k++)
+            kodi_cline(sx + k * 2, by0, sx + k * 2 - 30, by1, 2.0f, D3DCOLOR_ARGB((int)(70 * (1 - fabsf(k - 8) / 8.0f)), 255, 255, 255), bx0, by0, bx1, by1);
+        break;
+    }
+    case UI_ICON_CONTROLS:
+    {
+        static const D3DCOLOR face[4] = { D3DCOLOR_ARGB(255, 80, 200, 90), D3DCOLOR_ARGB(255, 220, 70, 70), D3DCOLOR_ARGB(255, 60, 120, 230), D3DCOLOR_ARGB(255, 230, 190, 50) };
+        static const char *const letter[4] = { "A", "B", "X", "Y" };
+        for (k = 0; k < 8; k++)
+        {
+            const float z = fmodf(k / 8.0f + t * 0.25f, 1.0f), bx = bx0 + 12 + fmodf(k * 53.0f, bx1 - bx0 - 24), byy = by1 - 12 - z * (by1 - by0 - 24);
+            const float r = 9 + 2.5f * sinf(t * 5 + k), a = 1 - fabsf(z - 0.5f) * 2;
+            UiCircle(bx, byy, r, kodi_shade(face[k & 3], 1, (int)(60 + 120 * a)));
+            UiText(UI_BOLD, 11, bx, byy, D3DCOLOR_ARGB((int)(200 * a), 255, 255, 255), letter[k & 3], UI_CENTER);
+        }
+        break;
+    }
+    case UI_ICON_SOUND:
+    {
+        const int n = 16;
+        const float bw = (bx1 - bx0) / n;
+        for (k = 0; k < n; k++)
+        {
+            const float v = 0.5f + 0.5f * sinf(t * 7 + k * 0.9f) * sinf(t * 3.1f + k * 0.4f), bh = 8 + v * (h * 0.5f);
+            UiRoundRect(bx0 + k * bw, by1 - bh, bw - 4, bh, 3, kodi_shade(hi, 1, (int)(60 + 90 * v)), kodi_shade(hi, 1, (int)(30 + 50 * v)));
+        }
+        for (k = 0; k < 3; k++)
+        {
+            const float z = fmodf(k / 3.0f + t * 0.6f, 1.0f), r = 20 + z * (h * 0.42f - 26);
+            UiRoundRing(cx - r, y + h * 0.4f - r, r * 2, r * 2, r, 2.0f, kodi_shade(hi, 1, (int)(170 * (1 - z))));
+        }
+        break;
+    }
+    case UI_ICON_SYSTEM:
+    {
+        // the tracks (fractions of the box), a pulse running along each twice
+        static const float path[4][8] = { { 0, .2f, .3f, .2f, .38f, .32f, 1, .32f }, { 0, .78f, .2f, .78f, .3f, .62f, 1, .62f },
+                                          { 1, .86f, .66f, .86f, .58f, .74f, 0, .74f }, { .52f, 0, .52f, .26f, .6f, .4f, .6f, 1 } };
+        int j;
+        for (k = 0; k < 4; k++)
+        {
+            float xy[8], len = 0, seg[3];
+            for (j = 0; j < 4; j++) { xy[j * 2] = bx0 + path[k][j * 2] * (bx1 - bx0); xy[j * 2 + 1] = by0 + path[k][j * 2 + 1] * (by1 - by0); }
+            UiPolyline(xy, 4, 2.0f, 1.0f, kodi_shade(hi, 1, 70));
+            for (j = 0; j < 3; j++) { seg[j] = sqrtf((xy[j * 2 + 2] - xy[j * 2]) * (xy[j * 2 + 2] - xy[j * 2]) + (xy[j * 2 + 3] - xy[j * 2 + 1]) * (xy[j * 2 + 3] - xy[j * 2 + 1])); len += seg[j]; }
+            for (j = 0; j < 2; j++)
+            {
+                float pos = fmodf(t * 0.5f + j * 0.5f + k * 0.17f, 1.0f) * len;
+                int q;
+                for (q = 0; q < 3; q++)
+                {
+                    if (pos <= seg[q] && seg[q] > 0)
+                    {
+                        const float f = pos / seg[q];
+                        UiCircle(xy[q * 2] + (xy[q * 2 + 2] - xy[q * 2]) * f, xy[q * 2 + 1] + (xy[q * 2 + 3] - xy[q * 2 + 1]) * f, 3.5f, D3DCOLOR_ARGB(230, 255, 255, 255));
+                        break;
+                    }
+                    pos -= seg[q];
+                }
+            }
+        }
+        break;
+    }
+    case UI_ICON_INTERFACE:
+        for (k = 0; k < 6; k++)
+        {
+            const float z = fmodf(k / 6.0f + t * 0.18f, 1.0f), ww = 48, hh = 30;
+            const float wx = bx0 + fmodf(k * 61.0f, bx1 - bx0 - ww) + sinf(t + k) * 6, wy = by1 - hh - z * (by1 - by0 - hh);
+            const int a = (int)(120 * sinf(z * 3.14159f));
+            if (wx < bx0 || wx + ww > bx1) continue;
+            UiRoundRing(wx, wy, ww, hh, 5, 1.5f, kodi_shade(hi, 1, a));
+            UiRect(wx, wy + 8, ww, 1.5f, kodi_shade(hi, 1, a));
+            UiRect(wx + 5, wy + 13, 16, 12, kodi_shade(hi, 1, a / 3));
+        }
+        break;
+    case UI_ICON_HD:
+    {
+        // big pixels growing sharper, again and again
+        const float ph = fmodf(t * 0.6f, 1.0f);
+        const float cell = 8 + 22 * (1 - ph) * (1 - ph);
+        float px, py;
+        for (py = by0; py < by1; py += cell)
+            for (px = bx0; px < bx1; px += cell)
+            {
+                const float v = 0.5f + 0.5f * sinf(px * 0.03f + py * 0.05f + 1.3f) * cosf(px * 0.02f - py * 0.04f);
+                UiRect(px, py, (px + cell > bx1 ? bx1 - px : cell) - 1, (py + cell > by1 ? by1 - py : cell) - 1, kodi_shade(c, 0.4f + 0.6f * v, 80));
+            }
+        break;
+    }
+    case UI_ICON_CHART:
+        for (k = 0; k < 7; k++)
+        {
+            const float g = fmodf(t * 1.2f - k * 0.12f + 2.2f, 2.2f), v = (0.3f + 0.6f * ((k * 37) % 10) / 10.0f) * (g < 1 ? g : 1);
+            const float bwid = (bx1 - bx0 - 6 * 8) / 7, bxx = bx0 + k * (bwid + 8);
+            UiRoundRect(bxx, by1 - 4 - v * (h * 0.6f), bwid, v * (h * 0.6f), 4, kodi_shade(hi, 1, 100), kodi_shade(hi, 1, 50));
+        }
+        UiRect(bx0, by1 - 3, bx1 - bx0, 2, kodi_shade(hi, 1, 90));
+        break;
+    case UI_ICON_INFO:
+    {
+        for (k = 0; k < 30; k++)
+        {
+            const float sx = bx0 + fmodf(k * 97.31f, bx1 - bx0), sy = by0 + fmodf(k * 61.7f, by1 - by0);
+            const int a = (int)(200 * (0.5f + 0.5f * sinf(t * 4 + k * 1.7f)));
+            UiLine(sx - 3, sy, sx + 3, sy, 1.2f, D3DCOLOR_ARGB(a, 255, 255, 255));
+            UiLine(sx, sy - 3, sx, sy + 3, 1.2f, D3DCOLOR_ARGB(a, 255, 255, 255));
+        }
+        {
+            const float z = fmodf(t * 0.5f, 1.0f), sx = bx0 + z * (bx1 - bx0) * 1.3f, sy = by0 + z * (by1 - by0) * 0.6f;
+            kodi_cline(sx - 40, sy - 18, sx, sy, 2.0f, D3DCOLOR_ARGB(200, 255, 255, 255), bx0, by0, bx1, by1);
+        }
+        break;
+    }
+    }
+}
+
+// What a section holds now, for under its tile's name (the main page's tiles: settings_main).
+static void kodi_tile_sub(unsigned char icon, const Config *c, char *out, size_t size)
+{
+    out[0] = 0;
+    switch (icon)
+    {
+    case UI_ICON_GLOBE:
+        if (OnlineRegistered()) _snprintf(out, size - 1, "%s", OnlineMe()->tag);
+        break;
+    case UI_ICON_GRAPHICS:
+        if (c->sharpLevel > 0) _snprintf(out, size - 1, "%s%s %d %%", c->smooth ? "FXAA · " : "", Tr(T_SHARPEN), c->sharpLevel);
+        else _snprintf(out, size - 1, "%s", c->smooth ? "FXAA" : "");
+        break;
+    case UI_ICON_SCREEN:
+        _snprintf(out, size - 1, "%s%s", c->res43 > 0 ? "4:3" : "16:9", c->vsync ? " · V-Sync" : "");
+        break;
+    case UI_ICON_CONTROLS:
+    {
+        XINPUT_STATE st;
+        int k, n = 0;
+        for (k = 0; k < 4; k++) n += XInputGetState(k, &st) == ERROR_SUCCESS;
+        _snprintf(out, size - 1, Tr(n == 1 ? T_KODI_PADS_1 : T_KODI_PADS_N), n);
+        break;
+    }
+    case UI_ICON_SOUND:
+        _snprintf(out, size - 1, "%s %d %% · %s", Tr(T_VOLUME), c->volumeGame, Tr(c->audioMono ? T_AUDIO_MONO : T_AUDIO_STEREO));
+        break;
+    case UI_ICON_SYSTEM:
+        _snprintf(out, size - 1, "%s · %s", Tr(strcmp(c->cpu, "interp") ? T_RECOMPILER : T_INTERPRETER), c->hle ? "HLE" : "LLE");
+        break;
+    case UI_ICON_INTERFACE:
+        _snprintf(out, size - 1, "%s", UiFontName(c->uiFont));
+        break;
+    case UI_ICON_HD:
+        _snprintf(out, size - 1, "%s", Tr(c->hiTex ? T_ON : T_OFF));
+        break;
+    case UI_ICON_INFO:
+        _snprintf(out, size - 1, "LAIKA 64 v%s", H64_VERSION_STRING);
+        break;
+    }
+    out[size - 1] = 0;
+}
+
 static void kodi_clock(void)
 {
     SYSTEMTIME t;
@@ -904,6 +1254,22 @@ static float kodi_open_ease(int i)
     return 1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t);   // eases out
 }
 
+// A settings page coming in (opened from the main page or another page; a while not drawn): since when, by its name.
+static char s_pageEnterTitle[128];
+static float s_pageEnterAt = -10.0f, s_pageLastDraw = -10.0f;
+static float s_listEnterAt = -10.0f;   // Settings left: the game list fades in, rising a little (RomBrowser)
+static float page_enter_time(const UiMenu *m)
+{
+    const float now = UiTime();
+    if (strcmp(s_pageEnterTitle, m->title) || now - s_pageLastDraw > 0.25f)
+    {
+        s_pageEnterAt = now;
+        strncpy(s_pageEnterTitle, m->title, sizeof(s_pageEnterTitle) - 1);
+    }
+    s_pageLastDraw = now;
+    return now - s_pageEnterAt;
+}
+
 static void kodi_draw(const UiMenu *m)
 {
     int i;
@@ -916,14 +1282,13 @@ static void kodi_draw(const UiMenu *m)
     {
         // The sections as one row of tiles, centred; the save rows as a list under them.
         const int nt = kodi_tiles(m), cols = kodi_cols(nt), rows = nt > cols ? 2 : 1;
-        const float gap = 20, th = rows > 1 ? 150 : 170, y0 = rows > 1 ? 130 : 170;
-        float tw = cols ? (UI_WIDTH - 120 - gap * (cols - 1)) / cols : 228, ly;
+        const float gap = 8, th = rows > 1 ? 160 : 170, y0 = rows > 1 ? 130 : 170;
+        float tw = cols ? (UI_WIDTH - 112 - gap * (cols - 1)) / cols : 232, ly;
         const char *d;
-        if (tw > 228) tw = 228;
+        if (tw > 232) tw = 232;
         {
             const float e = kodi_open_ease(-1);
-            UiBrandFit((UI_WIDTH - 320) * 0.5f, 30 - (1.0f - e) * 24, 320, 80);
-            UiText(UI_BOLD, 16, UI_WIDTH * 0.5f, 118, UiAlpha(UI_COL_TEXT3, e), "LAIKA 64 V" H64_VERSION_STRING, UI_CENTER);
+            UiBrandFit((UI_WIDTH - 320) * 0.5f, 30 - (1.0f - e) * 24, 320, 80);   // (the version: on the updates card under the tiles)
         }
         kodi_clock();
         {
@@ -954,12 +1319,18 @@ static void kodi_draw(const UiMenu *m)
             }
             if (isTile && kodi_open_ease(m->sel) > 0.0f)
             {
+                // The selected tile in its section's colour, its own background moving inside, darker under its name.
                 const float e = kodi_open_ease(m->sel);
-                float x = ax.value, y = ay.value + (1.0f - e) * 40, w = tw + 12, h = th + 12, p = selection_pulse();
+                const D3DCOLOR tc = SEL_HI(255);   // the selection's colour, as every selection of the emulator
+                float x = ax.value, y = ay.value + (1.0f - e) * 40, w = tw + 12, h = th + 12, p = selection_pulse(), r = UiPanelRadius(12);
+                s_kodiIcon = m->icon[m->sel];
+                strncpy(s_kodiSub, m->sel < UI_MENU_MAX ? s_tileSub[m->sel] : "", sizeof(s_kodiSub) - 1);
                 UiSetScale(x + w * 0.5f, y + h * 0.5f, 0.82f + 0.18f * e);
                 selection_glow(x - 4, y - 4, w + 8, h + 8, 16, p * e);
-                edge_glow(x, y, w, h, 12);
-                UiRoundRect(x, y, w, h, UiPanelRadius(12), SEL_HI((200 + 40 * p) * e), SEL_LO((200 + 40 * p) * e));
+                UiRoundRect(x, y, w, h, r, SEL_HI((200 + 40 * p) * e), SEL_LO((200 + 40 * p) * e));
+                if (e >= 1.0f) kodi_tile_fx(m->icon[m->sel], x, y, w, h, tc, UiTime());
+                UiRoundRect(x, y + h - 56, w, 56, r, D3DCOLOR_ARGB(0, 8, 10, 20), D3DCOLOR_ARGB((int)(150 * e), 8, 10, 20));
+                UiRoundRing(x, y, w, h, r, 2.0f, kodi_light(tc, 0.45f, (int)(255 * e)));
                 UiSetScale(0, 0, 1.0f);
             }
         }
@@ -975,16 +1346,75 @@ static void kodi_draw(const UiMenu *m)
             if (sel) { x -= 6; y -= 6; w += 12; h += 12; }   // the selected tile a little bigger (its colour is the sliding selection's)
             y += (1.0f - e) * 40;
             cx = x + w * 0.5f;
-            UiSetScale(cx, y + h * 0.42f, 2.6f * (0.82f + 0.18f * e));
-            menu_icon(m->icon[i] ? m->icon[i] : UI_ICON_GEAR, cx, y + h * 0.42f, col);
-            UiSetScale(0, 0, 1.0f);
-            UiText(sel ? UI_BOLD : UI_REGULAR, 20, cx, y + h - 28, col, m->label[i], UI_CENTER);
+            {
+                // Its symbol white on a faint disc; the selected one in its section's colour on a dark disc, growing and
+                // shrinking. A thin line of its colour under each tile; the name, and what it holds under the name.
+                const D3DCOLOR tc = kodi_colour(m->icon[i]);
+                const float iy = y + h * 0.38f, beat = sel ? 1.0f + 0.1f * sinf(UiTime() * 4.5f) : 1.0f;
+                UiCircle(cx, iy, 34 * beat * (0.82f + 0.18f * e), sel ? D3DCOLOR_ARGB((int)(150 * e), 10, 12, 24) : D3DCOLOR_ARGB((int)(22 * e), 255, 255, 255));
+                if (!sel) UiRoundRect(x + 18, y + h - 3, w - 36, 2, 1, kodi_shade(tc, 1, (int)(110 * e)), kodi_shade(tc, 1, (int)(110 * e)));
+                UiSetScale(cx, iy, 2.6f * beat * (0.82f + 0.18f * e));
+                menu_icon(m->icon[i] ? m->icon[i] : UI_ICON_GEAR, cx, iy, sel ? kodi_light(tc, 0.15f, (int)(255 * e)) : col);
+                UiSetScale(0, 0, 1.0f);
+                UiText(sel ? UI_BOLD : UI_REGULAR, 20, cx, y + h - (i < UI_MENU_MAX && s_tileSub[i][0] ? 40 : 28), col, m->label[i], UI_CENTER);
+                if (i < UI_MENU_MAX && s_tileSub[i][0])
+                {
+                    char fit[48];
+                    UiTextFit(UI_REGULAR, 14, w - 24, s_tileSub[i], fit, sizeof(fit));
+                    if (m->icon[i] == UI_ICON_GLOBE)
+                    {
+                        // online: a green dot before the gamertag
+                        const float fw = UiTextWidth(UI_REGULAR, 14, fit);
+                        UiCircle(cx - fw * 0.5f - 9, y + h - 17, 4, UiAlpha(D3DCOLOR_ARGB(255, 80, 210, 120), e));
+                        UiText(UI_REGULAR, 14, cx + 5, y + h - 17, UiAlpha(sel ? D3DCOLOR_ARGB(255, 225, 255, 235) : UI_COL_TEXT3, e), fit, UI_CENTER);
+                    }
+                    else UiText(UI_REGULAR, 14, cx, y + h - 17, UiAlpha(sel ? D3DCOLOR_ARGB(255, 235, 235, 245) : UI_COL_TEXT3, e), fit, UI_CENTER);
+                }
+                if (m->icon[i] == UI_ICON_GLOBE && OnlineUnread(""))
+                {
+                    // messages not read yet: a red badge in its corner
+                    char t[8];
+                    _snprintf(t, sizeof(t) - 1, "%d", OnlineUnread(""));
+                    t[sizeof(t) - 1] = 0;
+                    UiCircle(x + w - 22, y + 22, 13, UiAlpha(D3DCOLOR_ARGB(255, 255, 255, 255), e));
+                    UiCircle(x + w - 22, y + 22, 11, UiAlpha(D3DCOLOR_ARGB(255, 255, 80, 110), e));
+                    UiText(UI_BOLD, 13, x + w - 22, y + 22, UiAlpha(D3DCOLOR_ARGB(255, 255, 255, 255), e), t, UI_CENTER);
+                }
+            }
         }
         ly = y0 + rows * th + (rows - 1) * gap + 40;
         for (i = nt; i < m->count; i++)
         {
             const float lw = 520, lx = (UI_WIDTH - lw) * 0.5f, cy = ly + 24;
             int sel = i == m->sel;
+            if (!strcmp(m->label[i], Tr(T_ONLINE_UPDATE)))
+            {
+                // Updates: up to date (a green tick) or a newer LAIKA 64 known (amber), and A to look again.
+                const char *newer = OnlineNewerRelease();
+                const int fresh = newer && newer[0];
+                const D3DCOLOR uc = fresh ? D3DCOLOR_ARGB(255, 240, 190, 70) : D3DCOLOR_ARGB(255, 80, 210, 120);
+                const float cw = 620, cx0 = (UI_WIDTH - cw) * 0.5f;
+                char t[96];
+                if (sel) UiShadow(cx0 - 4, ly - 4, cw + 8, 70, 20, 18, kodi_shade(uc, 1, 110));
+                UiRoundRect(cx0, ly, cw, 62, 16, kodi_shade(uc, 1, sel ? 60 : 26), kodi_shade(uc, 1, sel ? 40 : 18));
+                UiRoundRing(cx0, ly, cw, 62, 16, sel ? 2.0f : 1.0f, kodi_shade(uc, 1, sel ? 255 : 110));
+                UiCircle(cx0 + 34, ly + 31, 18, kodi_shade(uc, 1, 60));
+                if (fresh) icon_tri(cx0 + 34, ly + 33, 12, 2, uc);
+                else
+                {
+                    UiLine(cx0 + 26, ly + 31, cx0 + 32, ly + 38, 3, uc);
+                    UiLine(cx0 + 32, ly + 38, cx0 + 43, ly + 24, 3, uc);
+                }
+                if (fresh) _snprintf(t, sizeof(t) - 1, Tr(T_KODI_NEWER), newer);
+                else _snprintf(t, sizeof(t) - 1, "%s", Tr(T_KODI_UPTODATE));
+                t[sizeof(t) - 1] = 0;
+                UiText(UI_BOLD, 18, cx0 + 66, ly + 21, UI_COL_TEXT, t, UI_LEFT);
+                UiText(UI_REGULAR, 14, cx0 + 66, ly + 43, UI_COL_TEXT2, "LAIKA 64 v" H64_VERSION_STRING, UI_LEFT);
+                UiRoundRect(cx0 + cw - 196, ly + 17, 180, 28, 14, D3DCOLOR_ARGB(sel ? 50 : 18, 255, 255, 255), D3DCOLOR_ARGB(sel ? 50 : 18, 255, 255, 255));
+                UiText(UI_BOLD, 14, cx0 + cw - 106, ly + 31, sel ? UI_COL_TEXT : UI_COL_TEXT2, Tr(T_KODI_CHECK), UI_CENTER);
+                ly += 74;
+                continue;
+            }
             if (sel) selection_bar(lx, ly, lw, 48);
             else UiPanel(lx, ly, lw, 48, 12);
             menu_icon(m->icon[i] ? m->icon[i] : UI_ICON_SAVE, lx + 40, cy, sel ? UI_COL_TEXT : UI_COL_TEXT2);
@@ -1006,18 +1436,61 @@ static void kodi_draw(const UiMenu *m)
         kodi_parts(m, &kp);
         if (kp.count < 2) s_kodiSide = 0;
         part = kp.count >= 2 ? (s_kodiSide ? s_kodiPart : kp.rowPart[m->sel >= 0 && m->sel < m->count ? m->sel : 0]) : -1;
+        const D3DCOLOR sc = kodi_colour(s_kodiIcon);
+        // Coming in: the side bar slides in from the left, its parts one after another; the rows' panel rises, its rows
+        // following a moment apart (0.5 s in all).
+        const float pt = page_enter_time(m), eSide = ease_out(pt / 0.3f), eRows = ease_out((pt - 0.05f) / 0.34f);
+        UiSetShift(-60 * (1 - eSide), 0, eSide);
         UiPanel(-30, -30, sw + 30, UI_HEIGHT + 60, 0);
         UiBrandFit(30, 18, sw - 60, 64);
-        UiText(UI_REGULAR, 26, sw * 0.5f + 10, 106, UI_COL_TEXT, m->title, UI_CENTER);
+        {
+            // The section: its symbol on a disc of its colour, the page's name, what it holds (from its tile).
+            char fit[64];
+            UiShadow(22, 96, sw - 44, 88, 18, 20, kodi_shade(sc, 1, 50));
+            UiRoundRect(22, 96, sw - 44, 88, 18, kodi_shade(sc, 0.5f, 130), kodi_shade(sc, 0.3f, 110));
+            UiRoundRing(22, 96, sw - 44, 88, 18, 1.0f, kodi_light(sc, 0.4f, 90));
+            UiCircle(64, 140, 26, kodi_shade(sc, 1, 70));
+            UiSetScale(64, 140, 1.4f);
+            menu_icon(s_kodiIcon, 64, 140, kodi_light(sc, 0.55f, 255));
+            UiSetScale(0, 0, 1.0f);
+            UiTextFit(UI_BOLD, 24, sw - 150, m->title, fit, sizeof(fit));
+            UiText(UI_BOLD, 24, 104, s_kodiSub[0] ? 128 : 140, UI_COL_TEXT, fit, UI_LEFT);
+            if (s_kodiSub[0])
+            {
+                UiTextFit(UI_REGULAR, 14, sw - 150, s_kodiSub, fit, sizeof(fit));
+                UiText(UI_REGULAR, 14, 104, 154, UI_COL_TEXT2, fit, UI_LEFT);
+            }
+        }
         for (i = 0; i < kp.count; i++)
         {
-            float y = 146 + i * 52, cy = y + 23;
-            int here = i == part;
-            if (here && s_kodiSide) selection_bar(14, y, sw - 28, 46);
-            else if (here) UiRoundRect(14, y, sw - 28, 46, 12, SEL_LO(170), SEL_LO(120));
-            UiText(here ? UI_BOLD : UI_REGULAR, 22, 54, cy, here ? UI_COL_TEXT : UI_COL_TEXT2, Tr(kp.name[i]), UI_LEFT);
+            // Each part: the symbol of its first row, its name, how many options it has.
+            float y = 204 + i * 64, cy = y + 28;
+            int here = i == part, j, n = 0, first = -1;
+            char t[32];
+            {
+                const float ei = ease_out((pt - 0.06f - 0.045f * i) / 0.28f);
+                UiSetShift(-40 * (1 - ei), 0, ei);
+            }
+            for (j = 0; j < m->count; j++)
+                if (kp.rowPart[j] == i) { if (first < 0) first = j; n++; }
+            if (here && s_kodiSide) selection_bar(14, y, sw - 28, 56);
+            else if (here) UiRoundRect(14, y, sw - 28, 56, 14, SEL_LO(170), SEL_LO(120));
+            if (first >= 0 && m->icon[first])
+            {
+                const float beat = here && s_kodiSide ? 1.0f + 0.1f * sinf(UiTime() * 4.5f) : 1.0f;
+                if (here) UiCircle(44, cy, 16 * beat, D3DCOLOR_ARGB(140, 10, 12, 24));
+                UiSetScale(44, cy, beat);
+                menu_icon(m->icon[first], 44, cy, here ? kodi_light(sc, 0.15f, 255) : UI_COL_TEXT2);
+                UiSetScale(0, 0, 1.0f);
+            }
+            UiText(here ? UI_BOLD : UI_REGULAR, 20, 72, cy - 9, here ? UI_COL_TEXT : UI_COL_TEXT2, Tr(kp.name[i]), UI_LEFT);
+            _snprintf(t, sizeof(t) - 1, Tr(n == 1 ? T_KODI_OPT_1 : T_KODI_OPT_N), n);
+            t[sizeof(t) - 1] = 0;
+            UiText(UI_REGULAR, 13, 72, cy + 13, here ? UiAlpha(UI_COL_TEXT, 0.8f) : UI_COL_TEXT3, t, UI_LEFT);
         }
+        UiSetShift(0, 0, 1);
         kodi_clock();
+        UiSetShift(0, 36 * (1 - eRows), eRows);
         UiPanel(rx, ry0 - 16, rw, descY - ry0 + 104, 16);
         // Every part under its header (the menu never looks empty), scrolled to the selection.
         {
@@ -1043,6 +1516,10 @@ static void kodi_draw(const UiMenu *m)
             y = ry0;
             for (k = first; k < lines && y < ry0 + avail; k++)
             {
+                {
+                    const float ek = ease_out((pt - 0.1f - 0.03f * (k - first)) / 0.3f);
+                    UiSetShift(30 * (1 - ek), 36 * (1 - eRows), eRows * ek);
+                }
                 if (line[k] < 0)
                 {
                     UiText(UI_BOLD, 16, rx + rw * 0.5f, y + 18, UI_COL_TEXT3, Tr(kp.name[-1 - line[k]]), UI_CENTER);
@@ -1055,7 +1532,14 @@ static void kodi_draw(const UiMenu *m)
                     float cy = y + rowH * 0.5f;
                     const char *v = m->value[r];
                     if (sel) selection_bar(rx + 12, y + 2, rw - 24, rowH - 4);
-                    if (m->icon[r]) menu_icon(m->icon[r], rx + 42, cy, sel ? UI_COL_TEXT : UI_COL_TEXT2);
+                    if (m->icon[r])
+                    {
+                        const float beat = sel ? 1.0f + 0.1f * sinf(UiTime() * 4.5f) : 1.0f;
+                        UiCircle(rx + 42, cy, 15 * beat, sel ? D3DCOLOR_ARGB(150, 10, 12, 24) : D3DCOLOR_ARGB(20, 255, 255, 255));
+                        UiSetScale(rx + 42, cy, beat);
+                        menu_icon(m->icon[r], rx + 42, cy, sel ? kodi_light(sc, 0.15f, 255) : UI_COL_TEXT2);
+                        UiSetScale(0, 0, 1.0f);
+                    }
                     UiText(sel ? UI_BOLD : UI_REGULAR, 21, rx + (m->icon[r] ? 70 : 30), cy, sel ? UI_COL_TEXT : UI_COL_TEXT2, m->label[r], UI_LEFT);
                     if (kodi_arrows(v))
                     {
@@ -1064,8 +1548,11 @@ static void kodi_draw(const UiMenu *m)
                         size_t vn = strlen(v), cut = vn - 4 < sizeof(inner) - 1 ? vn - 4 : sizeof(inner) - 1;
                         memcpy(inner, v + 2, cut);
                         inner[cut] = 0;
-                        icon_tri(rx + rw - 38, cy, 9, 2, sel ? SEL_HI(255) : UI_COL_TEXT3);
-                        UiText(sel ? UI_BOLD : UI_REGULAR, 21, rx + rw - 56, cy, sel ? UI_COL_TEXT : UI_COL_TEXT2, inner, UI_RIGHT);
+                        // < value >: changed right there with left and right (A opens its list).
+                        const float vw = UiTextWidth(sel ? UI_BOLD : UI_REGULAR, 21, inner);
+                        icon_tri(rx + rw - 36, cy, 9, 1, sel ? UI_COL_TEXT : UI_COL_TEXT3);
+                        UiText(sel ? UI_BOLD : UI_REGULAR, 21, rx + rw - 52, cy, sel ? UI_COL_TEXT : UI_COL_TEXT2, inner, UI_RIGHT);
+                        icon_tri(rx + rw - 66 - vw, cy, 9, 3, sel ? UI_COL_TEXT : UI_COL_TEXT3);
                     }
                     else if (v[0]) draw_value(rx + rw - 30, cy, v, sel);
                     if (r == s_kodiDd) { ddRow = r; ddY = y + rowH; }
@@ -1074,11 +1561,21 @@ static void kodi_draw(const UiMenu *m)
             }
             top = first;
             shown = lines;
+            UiSetShift(0, 36 * (1 - eRows), eRows);
             if (ddRow >= 0) dd_draw(rx + rw - 24, ddY, rowH);
         }
-        UiRect(rx + 20, descY, rw - 40, 1, UI_COL_LINE);
         d = s_kodiSide ? NULL : m->sel >= 0 && m->sel < m->count ? row_desc(m->label[m->sel]) : NULL;
-        if (d) paragraph(UI_REGULAR, 19, rx + 30, descY + 12, rw - 60, 3, SEL_HI(255), d);
+        if (d)
+        {
+            // What the row does, in a box with an "i".
+            UiRoundRect(rx + 16, descY + 2, rw - 32, 80, 14, D3DCOLOR_ARGB(14, 255, 255, 255), D3DCOLOR_ARGB(10, 255, 255, 255));
+            UiRoundRing(rx + 16, descY + 2, rw - 32, 80, 14, 1.0f, UI_COL_LINE);
+            UiRoundRing(rx + 30, descY + 14, 22, 22, 11, 2.0f, kodi_light(sc, 0.45f, 255));
+            UiText(UI_BOLD, 14, rx + 41, descY + 25, kodi_light(sc, 0.45f, 255), "i", UI_CENTER);
+            paragraph(UI_REGULAR, 18, rx + 64, descY + 14, rw - 100, 3, UI_COL_TEXT, d);
+        }
+        else UiRect(rx + 20, descY, rw - 40, 1, UI_COL_LINE);
+        UiSetShift(0, 0, 1);
         UiFooter(rx + 30, UI_HEIGHT - 40, m->footer);
     }
 }
@@ -1105,15 +1602,21 @@ void UiMenuDraw(const UiMenu *m)
     int i, restart = strcmp(lastTitle, m->title) != 0 || lastCount != m->count, rtl = LangRtl(), icons = 0;
     float ddY = 0;   // under the row whose list of values is open
     char title[160];
-    if (m->page == UI_PAGE_CONTROLS) { controls_draw(m); lastTitle[0] = 0; return; }
-    if (m->page == UI_PAGE_CALIB) { calib_draw(m); lastTitle[0] = 0; return; }
-    if (m->page == UI_PAGE_VOLUME) { volume_draw(m); lastTitle[0] = 0; return; }
-    if (m->page == UI_PAGE_FX) { fxpage_draw(m); lastTitle[0] = 0; return; }
-    if (m->page == UI_PAGE_WALL) { wallpage_draw(m); lastTitle[0] = 0; return; }
-    if (m->page == UI_PAGE_BORDER) { borderpage_draw(m); lastTitle[0] = 0; return; }
-    if (m->page == UI_PAGE_PERF) { perfpage_draw(m); lastTitle[0] = 0; return; }
-    if (m->page == UI_PAGE_HOTKEYS) { hkpage_draw(m); lastTitle[0] = 0; return; }
-    if (m->page == UI_PAGE_EDGES) { edges_draw(m); lastTitle[0] = 0; return; }
+    if (m->page != UI_PAGE_LIST)
+    {
+        // A page with its own look (controls, volume, calibration ...) rises in as it opens.
+        const float e = ease_out(page_enter_time(m) / 0.34f);
+        UiSetShift(0, 40 * (1 - e), e);
+    }
+    if (m->page == UI_PAGE_CONTROLS) { controls_draw(m); UiSetShift(0, 0, 1); lastTitle[0] = 0; return; }
+    if (m->page == UI_PAGE_CALIB) { calib_draw(m); UiSetShift(0, 0, 1); lastTitle[0] = 0; return; }
+    if (m->page == UI_PAGE_VOLUME) { volume_draw(m); UiSetShift(0, 0, 1); lastTitle[0] = 0; return; }
+    if (m->page == UI_PAGE_FX) { fxpage_draw(m); UiSetShift(0, 0, 1); lastTitle[0] = 0; return; }
+    if (m->page == UI_PAGE_WALL) { wallpage_draw(m); UiSetShift(0, 0, 1); lastTitle[0] = 0; return; }
+    if (m->page == UI_PAGE_BORDER) { borderpage_draw(m); UiSetShift(0, 0, 1); lastTitle[0] = 0; return; }
+    if (m->page == UI_PAGE_PERF) { perfpage_draw(m); UiSetShift(0, 0, 1); lastTitle[0] = 0; return; }
+    if (m->page == UI_PAGE_HOTKEYS) { hkpage_draw(m); UiSetShift(0, 0, 1); lastTitle[0] = 0; return; }
+    if (m->page == UI_PAGE_EDGES) { edges_draw(m); UiSetShift(0, 0, 1); lastTitle[0] = 0; return; }
     if (s_kodi && m->page == UI_PAGE_LIST && footer_rows(m) && strcmp(m->title, Tr(T_STATES)))   // big icons style (the States page: a list)
     {
         kodi_draw(m);
@@ -1261,6 +1764,9 @@ static int paths_input(UiMenu *m, Config *c, WORD down);
 #define I_GAMEBG (I_DESIGN + 5)     // "Background images": a picture from the selected game behind every view (ROM list only)
 #define I_VIDEOBG (I_DESIGN + 6)    // "Background videos": the selected game's video there instead (ROM list only)
 #define I_HINTS (I_DESIGN + 7)      // "Hide buttons": the ROM list without its button prompts (ROM list only)
+#define I_NOTIFY (I_DESIGN + 8)     // "Notifications": the online news shown and the rumble with them, on their own page (ROM list only)
+static int s_notifyPage;             // Interface > Notifications
+static void settings_notify(UiMenu *m, const Config *c);
 static int s_hideHints;              // Config::hideHints (ui_from_config)
 // The ROM list's button prompts: START (Online) pulsing with a soft light so the online mode is seen; none at all
 // with Interface > Hide buttons.
@@ -1279,12 +1785,19 @@ static int catedit_input(UiMenu *m, Config *c, WORD down);
 // The ROM browser's layouts (Config::browserDesign; Interface > Design, X in the browser):
 // the list and its card, the covers grid, the big covers grid, the carousel.
 // Mosaic: a dense grid (7 x 4). Spotlight: the selection big with its information, the others in a row under it.
-// Cartridges: N64 cartridges on a shelf, the box art as labels. Cinema: the picture from the game over the screen, the logo big.
-enum { BD_LIST = 0, BD_COVERS, BD_BIG, BD_CAROUSEL, BD_MOSAIC, BD_SPOTLIGHT, BD_CARTRIDGE, BD_CINEMA, BD_COUNT };
+// Cartridges: N64 cartridges on a shelf, each game's own (ScreenScraper's) or the shell with the box art as its label. Cinema: the picture from the game over the screen, the logo big.
+// 3D boxes: the games' boxes standing on a floor, ScreenScraper's 3D box or one made from the box art.
+// Single game: one game over the screen, its 3D box big and its facts beside it.
+enum { BD_LIST = 0, BD_COVERS, BD_BIG, BD_CAROUSEL, BD_MOSAIC, BD_SPOTLIGHT, BD_CARTRIDGE, BD_CINEMA, BD_BOX3D, BD_SINGLE, BD_COUNT };
 static const int s_designLabels[BD_COUNT] = { T_DESIGN_DETAILED, T_DESIGN_COVERS, T_DESIGN_BIG, T_DESIGN_CAROUSEL, T_DESIGN_MOSAIC, T_DESIGN_SPOTLIGHT,
-                                              T_DESIGN_CARTRIDGE, T_DESIGN_CINEMA };
+                                              T_DESIGN_CARTRIDGE, T_DESIGN_CINEMA, T_DESIGN_BOX3D, T_DESIGN_SINGLE };
 // The views that move one game at a time, left and right (the others are grids, or the list).
-static int design_row(int d) { return d == BD_CAROUSEL || d == BD_SPOTLIGHT || d == BD_CARTRIDGE || d == BD_CINEMA; }
+static int design_row(int d) { return d == BD_CAROUSEL || d == BD_SPOTLIGHT || d == BD_CARTRIDGE || d == BD_CINEMA || d == BD_BOX3D || d == BD_SINGLE; }
+// The views that show the 3D boxes (ART_KIND_BOX3D) and nothing else of a game's pictures.
+static int design_box3d(int d) { return d == BD_BOX3D || d == BD_SINGLE; }
+// The views whose games keep one picture: the 3D boxes', and the cartridges' (their own or the shell
+// with the box art; no video, no other pictures taking turns on the label).
+static int design_still(int d) { return design_box3d(d) || d == BD_CARTRIDGE; }
 // The ROM list's animated background (Config::bgEffect; drawn by browser_effect).
 enum { BGFX_OFF = 0, BGFX_WAVES, BGFX_PULSE, BGFX_RAIN, BGFX_VORTEX, BGFX_RIPPLES, BGFX_SILK, BGFX_EMBERS, BGFX_GRID,
        BGFX_UNDERWATER, BGFX_ENERGY, BGFX_AURORA, BGFX_LIQUID, BGFX_PARTICLES, BGFX_SMOKE, BGFX_XMB, BGFX_PS4_FLOW,
@@ -1322,32 +1835,69 @@ static int saver_any_input(void);
 // shadow on the floor under it.
 static int s_cover3d;   // ui_from_config
 
+static void box_from_cover(IDirect3DTexture9 *tex, float x, float y, float w, float h, D3DCOLOR color);
+
 static void cover_draw(IDirect3DTexture9 *tex, float x, float y, float w, float h, float r, D3DCOLOR color, int box)
 {
-    const float sw = w * 0.085f, fx = x + sw, farH = h * 0.03f;
+    if (!s_cover3d || !box) UiImage(tex, x, y, w, h, r, color);
+    else box_from_cover(tex, x, y, w, h, color);
+}
+
+// A box made from its box art, in (x, y, w, h) (the box art's proportions, cover_draw's and box_fit's
+// rooms): the front keeps those proportions, w less the spine wide and as much shorter, standing on the
+// room's bottom; the spine (8.5 % of w) on its left. The outline, clockwise from the spine's top left:
+// spine top left, front top left, front top right, front bottom right, front bottom left, spine bottom left.
+struct BoxGeom { float x, fx, xr, y, h, slant, sw; float pt[12]; };
+static void box_geom(float x, float y, float w, float h, BoxGeom *g)
+{
+    g->sw = w * 0.085f;
+    g->x = x;
+    g->fx = x + g->sw;
+    g->xr = x + w;
+    g->h = h * (w - g->sw) / w;   // (the front squeezed into w less the spine looked square)
+    g->y = y + h - g->h;
+    g->slant = g->h * 0.03f;
+    g->pt[0] = g->x;  g->pt[1] = g->y + g->slant * 1.8f;
+    g->pt[2] = g->fx; g->pt[3] = g->y;
+    g->pt[4] = g->xr; g->pt[5] = g->y + g->slant;
+    g->pt[6] = g->xr; g->pt[7] = g->y + g->h - g->slant;
+    g->pt[8] = g->fx; g->pt[9] = g->y + g->h;
+    g->pt[10] = g->x; g->pt[11] = g->y + g->h - g->slant * 1.8f;
+}
+
+// The box made from its box art (cover_draw's 3D box; the 3D boxes and single game views' where
+// ScreenScraper has none).
+static void box_from_cover(IDirect3DTexture9 *tex, float bx, float by, float bw, float bh, D3DCOLOR color)
+{
+    BoxGeom g;
+    float x, y, w, h, sw, fx, farH;
     const int a = (int)(color >> 24), cr = (color >> 16) & 0xFF, cg = (color >> 8) & 0xFF, cb = color & 0xFF;
     float q[8];
-    if (!s_cover3d || !box)
-    {
-        UiImage(tex, x, y, w, h, r, color);
-        return;
-    }
+    box_geom(bx, by, bw, bh, &g);
+    x = g.x; y = g.y; w = bw; h = g.h; sw = g.sw; fx = g.fx; farH = g.slant;
     // The shadow: a soft one round the box, and a darker one where it stands.
     UiShadow(x + w * 0.04f, y + h * 0.06f, w * 0.98f, h * 0.98f, 8, 26, D3DCOLOR_ARGB(a * 90 / 255, 0, 0, 0));
     UiShadow(x + w * 0.08f, y + h - 6, w * 0.9f, 14, 7, 10, D3DCOLOR_ARGB(a * 150 / 255, 0, 0, 0));
-    // The spine: its far (left) edge a little shorter, darker as it turns away.
-    q[0] = x; q[1] = y + farH * 1.8f; q[2] = fx; q[3] = y;
-    q[4] = x; q[5] = y + h - farH * 1.8f; q[6] = fx; q[7] = y + h;
-    UiImageQuad(tex, q, 0.0f, 0.0f, 0.07f, 1.0f, D3DCOLOR_ARGB(a, cr * 150 / 255, cg * 150 / 255, cb * 150 / 255));
     {
-        // Shade across it, deepest at the far edge (columns, so it follows the slant).
-        int i;
-        for (i = 0; i < 6; i++)
+        // The spine: its far (left) edge a little shorter, darker as it turns away. It is the box art's
+        // left edge, whatever is drawn there (part of Super Mario 64's "M"): dimmed to a hint of its
+        // colours under a near-black shade, deepest at the far edge, and fading out towards that edge
+        // (about half seen through there) so it melts into the shadow. In columns: they follow the slant,
+        // each about 1.5 pixels wide (6 to 32), so the fade is smooth (6 wide ones showed as stripes).
+        int i, cols = (int)(sw / 1.5f);
+        if (cols < 6) cols = 6;
+        if (cols > 32) cols = 32;
+        for (i = 0; i < cols; i++)
         {
-            float u0 = i / 6.0f, u1 = (i + 1) / 6.0f, sx0 = x + sw * u0, sx1 = x + sw * u1;
-            int al = (int)(a * (0.55f - 0.45f * u0) * 0.9f);
-            UiStrip(sx0, y + farH * 1.8f * (1 - u0), y + h - farH * 1.8f * (1 - u0), sx1, y + farH * 1.8f * (1 - u1), y + h - farH * 1.8f * (1 - u1),
-                    D3DCOLOR_ARGB(al, 0, 0, 0), D3DCOLOR_ARGB(al, 0, 0, 0));
+            float u0 = (float)i / cols, u1 = (float)(i + 1) / cols, sx0 = x + sw * u0, sx1 = x + sw * u1;
+            float t0 = y + farH * 1.8f * (1 - u0), t1 = y + farH * 1.8f * (1 - u1);
+            float b0 = y + h - farH * 1.8f * (1 - u0), b1 = y + h - farH * 1.8f * (1 - u1);
+            float seen = 0.3f + 0.7f * (u0 + u1) * 0.5f;   // each layer's share: the two together ~50 % at the far edge
+            int sa = (int)(a * seen), al = (int)(a * (0.95f - 0.2f * u0) * seen);
+            q[0] = sx0; q[1] = t0; q[2] = sx1; q[3] = t1;
+            q[4] = sx0; q[5] = b0; q[6] = sx1; q[7] = b1;
+            UiImageQuad(tex, q, 0.07f * u0, 0.0f, 0.07f * u1, 1.0f, D3DCOLOR_ARGB(sa, cr * 80 / 255, cg * 80 / 255, cb * 80 / 255));
+            UiStrip(sx0, t0, b0, sx1, t1, b1, D3DCOLOR_ARGB(al, 0, 0, 0), D3DCOLOR_ARGB(al, 0, 0, 0));
         }
     }
     // The front: its right edge, further away, a little shorter.
@@ -1360,6 +1910,97 @@ static void cover_draw(IDirect3DTexture9 *tex, float x, float y, float w, float 
     UiLine(fx, y + 1, fx, y + h - 1, 1.2f, D3DCOLOR_ARGB(a * 70 / 255, 255, 255, 255));
     UiStrip(fx, y, y + h * 0.28f, x + w * 0.55f, y + farH * 0.55f, y + farH * 0.55f, D3DCOLOR_ARGB(a * 22 / 255, 255, 255, 255),
             D3DCOLOR_ARGB(0, 255, 255, 255));
+}
+
+// A white ramp, opaque on its left fading out to its right ((1 - u)^1.6): the glows' falloff.
+static IDirect3DTexture9 *s_rampTex;
+static IDirect3DTexture9 *ramp_tex(void)
+{
+    if (!s_rampTex)
+    {
+        unsigned char px[64 * 4];
+        int i;
+        for (i = 0; i < 64; i++)
+        {
+            px[i * 4] = px[i * 4 + 1] = px[i * 4 + 2] = 255;
+            px[i * 4 + 3] = (unsigned char)(255.0f * powf(1.0f - i / 63.0f, 1.6f));
+        }
+        s_rampTex = UiImageCreate(UiDevice(), px, 64, 1);
+    }
+    return s_rampTex;
+}
+
+// The selection's glow round a box made from its box art: `r` wide outside its outline, the same at
+// every point (a band along each side, rounded at each corner), nothing inside (the half-seen spine
+// showed a glow drawn behind it, and blurred or grown copies were uneven).
+static void box_glow(float bx, float by, float bw, float bh, float r, D3DCOLOR color)
+{
+    BoxGeom g;
+    IDirect3DTexture9 *ramp = ramp_tex();
+    float nx[6], ny[6], q[8];
+    int i, k;
+    if (!ramp) return;
+    box_geom(bx, by, bw, bh, &g);
+    for (i = 0; i < 6; i++)
+    {
+        // Each side's outward normal (clockwise on the screen: (dy, -dx)).
+        const float *p0 = &g.pt[i * 2], *p1 = &g.pt[((i + 1) % 6) * 2];
+        float dx = p1[0] - p0[0], dy = p1[1] - p0[1], l = sqrtf(dx * dx + dy * dy);
+        nx[i] = l > 0 ? dy / l : 0;
+        ny[i] = l > 0 ? -dx / l : 0;
+        q[0] = p0[0]; q[1] = p0[1]; q[2] = p0[0] + nx[i] * r; q[3] = p0[1] + ny[i] * r;
+        q[4] = p1[0]; q[5] = p1[1]; q[6] = p1[0] + nx[i] * r; q[7] = p1[1] + ny[i] * r;
+        UiImageQuad(ramp, q, 0.0f, 0.0f, 1.0f, 1.0f, color);
+    }
+    for (i = 0; i < 6; i++)
+    {
+        // The corner at point i, from the side before's normal to the next one's.
+        const float *p = &g.pt[i * 2];
+        const int j = (i + 5) % 6;
+        float a0 = atan2f(ny[j], nx[j]), a1 = atan2f(ny[i], nx[i]);
+        while (a1 < a0) a1 += 6.2831853f;
+        if (a1 - a0 > 3.1415927f) continue;   // (a convex outline: never)
+        for (k = 0; k < 6; k++)
+        {
+            const float b0 = a0 + (a1 - a0) * k / 6, b1 = a0 + (a1 - a0) * (k + 1) / 6;
+            q[0] = p[0]; q[1] = p[1]; q[2] = p[0] + cosf(b0) * r; q[3] = p[1] + sinf(b0) * r;
+            q[4] = p[0]; q[5] = p[1]; q[6] = p[0] + cosf(b1) * r; q[7] = p[1] + sinf(b1) * r;
+            UiImageQuad(ramp, q, 0.0f, 0.0f, 1.0f, 1.0f, color);
+        }
+    }
+}
+
+// A box made from its box art's reflection: each face (spine and front) turned over on its own bottom
+// edge (the box seen at an angle: the front's bottom slants), `gap` under it, its lower 40 % showing,
+// fading out downwards (in 12 bands) from `color`'s alpha.
+static void box_reflection(IDirect3DTexture9 *tex, float bx, float by, float bw, float bh, float gap, D3DCOLOR color)
+{
+    BoxGeom g;
+    const int a = (int)(color >> 24), cr = (color >> 16) & 0xFF, cg = (color >> 8) & 0xFF, cb = color & 0xFF;
+    const int bands = 12;
+    float q[8], depth;
+    int face, k;
+    box_geom(bx, by, bw, bh, &g);
+    depth = g.h * 0.4f;
+    for (face = 0; face < 2; face++)
+    {
+        // The face's bottom edge, left and right, and how tall each side of it is (they shrink with the slant).
+        const float xl = face ? g.fx : g.x, xr = face ? g.xr : g.fx;
+        const float yl = face ? g.y + g.h : g.y + g.h - g.slant * 1.8f, yr = face ? g.y + g.h - g.slant : g.y + g.h;
+        const float hl = face ? g.h : g.h - 2 * g.slant * 1.8f, hr = face ? g.h - 2 * g.slant : g.h;
+        const float u1 = face ? 1.0f : 0.07f;
+        for (k = 0; k < bands; k++)
+        {
+            const float t0 = (float)k / bands, t1 = (float)(k + 1) / bands;
+            const int al = (int)(a * (1.0f - (t0 + t1) * 0.5f) * (face ? 1.0f : 0.5f));
+            const D3DCOLOR c = face ? D3DCOLOR_ARGB(al, cr, cg, cb) : D3DCOLOR_ARGB(al, cr * 80 / 255, cg * 80 / 255, cb * 80 / 255);
+            q[0] = xl; q[1] = yl + gap + depth * t0;
+            q[2] = xr; q[3] = yr + gap + depth * hr / hl * t0;
+            q[4] = xl; q[5] = yl + gap + depth * t1;
+            q[6] = xr; q[7] = yr + gap + depth * hr / hl * t1;
+            UiImageQuad(tex, q, 0.0f, 1.0f - 0.4f * t0, u1, 1.0f - 0.4f * t1, c);
+        }
+    }
 }
 
 // ---- "Now playing" (the pause menu's main page, main.cpp) ----
@@ -1516,6 +2157,7 @@ static void ui_from_config(const Config *c)
     s_gameBg = c->gameBackdrop;
     s_videoBg = c->videoBackdrop && !c->gameBackdrop;
     s_hideHints = c->hideHints;
+    OnlineSetNotify(c->notify | (c->updateCheck ? 16 : 0));
     UiSetFont(c->uiFont);
     paths_apply(c);
     UiSetWallpapers(ConfigPath(c, CONFIG_PATH_WALLS, "game"), c->wallCustom, c->wallFile, c->wallInterval, c->wallTransition >= 0 && c->wallTransition < UI_TRANS_COUNT ? c->wallTransition : 0,
@@ -1592,7 +2234,7 @@ static int s_gRowHiresDl = -1, s_gRowHiresPng = -1;
 static int hires_png_here(void);   // with HiresScanPacks
 static void hires_pack_dir(int k, char *dir, size_t size);   // ... and these two
 static int hires_active_index(const Config *c);
-enum { SCR_RES = 0, SCR_RES169, SCR_STRETCH, SCR_CAL, SCR_BRIGHT, SCR_COLOR, SCR_VSYNC };   // anti-flicker and the screen effect: Graphics
+enum { SCR_RES = 0, SCR_RES169, SCR_STRETCH, SCR_CAL, SCR_BRIGHT, SCR_COLOR, SCR_VSYNC, SCR_RESERVE };   // anti-flicker and the screen effect: Graphics
 // Brightness in the order the row steps through it (Config::brightness: 0 normal, 1-2 lighter, 3-4 darker).
 static const int s_brightOrder[5] = { 4, 3, 0, 1, 2 };
 static const int s_colorStyleLabels[8] = { T_NORMAL, T_CS_SATURATED, T_CS_VIVID, T_CS_BW, T_CS_SEPIA, T_CS_WARM, T_CS_COOL, T_CS_GREEN };   // the Screen page (SCR_CAL opens the calibration page below); B goes back, no row for it
@@ -1732,7 +2374,8 @@ static void settings_values(UiMenu *m, const Config *c)
         sprintf(m->value[I_LANGUAGE], "%s", Tr(T_LANG_NAME));   // A: the list of languages
         if (s_browser) sprintf(m->value[I_TRANSDESC], "%s", toggle(c->descTranslate));
         if (s_browser) sprintf(m->value[I_GAMEBG], "%s", toggle(c->gameBackdrop));
-        if (s_browser) sprintf(m->value[I_VIDEOBG], "%s", toggle(c->videoBackdrop && !c->gameBackdrop));
+        if (s_browser)
+            sprintf(m->value[I_VIDEOBG], "< %s >", Tr(!c->videoBackdrop || c->gameBackdrop ? T_OFF : c->videoBackdrop == 2 ? T_VIDEOBG_MUTE : T_VIDEOBG_SOUND));
         if (s_browser) sprintf(m->value[I_HINTS], "%s", toggle(c->hideHints));
         if (s_browser) start_rom_text(c, m->value[I_STARTROM], sizeof(m->value[I_STARTROM]));
         return;
@@ -1794,6 +2437,7 @@ static void settings_values(UiMenu *m, const Config *c)
         (void)br;
         sprintf(m->value[SCR_COLOR], "< %s >", Tr(s_colorStyleLabels[c->colorStyle < 0 || c->colorStyle > 7 ? 0 : c->colorStyle]));
         sprintf(m->value[SCR_VSYNC], "%s", toggle(c->vsync == 2));   // a switch: off, or the TV always waited for (the one-time "aggressive")
+        sprintf(m->value[SCR_RESERVE], "%s", toggle(c->frameReserve < 0 ? FrameReserveAuto() : c->frameReserve));   // left to the game: its profile's
         (void)scr;
         return;
     }
@@ -1858,6 +2502,10 @@ static void settings_main(UiMenu *m, const Config *c)
         if (s_perGame) m->icon[s_rowSaveGame = UiMenuAdd(m, Tr(T_SAVE_GAME), "")] = UI_ICON_SAVE;
         m->icon[s_rowSaveAll = UiMenuAdd(m, Tr(T_SAVE_ALL), "")] = UI_ICON_SAVE;
     }
+    {
+        int i;
+        for (i = 0; i < m->count && i < UI_MENU_MAX; i++) kodi_tile_sub(m->icon[i], c, s_tileSub[i], sizeof(s_tileSub[i]));
+    }
     settings_values(m, c);   // no Back row: B goes back
 }
 
@@ -1889,11 +2537,12 @@ static void settings_interface(UiMenu *m, const Config *c)
         UiMenuAdd(m, Tr(T_GAME_BG), "");
         UiMenuAdd(m, Tr(T_VIDEO_BG), "");
         UiMenuAdd(m, Tr(T_HIDE_HINTS), "");
+        UiMenuAdd(m, Tr(T_NOTIFY), "");   // opens its page: no value shown
     }
     {
         static const unsigned char icons[] = { UI_ICON_GLOBE, UI_ICON_LIST, UI_ICON_SLIDERS, UI_ICON_PALETTE, UI_ICON_INTERFACE,
                                                UI_ICON_FRAME, UI_ICON_SUN, UI_ICON_CLOCK, UI_ICON_LAYOUT, UI_ICON_LOAD, UI_ICON_GLOBE, UI_ICON_LIST,
-                                               UI_ICON_PLAY, UI_ICON_FRAME, UI_ICON_PLAY, UI_ICON_CONTROLS };
+                                               UI_ICON_PLAY, UI_ICON_FRAME, UI_ICON_PLAY, UI_ICON_CONTROLS, UI_ICON_CHAT };
         UiMenuIcons(m, icons, sizeof(icons));
     }
     SkinScan();   // keeps the inline Skins picker below matching the game:\skins folder
@@ -2018,9 +2667,11 @@ static int interface_input(UiMenu *m, Config *c, WORD down)
     }
     if (s_browser && m->sel == I_VIDEOBG && (dir || (down & XINPUT_GAMEPAD_A)))
     {
-        // The game's video behind every view instead of over its picture (and the pictures behind off).
-        c->videoBackdrop = !(c->videoBackdrop && !c->gameBackdrop);
-        if (c->videoBackdrop) { c->gameBackdrop = 0; c->previewVideo = 1; }
+        // The game's video behind every view instead of over its picture (and the pictures behind off): off, with its
+        // sound, without it.
+        const int now = c->videoBackdrop && !c->gameBackdrop ? c->videoBackdrop : 0;
+        c->videoBackdrop = (now + (dir < 0 ? 2 : 1)) % 3;
+        if (c->videoBackdrop) { c->gameBackdrop = 0; c->previewVideo = 1; c->gameMusic = 0; }
         s_gameBg = c->gameBackdrop;
         s_videoBg = c->videoBackdrop;
         settings_values(m, c);
@@ -2038,7 +2689,53 @@ static int interface_input(UiMenu *m, Config *c, WORD down)
         settings_images(m, c);
         return SET_NONE;
     }
+    if (s_browser && m->sel == I_NOTIFY && (down & XINPUT_GAMEPAD_A))
+    {
+        settings_notify(m, c);
+        return SET_NONE;
+    }
     return SET_NONE;
+}
+
+// ---- Notifications page (Interface > Notifications): which online news come up as notices in the ROM list
+// (a room another player opened, a friend online, a message) and the controller vibrating with them.
+enum { NT_ROOMS = 0, NT_FRIENDS, NT_DMS, NT_RUMBLE, NT_COUNT };
+static void notify_values(UiMenu *m, const Config *c)
+{
+    int i;
+    for (i = 0; i < NT_COUNT; i++) sprintf(m->value[i], "%s", toggle((c->notify >> i) & 1));
+}
+
+static void settings_notify(UiMenu *m, const Config *c)
+{
+    static const unsigned char icons[] = { UI_ICON_PLAY, UI_ICON_FRIENDS, UI_ICON_CHAT, UI_ICON_CONTROLS };
+    s_interfacePage = 0;
+    s_notifyPage = 1;
+    UiMenuClear(m, Tr(T_NOTIFY), Tr(T_FOOT_SELECT));
+    UiMenuAdd(m, Tr(T_NOTIFY_ROOMS), "");
+    UiMenuAdd(m, Tr(T_NOTIFY_FRIENDS), "");
+    UiMenuAdd(m, Tr(T_NOTIFY_DMS), "");
+    UiMenuAdd(m, Tr(T_NOTIFY_RUMBLE), "");
+    UiMenuIcons(m, icons, sizeof(icons));
+    notify_values(m, c);
+}
+
+static int notify_input(UiMenu *m, Config *c, WORD down)
+{
+    const int dir = (down & XINPUT_GAMEPAD_DPAD_RIGHT) ? 1 : (down & XINPUT_GAMEPAD_DPAD_LEFT) ? -1 : 0;
+    UiMenuNavigate(m, down);
+    if (down & XINPUT_GAMEPAD_B)
+    {
+        s_notifyPage = 0;
+        settings_interface(m, c);
+        m->sel = I_NOTIFY;
+        return SET_NONE;
+    }
+    if (!dir && !(down & XINPUT_GAMEPAD_A)) return SET_NONE;
+    c->notify ^= 1 << m->sel;
+    OnlineSetNotify(c->notify | (c->updateCheck ? 16 : 0));
+    notify_values(m, c);
+    return SET_CHANGED;
 }
 
 // ---- Game images page (Interface > Game images, A): which picture of each
@@ -2046,13 +2743,17 @@ static int interface_input(UiMenu *m, Config *c, WORD down)
 // here from the flat one), a picture from the game, its title screen, its
 // logo (libretro-thumbnails; the box shows until that one is downloaded, or
 // when there is none) - and whether missing pictures are downloaded.
-enum { IM_KIND = 0, IM_DOWNLOAD, IM_EXTRAS, IM_BACKGROUND, IM_VIDEO, IM_SSACCOUNT };
+enum { IM_KIND = 0, IM_DOWNLOAD, IM_EXTRAS, IM_BACKGROUND, IM_VIDEO, IM_MUSIC, IM_CYCLE, IM_BOX3D, IM_SSACCOUNT };
 static const int s_artKindLabels[CONFIG_ART_COUNT] = { T_KIND_BOX2D, T_KIND_BOX3D, T_KIND_SNAP, T_KIND_TITLE, T_KIND_LOGO };
 
 // The worker's kind of picture for Config::artKind (the 3D box is the box, drawn otherwise).
 static int art_kind_of(const Config *c)
 {
     static const int kinds[CONFIG_ART_COUNT] = { ART_KIND_BOX, ART_KIND_BOX, ART_KIND_SNAP, ART_KIND_TITLE, ART_KIND_LOGO };
+    // Those views show 3D boxes, whatever Game images says: ScreenScraper's (Game images > ScreenScraper's
+    // 3D boxes), else each drawn from the box art.
+    if (design_box3d(c->browserDesign)) return c->artBox3dSs ? ART_KIND_BOX3D : ART_KIND_BOX;
+    if (c->browserDesign == BD_CARTRIDGE) return ART_KIND_CART;  // and that one each game's cartridge
     return kinds[c->artKind >= 0 && c->artKind < CONFIG_ART_COUNT ? c->artKind : 0];
 }
 
@@ -2063,6 +2764,10 @@ static void images_values(UiMenu *m, const Config *c)
     sprintf(m->value[IM_EXTRAS], "%s", toggle(c->artDownload && c->artExtras));
     sprintf(m->value[IM_BACKGROUND], "%s", toggle(c->artDownload && c->artBackground));
     sprintf(m->value[IM_VIDEO], "%s", toggle(c->previewVideo));
+    sprintf(m->value[IM_CYCLE], "%s", toggle(c->artCycle));
+    if (c->previewVideo) sprintf(m->value[IM_MUSIC], "%s", Tr(T_GAME_MUSIC_VIDEO));   // not with the videos: they bring their sound
+    else sprintf(m->value[IM_MUSIC], "%s", toggle(c->gameMusic));
+    sprintf(m->value[IM_BOX3D], "%s", toggle(c->artBox3dSs));
     {
         // The account's name (cut to fit), else "none"; opens its page (A).
         char fit[64];
@@ -2073,7 +2778,7 @@ static void images_values(UiMenu *m, const Config *c)
 
 static void settings_images(UiMenu *m, const Config *c)
 {
-    static const unsigned char icons[] = { UI_ICON_FRAME, UI_ICON_LOAD, UI_ICON_LOAD, UI_ICON_LOAD, UI_ICON_PLAY, UI_ICON_PERSON };
+    static const unsigned char icons[] = { UI_ICON_FRAME, UI_ICON_LOAD, UI_ICON_LOAD, UI_ICON_LOAD, UI_ICON_PLAY, UI_ICON_SOUND, UI_ICON_FRAME, UI_ICON_FRAME, UI_ICON_PERSON };
     s_interfacePage = 0;
     s_imagesPage = 1;
     UiMenuClear(m, Tr(T_GAME_IMAGES), Tr(T_FOOT_SELECT));
@@ -2082,6 +2787,9 @@ static void settings_images(UiMenu *m, const Config *c)
     UiMenuAdd(m, Tr(T_ART_EXTRAS), "");
     UiMenuAdd(m, Tr(T_ART_BACKGROUND), "");
     UiMenuAdd(m, Tr(T_PREVIEW_VIDEO), "");
+    UiMenuAdd(m, Tr(T_GAME_MUSIC), "");
+    UiMenuAdd(m, Tr(T_ART_CYCLE), "");
+    UiMenuAdd(m, Tr(T_ART_BOX3D_SS), "");
     UiMenuAdd(m, Tr(T_SS_ACCOUNT), "");
     UiMenuIcons(m, icons, sizeof(icons));
     images_values(m, c);
@@ -2099,10 +2807,34 @@ static int images_input(UiMenu *m, Config *c, WORD down)
     }
     if (m->sel == IM_SSACCOUNT) return (down & XINPUT_GAMEPAD_A) ? SET_SS_ACCOUNT : SET_NONE;   // its page (settings_loop)
     if (!dir && !(down & XINPUT_GAMEPAD_A)) return SET_NONE;
+    if (m->sel == IM_BOX3D)
+    {
+        // ScreenScraper's 3D boxes in the 3D boxes and single game views, or each box drawn from its box art
+        // (the list asks for the other kind of picture when it is back: RomBrowser, art_kind_of).
+        c->artBox3dSs = !c->artBox3dSs;
+        images_values(m, c);
+        return SET_CHANGED;
+    }
+    if (m->sel == IM_MUSIC)
+    {
+        // Only the sound of the selected game's video: off (and not to be turned on) while the videos are on.
+        if (c->previewVideo) { xb_audio_ui_sound(XB_SFX_ERROR); return SET_NONE; }
+        c->gameMusic = !c->gameMusic;
+        images_values(m, c);
+        return SET_CHANGED;
+    }
+    if (m->sel == IM_CYCLE)
+    {
+        // The pictures taking turns (after the video's round when both are on).
+        c->artCycle = !c->artCycle;
+        images_values(m, c);
+        return SET_CHANGED;
+    }
     if (m->sel == IM_VIDEO)
     {
-        // The selected game's video in the list's card (downloaded with the other pictures).
+        // The selected game's video in the list's card (downloaded with the other pictures). On: the game's music alone off.
         c->previewVideo = !c->previewVideo;
+        if (c->previewVideo) c->gameMusic = 0;
         images_values(m, c);
         return SET_CHANGED;
     }
@@ -3313,8 +4045,7 @@ int FolderPicker(IDirect3DDevice9 *dev, const char *start, char *out, int outSiz
         UiRect(x + 24, y + h - 78, w - 48, 1, UI_COL_LINE);
         UiFooter(x + 40, y + h - 39, Tr(cur[0] ? T_FOOT_PICK : T_FOOT_PICK_DRIVES));
         UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
+        UiPresent(dev);
     }
     H64_INFO("[menu] folder picker: %s", result ? out : "cancelled");
     return result;
@@ -3834,8 +4565,7 @@ static void FileExplorer(IDirect3DDevice9 *dev)
         }
         UiScreenFooter(Tr(T_FOOT_EXPLORER));
         UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
+        UiPresent(dev);
     }
     while (s_xfer.running) { InterlockedExchange(&s_xfer.cancel, 1); Sleep(20); }   // never leave one running behind
     H64_INFO("[explorer] closed");
@@ -3980,9 +4710,14 @@ static void settings_screen(UiMenu *m, const Config *c)
     UiMenuAdd(m, Tr(T_PIC_CAL), "");
     UiMenuAdd(m, Tr(T_BRIGHTNESS), "");
     UiMenuAdd(m, Tr(T_COLOR_STYLE), "");
-    if (!s_onlineGame) UiMenuAdd(m, Tr(T_VSYNC), "");   // online: every console on the clock (main.cpp)
+    if (!s_onlineGame)
     {
-        static const unsigned char icons[] = { UI_ICON_SCREEN, UI_ICON_SCREEN, UI_ICON_STRETCH, UI_ICON_CROSSHAIR, UI_ICON_SUN, UI_ICON_PALETTE, UI_ICON_VSYNC };
+        UiMenuAdd(m, Tr(T_VSYNC), "");   // online: every console on the clock (main.cpp)
+        UiMenuAdd(m, Tr(T_FRAME_RESERVE), "");   // (with V-Sync)
+    }
+    {
+        static const unsigned char icons[] = { UI_ICON_SCREEN, UI_ICON_SCREEN, UI_ICON_STRETCH, UI_ICON_CROSSHAIR, UI_ICON_SUN, UI_ICON_PALETTE, UI_ICON_VSYNC,
+                                               UI_ICON_STATES };
         UiMenuIcons(m, icons, sizeof(icons));
     }
     settings_values(m, c);
@@ -4032,6 +4767,7 @@ static int screen_input(UiMenu *m, Config *c, WORD down)
             break;
         case SCR_COLOR: c->colorStyle = ((c->colorStyle < 0 || c->colorStyle > 7 ? 0 : c->colorStyle) + dir + 8) % 8; break;
         case SCR_VSYNC: c->vsync = c->vsync == 2 ? 0 : 2; break;
+        case SCR_RESERVE: c->frameReserve = !(c->frameReserve < 0 ? FrameReserveAuto() : c->frameReserve); break;
         default: return SET_NONE;   // SCR_CAL with a left/right press: no value of its own to cycle
         }
         settings_values(m, c);
@@ -4374,6 +5110,9 @@ static void ctl_note(const char *text)
 enum { RR_STRENGTH = 0, RR_TEST, RR_COUNT };
 #define RUMBLE_TEST_MS 700
 static DWORD s_rumbleTestAt;   // when the test started (0: not running)
+#define RUMBLE_STEP_MS 260     // Controls' bar moved: the controllers vibrate this long at the strength reached
+static int s_rumbleEdit;       // Controls' Rumble row taken with A: left and right move its bar (A or B let it go)
+static DWORD s_rumbleStepAt;
 
 static void rumble_motors(int pct)
 {
@@ -4566,6 +5305,31 @@ static int controls_input(UiMenu *m, Config *c, WORD down)
         return SET_NONE;
     }
     item = s_ctlOrder[m->sel];
+    if (s_rumbleStepAt && GetTickCount() - s_rumbleStepAt >= RUMBLE_STEP_MS) { rumble_motors(0); s_rumbleStepAt = 0; }
+    if (s_rumbleEdit)
+    {
+        // The rumble's bar taken: left and right (or the triggers) 10 % at a time from 0 to 100, every controller
+        // vibrating a moment at the strength reached; A or B let it go.
+        const int step = (down & XINPUT_GAMEPAD_DPAD_RIGHT) || (trig & 2) ? 1 : (down & XINPUT_GAMEPAD_DPAD_LEFT) || (trig & 1) ? -1 : 0;
+        if (down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK))
+        {
+            s_rumbleEdit = 0;
+            rumble_motors(0);
+            s_rumbleStepAt = 0;
+            xb_audio_ui_sound(XB_SFX_SELECT);
+            return SET_NONE;
+        }
+        if (step)
+        {
+            const int v = c->rumble + step * 10;
+            c->rumble = v < 0 ? 0 : v > 100 ? 100 : v;
+            xb_audio_ui_sound(step > 0 ? XB_SFX_VALUE_UP : XB_SFX_VALUE_DOWN);
+            rumble_motors(c->rumble);
+            s_rumbleStepAt = c->rumble ? GetTickCount() | 1 : 0;
+            return SET_CHANGED;
+        }
+        return SET_NONE;
+    }
     // A and RT step a value on, LT back (the D-pad moves between the rows and columns).
     dir = ((down & XINPUT_GAMEPAD_A) || (trig & 2)) ? 1 : (trig & 1) ? -1 : 0;
     ctl_move(m, down);
@@ -4616,7 +5380,11 @@ static int controls_input(UiMenu *m, Config *c, WORD down)
     }
     if (item == C_RUMBLE && (down & XINPUT_GAMEPAD_A))
     {
-        rumble_open(m, c);   // its own page: the strength (for every player) and a test
+        // Its bar taken (no page of its own any more): it vibrates at the strength it has now.
+        s_rumbleEdit = 1;
+        rumble_motors(c->rumble);
+        s_rumbleStepAt = c->rumble ? GetTickCount() | 1 : 0;
+        xb_audio_ui_sound(XB_SFX_SELECT);
         return SET_NONE;
     }
     if (item == C_STICK && dir)
@@ -4668,9 +5436,7 @@ static void ctl_value_text(int item, const H64PadMap *map, char *out)
     if (item == C_RUMBLE)
     {
         // The strength; A opens its page.
-        int r = s_ctl.c ? s_ctl.c->rumble : 100;
-        if (r > 0) sprintf(out, "%d%%", r);
-        else sprintf(out, "%s", Tr(T_OFF));
+        sprintf(out, "%d%%", s_ctl.c ? s_ctl.c->rumble : 100);
         return;
     }
     const char *sticks[H64_STICK_COUNT] = { Tr(T_STICK_LEFT), Tr(T_STICK_RIGHT), Tr(T_STICK_DPAD), Tr(T_OFF) };
@@ -4767,6 +5533,50 @@ static void draw_n64_pad(float bx, float by, float bw, float bh, int hiItem, int
 #undef PY
 }
 
+static int pad_item_at(float bx, float by, float bw, float bh, int item, float *cx, float *cy, float *rad)
+{
+    float pw = bw, ph = pw * UI_PAD_H / UI_PAD_W, k, ox, oy, x, y, w, h, r;
+    if (ph > bh) { ph = bh; pw = ph * UI_PAD_W / UI_PAD_H; }
+    ox = bx + (bw - pw) * 0.5f;
+    oy = by + (bh - ph) * 0.5f;
+    k = pw / UI_PAD_SRC_W;
+    if (!pad_shape(item, &x, &y, &w, &h, &r)) return 0;
+    *cx = ox + (x + w * 0.5f - UI_PAD_SRC_X) * k;
+    *cy = oy + (y + h * 0.5f - UI_PAD_SRC_Y) * k;
+    *rad = (w > h ? w : h) * 0.5f * k;
+    return 1;
+}
+
+// An N64 control as it looks on the controller, small, centred on (cx, cy): A blue, B green, START red, the C buttons
+// yellow with their arrow, Z L R grey keys, the D-pad a cross with its side lit.
+static void n64_badge(int item, float cx, float cy)
+{
+    const D3DCOLOR white = D3DCOLOR_ARGB(255, 255, 255, 255), grey = D3DCOLOR_ARGB(255, 110, 112, 128);
+    switch (item)
+    {
+    case H64_N64_A: UiCircle(cx, cy, 12, D3DCOLOR_ARGB(255, 40, 90, 220)); UiText(UI_BOLD, 13, cx, cy, white, "A", UI_CENTER); break;
+    case H64_N64_B: UiCircle(cx, cy, 12, D3DCOLOR_ARGB(255, 40, 160, 70)); UiText(UI_BOLD, 13, cx, cy, white, "B", UI_CENTER); break;
+    case H64_N64_START: UiCircle(cx, cy, 12, D3DCOLOR_ARGB(255, 210, 50, 50)); UiText(UI_BOLD, 11, cx, cy, white, "S", UI_CENTER); break;
+    case H64_N64_Z: case H64_N64_L: case H64_N64_R:
+        UiRoundRect(cx - 14, cy - 10, 28, 20, 5, grey, grey);
+        UiText(UI_BOLD, 12, cx, cy, white, item == H64_N64_Z ? "Z" : item == H64_N64_L ? "L" : "R", UI_CENTER);
+        break;
+    case H64_N64_CUP: case H64_N64_CDOWN: case H64_N64_CLEFT: case H64_N64_CRIGHT:
+        UiCircle(cx, cy, 12, D3DCOLOR_ARGB(255, 240, 196, 40));
+        icon_tri(cx, cy, 10, item == H64_N64_CUP ? 0 : item == H64_N64_CRIGHT ? 1 : item == H64_N64_CDOWN ? 2 : 3, D3DCOLOR_ARGB(255, 80, 60, 10));
+        break;
+    case H64_N64_DUP: case H64_N64_DDOWN: case H64_N64_DLEFT: case H64_N64_DRIGHT:
+    {
+        const float dx = item == H64_N64_DLEFT ? -6.0f : item == H64_N64_DRIGHT ? 6.0f : 0.0f, dy = item == H64_N64_DUP ? -6.0f : item == H64_N64_DDOWN ? 6.0f : 0.0f;
+        UiRoundRect(cx - 12, cy - 12, 24, 24, 5, D3DCOLOR_ARGB(255, 60, 62, 76), D3DCOLOR_ARGB(255, 60, 62, 76));
+        UiRect(cx - 3, cy - 9, 6, 18, D3DCOLOR_ARGB(255, 200, 202, 212));
+        UiRect(cx - 9, cy - 3, 18, 6, D3DCOLOR_ARGB(255, 200, 202, 212));
+        UiCircle(cx + dx, cy + dy, 2.5f, D3DCOLOR_ARGB(255, 255, 160, 60));
+        break;
+    }
+    }
+}
+
 // Text at `size`, made smaller when it would be wider than `maxW`.
 static void ctl_fit_text(int font, float size, float x, float cy, float maxW, D3DCOLOR color, const char *text)
 {
@@ -4817,6 +5627,7 @@ static void ctl_auto_draw(void)
 
 static void controls_draw(const UiMenu *m)
 {
+    s_rsOwned = 1;
     static UiAnim selX, selY;
     static int lastCol = -1;
     const H64PadMap *map;
@@ -4830,18 +5641,44 @@ static void controls_draw(const UiMenu *m)
     UiDim();
     edge_glow(x, y, CTL_W, CTL_H, 22);
     UiPanel(x, y, CTL_W, CTL_H, 22);
-    UiText(UI_BOLD, 30, x + 40, y + 50, UI_COL_TEXT, Tr(T_CONTROLS), UI_LEFT);
-    UiRoundRect(x + 40, y + 74, 30, 4, 2, UI_COL_ACCENT_HI, UI_COL_ACCENT);
     {
-        // Player selector: "LB  Player 1  RB" at the top right.
-        float r = x + CTL_W - 40, w;
+        // Controls' symbol on a disc of its colour, the page's name, the player and its controller.
+        const D3DCOLOR cc = kodi_colour(UI_ICON_CONTROLS);
+        XINPUT_STATE st;
+        const int on = XInputGetState(s_ctl.player, &st) == ERROR_SUCCESS;
+        UiShadow(x + 34, y + 26, 60, 60, 30, 14, kodi_shade(cc, 1, 60));
+        UiCircle(x + 64, y + 56, 30, kodi_shade(cc, 1, 70));
+        UiSetScale(x + 64, y + 56, 1.5f);
+        menu_icon(UI_ICON_CONTROLS, x + 64, y + 56, kodi_light(cc, 0.55f, 255));
+        UiSetScale(0, 0, 1.0f);
+        UiText(UI_BOLD, 30, x + 108, y + 44, UI_COL_TEXT, Tr(T_CONTROLS), UI_LEFT);
         _snprintf(buf, sizeof(buf) - 1, Tr(T_PLAYER), s_ctl.player + 1);
         buf[sizeof(buf) - 1] = 0;
+        strncat(buf, " \xC2\xB7 ", sizeof(buf) - strlen(buf) - 1);
+        strncat(buf, Tr(on ? T_CTL_PAD_ON : T_CTL_PAD_OFF), sizeof(buf) - strlen(buf) - 1);
+        UiText(UI_REGULAR, 16, x + 108, y + 74, UI_COL_TEXT2, buf, UI_LEFT);
+    }
+    {
+        // The four players (LB/RB): J1-J4, the one edited lit, a green dot on those with a controller.
+        float r = x + CTL_W - 40;
+        int p;
         r -= UiFooterWidth("RB");
         UiFooter(r, y + 50, "RB");
-        w = UiTextWidth(UI_BOLD, 22, buf);
-        UiText(UI_BOLD, 22, r - 16, y + 50, UI_COL_TEXT, buf, UI_RIGHT);
-        r -= 16 + w + 16 + UiFooterWidth("LB");
+        for (p = 3; p >= 0; p--)
+        {
+            XINPUT_STATE st;
+            const int here = p == s_ctl.player, conn = XInputGetState(p, &st) == ERROR_SUCCESS;
+            const float pw = 64, px = r - 10 - pw;
+            char t[8];
+            if (here) UiRoundRect(px, y + 33, pw, 34, 17, SEL_HI(255), SEL_LO(255));
+            else UiRoundRing(px, y + 33, pw, 34, 17, 1.0f, UI_COL_LINE);
+            _snprintf(t, sizeof(t) - 1, "J%d", p + 1);
+            t[sizeof(t) - 1] = 0;
+            UiText(UI_BOLD, 16, px + 25, y + 50, here || conn ? UI_COL_TEXT : UI_COL_TEXT3, t, UI_CENTER);
+            UiCircle(px + 47, y + 50, 4, conn ? D3DCOLOR_ARGB(255, 80, 210, 120) : D3DCOLOR_ARGB(255, 90, 92, 108));
+            r = px;
+        }
+        r -= 10 + UiFooterWidth("LB");
         UiFooter(r, y + 50, "LB");
         if (s_ctl.player)
         {
@@ -4871,7 +5708,8 @@ static void controls_draw(const UiMenu *m)
         cy = ctl_row_y(row) + CTL_ROW * 0.5f;
         if (item < H64_N64_COUNT)
         {
-            UiText(s ? UI_BOLD : UI_REGULAR, 20, cx + 24, cy, s ? UI_COL_TEXT : UI_COL_TEXT2, TrN64(item), UI_LEFT);
+            n64_badge(item, cx + 32, cy);
+            UiText(s ? UI_BOLD : UI_REGULAR, 20, cx + 56, cy, s ? UI_COL_TEXT : UI_COL_TEXT2, TrN64(item), UI_LEFT);
             if (s_ctl.capturing && item == s_ctl.capItem)
                 UiText(UI_BOLD, 18, cx + CTL_COLW - 18, cy, UI_COL_ACCENT_HI, Tr(T_PRESS_INPUT), UI_RIGHT);
             else
@@ -4903,7 +5741,25 @@ static void controls_draw(const UiMenu *m)
             else
             {
                 ctl_value_text(item, map, buf);
-                if (buf[0]) draw_value(cx + CTL_COLW - 18, cy, buf, s);
+                if (item == C_RUMBLE)
+                {
+                    // The strength as a bar in Controls' colour, the figure beside it (A opens its page).
+                    // Taken with A: arrows each side and its knob glowing while left and right move it.
+                    const int r = s_ctl.c ? s_ctl.c->rumble : 100, edit = s && s_rumbleEdit;
+                    const float bw = 110, bx = cx + CTL_COLW - 18 - 58 - bw, f = r / 100.0f;
+                    const D3DCOLOR cc = kodi_colour(UI_ICON_CONTROLS);
+                    UiRoundRect(bx, cy - 3, bw, 6, 3, D3DCOLOR_ARGB(50, 255, 255, 255), D3DCOLOR_ARGB(50, 255, 255, 255));
+                    if (f > 0) UiRoundRect(bx, cy - 3, bw * f, 6, 3, s ? UI_COL_TEXT : cc, s ? UI_COL_TEXT : cc);
+                    if (edit)
+                    {
+                        UiCircle(bx + bw * f, cy, 13 + 2 * sinf(UiTime() * 8.0f), kodi_shade(cc, 1, 120));
+                        icon_tri(bx - 12, cy, 9, 3, UI_COL_TEXT);
+                        icon_tri(bx + bw + 12, cy, 9, 1, UI_COL_TEXT);
+                    }
+                    UiCircle(bx + bw * f, cy, 8, UI_COL_TEXT);
+                    UiText(UI_BOLD, 18, cx + CTL_COLW - 18, cy, s ? UI_COL_TEXT : UI_COL_TEXT2, buf, UI_RIGHT);
+                }
+                else if (buf[0]) draw_value(cx + CTL_COLW - 18, cy, buf, s);
             }
         }
     }
@@ -4912,8 +5768,19 @@ static void controls_draw(const UiMenu *m)
     // bottom is anchored to row 9 (not to CTL_H): C_SHOTCOMBO sits right there, and
     // growing the panel must not push the drawing down over that row.
     {
-        float top = ctl_row_y(2) + 8, bottom = ctl_row_y(9) - 8;
-        draw_n64_pad(ctl_col_x(2), top, CTL_COLW, bottom - top, s_ctl.capturing ? s_ctl.capItem : selItem, s_ctl.capturing);
+        float top = ctl_row_y(2) + 8, bottom = ctl_row_y(9) - 8, px, py, pr;
+        const int shown = s_ctl.capturing ? s_ctl.capItem : selItem;
+        draw_n64_pad(ctl_col_x(2), top, CTL_COLW, bottom - top, shown, s_ctl.capturing);
+        ctl_place(shown, &col, &row);
+        if (shown < H64_N64_COUNT && col < 2 && pad_item_at(ctl_col_x(2), top, CTL_COLW, bottom - top, shown, &px, &py, &pr))
+        {
+            const float rx = sx + CTL_COLW, ry = sy + CTL_ROW * 0.5f, over = y + CTL_TOP - 40, a = 0.55f + 0.25f * sinf(UiTime() * 4.0f);
+            float xy[10];
+            xy[0] = rx; xy[1] = ry; xy[2] = rx + 8; xy[3] = ry; xy[4] = rx + 8; xy[5] = over;
+            xy[6] = px; xy[7] = over; xy[8] = px; xy[9] = py - pr - 6;
+            UiPolyline(xy, 5, 2.0f, 1.0f, SEL_HI(255 * a));
+            UiCircle(rx + 1, ry, 3.5f, SEL_HI(255));
+        }
     }
 
     UiRect(x + 24, y + CTL_H - 78, CTL_W - 48, 1, UI_COL_LINE);
@@ -5466,6 +6333,7 @@ static void calib_task_draw(void)
 
 static void calib_draw(const UiMenu *m)
 {
+    s_rsOwned = 1;
     static UiAnim selY;
     const float x = CTL_X, y = CTL_Y;
     const float mcx = 295, mcy = 360, R = 170, midX = 500, midW = 280, setX = 800, setW = 370, rowH = 38, setTop = 168;
@@ -6087,6 +6955,7 @@ static int settings_input(UiMenu *m, Config *c, int perGame, WORD down)
     if (s_saverPage) return saver_input(m, c, down);
     if (s_imagesPage) return images_input(m, c, down);
     if (s_pathsPage) return paths_input(m, c, down);
+    if (s_notifyPage) return notify_input(m, c, down);
     if (s_interfacePage) return interface_input(m, c, down);
     if (m->page == UI_PAGE_CONTROLS) return controls_input(m, c, down);
     if (m->page == UI_PAGE_CALIB) return calib_input(m, c, down);
@@ -6188,8 +7057,7 @@ static int confirm_ask(IDirect3DDevice9 *dev, int title, int question, int foote
         UiBackdrop();
         confirm_draw(title, question, footer);
         UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
+        UiPresent(dev);
     }
 }
 
@@ -6251,8 +7119,7 @@ static int update_run(IDirect3DDevice9 *dev, const char *version)
         }
         UiText(UI_REGULAR, 17, x + w * 0.5f, y + h - 34, UI_COL_TEXT3, Tr(T_UPDATE_WAIT), UI_CENTER);
         UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
+        UiPresent(dev);
     }
     if (st == 2) return 1;
     H64_INFO("[update] %s", why);
@@ -6277,7 +7144,7 @@ static void news_screen(IDirect3DDevice9 *dev)
     title[sizeof(title) - 1] = 0;
     for (i = 0; i < NEWS_COUNT; i++)
     {
-        lines[i] = UiTextWrap(UI_REGULAR, 20, 820 - 72 - 40, 3, Tr(T_NEWS_1 + i), text[i], sizeof(text[i]));
+        lines[i] = UiTextWrap(UI_REGULAR, 20, 820 - 72 - 40, 3, Tr(T_WHATS_1 + i), text[i], sizeof(text[i]));
         if (lines[i] < 1) lines[i] = 1;
         total += lines[i];
     }
@@ -6312,8 +7179,7 @@ static void news_screen(IDirect3DDevice9 *dev)
         UiRect(x + 24, y + h - 56, w - 48, 1, UI_COL_LINE);
         UiFooter(x + 40, y + h - 28, Tr(T_FOOT_NEWS));
         UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
+        UiPresent(dev);
     }
 }
 
@@ -6322,8 +7188,10 @@ static void news_screen(IDirect3DDevice9 *dev)
 // the emulator (version, engine, licence), the credits (who made it, what is new
 // in LAIKA 64) and the acknowledgements. In the menus' language; names and
 // projects as they are.
-static int s_aboutTab;   // 0 About, 1 Credits, 2 Acknowledgements, 3 Donate
-#define ABOUT_TABS 4
+static int s_aboutTab;   // 0 About, 1 News, 2 Credits, 3 Acknowledgements, 4 Donate
+static int s_aboutInMenu;          // drawn by AboutScreen (over the menus' own background): no dark veil
+static float s_aboutFade = 1.0f, s_aboutDy;   // coming in and going out (AboutScreen)
+#define ABOUT_TABS 5
 #define DONATE_URL "paypal.me/ErickAbrahamA"
 // The donation page's QR code of https://paypal.me/ErickAbrahamA (version 3, level M; made on a
 // PC with Python's qrcode): the console has no browser, a phone scans it.
@@ -6579,6 +7447,58 @@ int AboutInput(WORD down)
     return 0;
 }
 
+// About > News: everything LAIKA 64 brought, in six cards by kind (an icon and a colour each); the newest
+// marked (a pink dot and bold), each card saying how many of them it has.
+#define NEWS_CATS 6
+#define NEWS_PER 5
+static void about_news(float x, float y, float w)
+{
+    static const D3DCOLOR col[NEWS_CATS] = { D3DCOLOR_ARGB(255, 90, 160, 255), D3DCOLOR_ARGB(255, 80, 210, 120), D3DCOLOR_ARGB(255, 255, 120, 160),
+                                             D3DCOLOR_ARGB(255, 255, 170, 60), D3DCOLOR_ARGB(255, 190, 120, 255), D3DCOLOR_ARGB(255, 150, 175, 225) };
+    static const unsigned char icon[NEWS_CATS] = { UI_ICON_LIST, UI_ICON_GLOBE, UI_ICON_FRIENDS, UI_ICON_SYSTEM, UI_ICON_GRAPHICS, UI_ICON_GEAR };
+    static const unsigned char fresh[NEWS_CATS * NEWS_PER] = { 0, 0, 0, 0, 1,  0, 0, 0, 0, 1,  0, 1, 1, 1, 1,  0, 0, 0, 0, 0,  0, 0, 0, 0, 0,  0, 0, 0, 0, 0 };
+    const D3DCOLOR pink = D3DCOLOR_ARGB(255, 255, 120, 160);
+    const float cx0 = x + 32, cy0 = y + 192, cw = (w - 64 - 2 * 14) / 3, ch = 196;
+    int k, j;
+    for (k = 0; k < NEWS_CATS; k++)
+    {
+        const float bx = cx0 + (k % 3) * (cw + 14), by = cy0 + (k / 3) * (ch + 14);
+        int n = 0;
+        char t[32];
+        for (j = 0; j < NEWS_PER; j++) n += fresh[k * NEWS_PER + j];
+        UiRoundRect(bx, by, cw, ch, 16, D3DCOLOR_ARGB(14, 255, 255, 255), D3DCOLOR_ARGB(8, 255, 255, 255));
+        UiRoundRing(bx, by, cw, ch, 16, 1.0f, UI_COL_LINE);
+        UiRoundRect(bx + 8, by, cw - 16, 4, 2, kodi_shade(col[k], 1, 210), kodi_shade(col[k], 1, 210));
+        UiCircle(bx + 31, by + 31, 17, kodi_shade(col[k], 1, 56));
+        menu_icon(icon[k], bx + 31, by + 31, col[k]);
+        UiText(UI_BOLD, 17, bx + 58, by + 31, UI_COL_TEXT, Tr(T_WHATS_CAT_1 + k), UI_LEFT);
+        if (n)
+        {
+            float tw;
+            _snprintf(t, sizeof(t) - 1, Tr(n == 1 ? T_WHATS_NEW_1 : T_WHATS_NEW_N), n);
+            t[sizeof(t) - 1] = 0;
+            tw = UiTextWidth(UI_BOLD, 11, t) + 14;
+            UiRoundRect(bx + cw - 14 - tw, by + 22, tw, 18, 9, kodi_shade(pink, 1, 60), kodi_shade(pink, 1, 60));
+            UiRoundRing(bx + cw - 14 - tw, by + 22, tw, 18, 9, 1.0f, kodi_shade(pink, 1, 200));
+            UiText(UI_BOLD, 11, bx + cw - 14 - tw * 0.5f, by + 31, kodi_light(pink, 0.4f, 255), t, UI_CENTER);
+        }
+        for (j = 0; j < NEWS_PER; j++)
+        {
+            const int i = k * NEWS_PER + j, nw = fresh[i];
+            const float iy = by + 66 + j * 26;
+            char fit[120];
+            UiCircle(bx + 21, iy, 3, nw ? pink : col[k]);
+            UiTextFit(nw ? UI_BOLD : UI_REGULAR, 14, cw - 46, Tr(T_WHATS_1 + i), fit, sizeof(fit));
+            UiText(nw ? UI_BOLD : UI_REGULAR, 14, bx + 32, iy, nw ? UI_COL_TEXT : UI_COL_TEXT2, fit, UI_LEFT);
+        }
+    }
+    // the legend
+    UiCircle(x + w - 260, y + 606, 4, pink);
+    UiText(UI_BOLD, 13, x + w - 250, y + 606, UI_COL_TEXT2, Tr(T_WHATS_LATEST), UI_LEFT);
+    UiCircle(x + w - 120, y + 606, 4, D3DCOLOR_ARGB(255, 150, 175, 225));
+    UiText(UI_REGULAR, 13, x + w - 110, y + 606, UI_COL_TEXT3, Tr(T_WHATS_SINCE), UI_LEFT);
+}
+
 // One credits entry: a name in bold, what it is beside it.
 static float credit_line(float x, float y, const char *name, const char *what)
 {
@@ -6593,7 +7513,11 @@ void AboutDraw(void)
     float ty, tx;
     char buf[160];
     int i;
-    UiDim();
+    static int lastTab = -1;
+    static float tabAt = -10.0f, tabDir = 1;
+    const float t = UiTime(), beat = 1.0f + 0.16f * powf(sinf(t * 3.2f) > 0 ? sinf(t * 3.2f) : 0.0f, 4.0f);
+    if (!s_aboutInMenu) UiDim();   // in game: over the frozen frame
+    UiSetShift(0, s_aboutDy, s_aboutFade);
     edge_glow(x, y, w, h, 24);
     UiPanel(x, y, w, h, 24);
     UiBrand(cx, y + 72, BRAND_SIZE);
@@ -6605,15 +7529,33 @@ void AboutDraw(void)
     tx = cx;
     for (i = 0; i < ABOUT_TABS; i++)
     {
-        const char *t = Tr(i == 3 ? T_DONATE_TAB : i == 2 ? T_CR_THANKS_TAB : i ? T_CREDITS : T_ABOUT);
-        float tw = UiTextWidth(UI_BOLD, 20, t) + 36;
-        if (i == s_aboutTab) UiRoundRect(tx, y + 122, tw, 36, 18, SEL_HI(255), SEL_HI(220));
-        else UiRoundRing(tx, y + 122, tw, 36, 18, 1.0f, UI_COL_LINE);
-        UiText(UI_BOLD, 20, tx + tw * 0.5f, y + 140, i == s_aboutTab ? UI_COL_TEXT : UI_COL_TEXT2, t, UI_CENTER);
+        const char *tt = Tr(i == 4 ? T_DONATE_TAB : i == 3 ? T_CR_THANKS_TAB : i == 2 ? T_CREDITS : i ? T_WHATS_TAB : T_ABOUT);
+        const int heart = i == 4;
+        // Donate's tab bobs a little, its heart beating before its name.
+        const float bob = heart ? -3.0f * fabsf(sinf(t * 2.6f)) : 0.0f, tw = UiTextWidth(UI_BOLD, 20, tt) + 36 + (heart ? 24 : 0);
+        if (i == s_aboutTab) UiRoundRect(tx, y + 122 + bob, tw, 36, 18, SEL_HI(255), SEL_HI(220));
+        else UiRoundRing(tx, y + 122 + bob, tw, 36, 18, 1.0f, heart ? D3DCOLOR_ARGB(150, 255, 92, 130) : UI_COL_LINE);
+        if (heart)
+        {
+            UiSetScale(tx + 26, y + 140 + bob, beat);
+            menu_icon(UI_ICON_HEART, tx + 26, y + 140 + bob, D3DCOLOR_ARGB(255, 255, 92, 130));
+            UiSetScale(0, 0, 1.0f);
+        }
+        UiText(UI_BOLD, 20, tx + (tw + (heart ? 24 : 0)) * 0.5f, y + 140 + bob, i == s_aboutTab ? UI_COL_TEXT : UI_COL_TEXT2, tt, UI_CENTER);
         tx += tw + 12;
     }
     UiRect(x + 32, y + 176, w - 64, 1, UI_COL_LINE);
     ty = y + 210;
+    if (s_aboutTab != lastTab)
+    {
+        // Another tab: its page slides in from the side it is on.
+        if (lastTab >= 0) { tabAt = t; tabDir = s_aboutTab > lastTab ? 1.0f : -1.0f; }
+        lastTab = s_aboutTab;
+    }
+    {
+        const float et = ease_out((t - tabAt) / 0.26f);
+        UiSetShift(tabDir * 50 * (1 - et), s_aboutDy, s_aboutFade * et);
+    }
     if (!s_aboutTab)
     {
         UiText(UI_REGULAR, 24, cx, ty, UI_COL_TEXT, Tr(T_ABOUT_TAGLINE), UI_LEFT);
@@ -6624,10 +7566,11 @@ void AboutDraw(void)
         heading(cx, ty, Tr(T_ABOUT_LICENCE));
         paragraph(UI_REGULAR, 18, cx, ty + 14, w - 104, 4, UI_COL_TEXT3, Tr(T_ABOUT_LICENCE_TEXT));
     }
-    else if (s_aboutTab == 1)
+    else if (s_aboutTab == 1) about_news(x, y, w);
+    else if (s_aboutTab == 2)
     {
-        // The credits: ErickaguirreD with the picture (a circle with a ring and a soft
-        // glow), the original author under, then what LAIKA 64 brings in two columns.
+        // The credits: ErickaguirreD with the picture (a circle with a ring and a soft glow), then what
+        // LAIKA 64 brings in two columns of six. (Harissa64's author: first in the acknowledgements.)
         const float ps = 112, px = cx, py = ty + 22, nx = px + ps + 28;
         if (!s_profileTried && UiDevice())
         {
@@ -6643,21 +7586,18 @@ void AboutDraw(void)
         UiRoundRing(px - 4, py - 4, ps + 8, ps + 8, ps * 0.5f + 4, 2.0f, SEL_HI(255));
         UiText(UI_BOLD, 28, nx, py + 26, UI_COL_TEXT, "ErickaguirreD", UI_LEFT);
         UiText(UI_REGULAR, 19, nx, py + 58, UI_COL_TEXT2, Tr(T_CR_LAIKA), UI_LEFT);
-        credit_line(nx, py + 92, "Mohamed Aymen (kernel64)", Tr(T_CR_BASED));
-        ty = py + ps + 34;
-        heading(cx, ty, Tr(T_CR_NEW));
-        for (i = 0; i < 10; i++)
-        {
-            const float bx = i < 5 ? cx : x + 510, by = ty + 30 + (i % 5) * 30;
-            UiCircle(bx + 4, by, 3.5f, UI_COL_ACCENT_HI);
-            UiText(UI_REGULAR, 18, bx + 18, by, UI_COL_TEXT2, Tr(T_CR_NEW_1 + i), UI_LEFT);
-        }
+        ty = py + ps + 40;
+        paragraph(UI_REGULAR, 18, cx, ty, w - 104, 3, UI_COL_TEXT2, Tr(T_CR_COMMUNITY));
     }
-    else if (s_aboutTab == 3)
+    else if (s_aboutTab == 4)
     {
         // Donate: a few words (what the donations are for), then every way to give - PayPal and the crypto
         // wallets - with its QR code for a phone to scan.
-        heading(cx, ty, Tr(T_DONATE_TITLE));
+        UiCircle(cx + 12, ty, 16 * beat, D3DCOLOR_ARGB(50, 255, 92, 130));
+        UiSetScale(cx + 12, ty, 1.5f * beat);
+        menu_icon(UI_ICON_HEART, cx + 12, ty, D3DCOLOR_ARGB(255, 255, 92, 130));
+        UiSetScale(0, 0, 1.0f);
+        heading(cx + 38, ty, Tr(T_DONATE_TITLE));
         ty += 16 + paragraph(UI_REGULAR, 17, cx, ty + 16, w - 104, 3, UI_COL_TEXT2, Tr(T_DONATE_TEXT)) + 18;
         donate_cards(cx, ty, w - 104);
     }
@@ -6669,6 +7609,8 @@ void AboutDraw(void)
         const float ts = 16, colW = col2 - cx - 36, col2W = w - (col2 - x) - 52;
         float h1, h2;
         heading(cx, ty, Tr(T_CR_THANKS));
+        credit_line(cx, ty + 32, "Mohamed Aymen (kernel64)", Tr(T_CR_BASED));   // Harissa64's author, first
+        ty += 34;
         ty += 16 + paragraph(UI_REGULAR, ts, cx, ty + 16, w - 104, 4, UI_COL_TEXT2, Tr(T_CR_THANKS_TEXT)) + 20;
         heading(cx, ty, Tr(T_CR_DATA));
         h1 = paragraph(UI_REGULAR, ts, cx, ty + 16, colW, 4, UI_COL_TEXT2, Tr(T_CR_DATA_TEXT));
@@ -6682,27 +7624,48 @@ void AboutDraw(void)
         ty += 16 + (h1 > h2 ? h1 : h2) + 18;
         if (ty < y + h - 84) UiText(UI_REGULAR, ts, cx, ty, UI_COL_TEXT3, Tr(T_CR_COMMUNITY), UI_LEFT);
     }
+    UiSetShift(0, s_aboutDy, s_aboutFade);
     UiRect(x + 32, y + h - 72, w - 64, 1, UI_COL_LINE);
     UiFooter(cx, y + h - 36, Tr(T_FOOT_ABOUT));
+    UiSetShift(0, 0, 1);
 }
 
 void AboutScreen(IDirect3DDevice9 *dev)
 {
+    // Over the menus' own background (the user's wallpaper and effect), rising in; B: it sinks and fades out.
     UiInput in;
+    const float openAt = UiTime();
+    float leaveAt = -1.0f;
     UiInputInit(&in);
     s_aboutTab = 0;
     for (;;)
     {
         WORD down = UiInputPoll(&in);
-        if (AboutInput(down)) return;
+        const float now = UiTime();
+        float ein, eout;
+        if (leaveAt < 0)
+        {
+            const int tabWas = s_aboutTab;
+            if (AboutInput(down)) { leaveAt = now; s_aboutTab = tabWas; xb_audio_ui_sound(XB_SFX_BACK); }
+        }
+        else if (now - leaveAt > 0.22f) break;
+        ein = ease_out((now - openAt) / 0.3f);
+        eout = leaveAt < 0 ? 0.0f : ease_out((now - leaveAt) / 0.22f);
+        s_aboutFade = ein * (1 - eout);
+        s_aboutDy = 30 * (1 - ein) + 30 * eout;
+        s_aboutInMenu = 1;
         dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
         UiBegin(dev);
         UiBackdrop();
+        browser_effect();
         AboutDraw();
         UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
+        UiPresent(dev);
     }
+    s_aboutInMenu = 0;
+    s_aboutFade = 1.0f;
+    s_aboutDy = 0;
+    s_aboutTab = 0;
 }
 
 // ---- Hi-res pack preview ----
@@ -6819,8 +7782,7 @@ void HiresPreviewScreen(IDirect3DDevice9 *dev, const Config *c)
         UiBackdrop();
         HiresPreviewDraw(dev);
         UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
+        UiPresent(dev);
     }
 }
 
@@ -6880,8 +7842,7 @@ int LanguageScreen(IDirect3DDevice9 *dev, int initial, int firstStart)
         }
         UiScreenFooter(TrIn(sel, firstStart ? T_FOOT_LANG_FIRST : T_FOOT_LANG));
         UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
+        UiPresent(dev);
     }
     H64_INFO("[lang] language list: %s", result >= 0 ? LangCode(result) : "left");
     return result;
@@ -6949,8 +7910,7 @@ static void wiz_splash(IDirect3DDevice9 *dev)
             UiRect(0, 0, UI_WIDTH, UI_HEIGHT, D3DCOLOR_ARGB((int)(255 * (1.0f - a)), 0, 0, 0));   // the fade, over black
         }
         UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
+        UiPresent(dev);
     }
 }
 
@@ -6985,8 +7945,7 @@ void OutroScreen(IDirect3DDevice9 *dev)
         }
         UiRect(0, 0, UI_WIDTH, UI_HEIGHT, D3DCOLOR_ARGB((int)(255 * (1.0f - fade)), 0, 0, 0));
         UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
+        UiPresent(dev);
     }
     dev->Clear(0, NULL, D3DCLEAR_TARGET, D3DCOLOR_ARGB(255, 0, 0, 0), 1.0f, 0);
     dev->Present(NULL, NULL, NULL, NULL);
@@ -7376,8 +8335,7 @@ static void wiz_controls(IDirect3DDevice9 *dev, Config *c, int calib)
         browser_effect();
         UiMenuDraw(&m);
         UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
+        UiPresent(dev);
     }
 }
 
@@ -7697,8 +8655,7 @@ void WelcomeScreen(IDirect3DDevice9 *dev, Config *c, int splash)
         wiz_chrome(&w);
         UiScreenFooter(Tr(w.page == WZ_DONE ? T_FOOT_WIZ_DONE : w.page ? T_FOOT_WIZ : T_FOOT_WIZ_FIRST));
         UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
+        UiPresent(dev);
     }
     for (i = 0; i < LANG_COUNT; i++)
         if (s_wizFlags[i]) { UiImageRelease(dev, s_wizFlags[i]); s_wizFlags[i] = NULL; }
@@ -7921,6 +8878,49 @@ static void favs_save(void)
 
 static int fav_is(const std::string &file) { favs_load(); return s_favs.count(fav_key(file)) != 0; }
 
+// Play time: <drive>:\config\playtime.txt, "<seconds>\t<ROM file name>" per line (the ROM list's "Most played").
+static std::map<std::string, int> s_playtime;   // lower-case file names -> seconds
+static int s_playtimeLoaded;
+static void playtime_load(void)
+{
+    char path[64], line[320];
+    FILE *f;
+    if (s_playtimeLoaded) return;
+    s_playtimeLoaded = 1;
+    lib_file("playtime.txt", path, sizeof(path));
+    if (!(f = fopen(path, "r"))) return;
+    while (fgets(line, sizeof(line), f))
+    {
+        char *tab = strchr(line, '\t');
+        size_t n = strlen(line);
+        while (n && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = 0;
+        if (tab && tab[1]) s_playtime[fav_key(tab + 1)] = atoi(line);
+    }
+    fclose(f);
+}
+
+static int playtime_of(const std::string &file)
+{
+    std::map<std::string, int>::const_iterator it;
+    playtime_load();
+    it = s_playtime.find(fav_key(file));
+    return it == s_playtime.end() ? 0 : it->second;
+}
+
+void PlaytimeAdd(const char *romPath, int seconds)
+{
+    char path[64];
+    FILE *f;
+    std::map<std::string, int>::const_iterator it;
+    if (!romPath || !romPath[0] || seconds < 30) return;   // (a game opened and left at once: not played)
+    playtime_load();
+    s_playtime[fav_key(romPath)] += seconds;
+    lib_file("playtime.txt", path, sizeof(path));
+    if (!(f = fopen(path, "w"))) { H64_WARN("[menu] cannot write %s", path); return; }
+    for (it = s_playtime.begin(); it != s_playtime.end(); ++it) fprintf(f, "%d\t%s\n", it->second, it->first.c_str());
+    fclose(f);
+}
+
 // Toggles a favourite; returns 1 when it is one now.
 static int fav_toggle(const std::string &file)
 {
@@ -8085,9 +9085,11 @@ static int s_romsTotal;         // games in game:\roms\ (0: the "copy ROMs" scre
 static int s_usbMerged = -1;
 // After the categories: the games with HD textures (installed, to download or a PNG pack of
 // their own: hd_of_file), then the USB memory's.
-static int tab_count(void) { cats_load(); return 3 + s_catCount + (s_usbMerged >= 0 ? 1 : 0); }
+// Then the most played (play time: PlaytimeAdd), then the USB memory's.
+static int tab_count(void) { cats_load(); return 4 + s_catCount + (s_usbMerged >= 0 ? 1 : 0); }
 static int tab_is_hd(int tab) { return tab == 2 + s_catCount; }
-static int tab_is_usb(int tab) { return s_usbMerged >= 0 && tab == 3 + s_catCount; }
+static int tab_is_top(int tab) { return tab == 3 + s_catCount; }
+static int tab_is_usb(int tab) { return s_usbMerged >= 0 && tab == 4 + s_catCount; }
 
 // Each ROM's HD textures (RomInfo::hd: 2 installed, 3 a PNG pack to convert, 1 one to download,
 // 0 none), from its header's name, kept once known: the list's rows and the HD tab ask for it.
@@ -8114,6 +9116,7 @@ static void tab_name(int tab, char *out, size_t size)
     else if (tab == 1) _snprintf(out, size - 1, "%s", Tr(T_FAVORITES));
     else if (tab_is_usb(tab)) _snprintf(out, size - 1, "%s", Tr(T_CAT_USB));
     else if (tab_is_hd(tab)) _snprintf(out, size - 1, "%s", Tr(T_CAT_HD));
+    else if (tab_is_top(tab)) _snprintf(out, size - 1, "%s", Tr(T_CAT_TOP));
     else cat_name(&s_cats[tab - 2], out, size);
     out[size - 1] = 0;
 }
@@ -8128,8 +9131,17 @@ static void tab_filter(const std::vector<RomEntry> &all, std::vector<RomEntry> *
     for (i = 0; i < all.size(); i++)
         if (s_tab == 0 || (s_tab == 1 && fav_is(all[i].file)) || (tab_is_usb(s_tab) && rom_on_usb(all[i].file)) ||
             (tab_is_hd(s_tab) && hd_of_file(all[i].file)) ||
+            (tab_is_top(s_tab) && playtime_of(all[i].file) > 0) ||
             (s_tab >= 2 && s_tab < 2 + s_catCount && game_in_cat(all[i].file, &s_cats[s_tab - 2])))
             out->push_back(all[i]);
+    if (tab_is_top(s_tab))
+    {
+        // The most played first (the list's order among the same times).
+        size_t a, b;
+        for (a = 1; a < out->size(); a++)
+            for (b = a; b > 0 && playtime_of((*out)[b].file) > playtime_of((*out)[b - 1].file); b--)
+                std::swap((*out)[b], (*out)[b - 1]);
+    }
     s_tabGames = (int)out->size();
 }
 
@@ -8774,8 +9786,7 @@ static int hires_download_screen(IDirect3DDevice9 *dev, Config *c, int png, cons
         UiRect(x + 24, y + h - 56, w - 48, 1, UI_COL_LINE);
         UiFooter(x + 40, y + h - 28, Tr(phase == 0 ? T_FOOT_HIRES_DL : phase == 1 ? T_FOOT_HIRES_DL_RUN : T_FOOT_NEWS));
         UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
+        UiPresent(dev);
     }
 }
 
@@ -9263,8 +10274,7 @@ static void packs_screen(IDirect3DDevice9 *dev, Config *c)
         }
         UiScreenFooter(Tr(state == HPINFO_FAILED && e->owner[0] ? T_FOOT_PACKS_RETRY : ph->installed ? T_FOOT_PACKS_INSTALLED : T_FOOT_PACKS));
         UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
+        UiPresent(dev);
     }
     // The pictures go with the screen (loaded again the next time it opens).
     {
@@ -9345,6 +10355,130 @@ static void import_scan(std::vector<ImportItem> &items)
 }
 
 // A centred list screen's frame: the backdrop, the title, its step line, a panel.
+// ---- The online screens' look: a network round their frames, and their entrance ----
+// Drawing an online screen (online_begin .. online_end): its frames (hub_frame, online_column) get the network
+// border, and are noted for the entrance (online_end: they grow out of the loading window).
+static int s_onlineDrawing;
+static float s_onlineRects[8][4];
+static int s_onlineRectN;
+static void online_frame_note(float x, float y, float w, float h)
+{
+    if (!s_onlineDrawing || s_onlineRectN >= 8) return;
+    s_onlineRects[s_onlineRectN][0] = x;
+    s_onlineRects[s_onlineRectN][1] = y;
+    s_onlineRects[s_onlineRectN][2] = w;
+    s_onlineRects[s_onlineRectN][3] = h;
+    s_onlineRectN++;
+}
+
+// A point `s` pixels along a rounded rectangle's outline (clockwise from the top edge's left end), and its
+// outward normal. The outline's length: rr_length.
+static float rr_length(float w, float h, float r) { return 2 * (w + h) - 8 * r + 6.2831853f * r; }
+static void rr_point(float x, float y, float w, float h, float r, float s, float *px, float *py, float *nx, float *ny)
+{
+    const float sw = w - 2 * r, shh = h - 2 * r, q = 1.5707963f * r, L = rr_length(w, h, r);
+    float a;
+    s = fmodf(s, L);
+    if (s < 0) s += L;
+    if (s < sw) { *px = x + r + s; *py = y; *nx = 0; *ny = -1; return; }
+    s -= sw;
+    if (s < q) { a = -1.5707963f + s / r; *nx = cosf(a); *ny = sinf(a); *px = x + w - r + r * *nx; *py = y + r + r * *ny; return; }
+    s -= q;
+    if (s < shh) { *px = x + w; *py = y + r + s; *nx = 1; *ny = 0; return; }
+    s -= shh;
+    if (s < q) { a = s / r; *nx = cosf(a); *ny = sinf(a); *px = x + w - r + r * *nx; *py = y + h - r + r * *ny; return; }
+    s -= q;
+    if (s < sw) { *px = x + w - r - s; *py = y + h; *nx = 0; *ny = 1; return; }
+    s -= sw;
+    if (s < q) { a = 1.5707963f + s / r; *nx = cosf(a); *ny = sinf(a); *px = x + r + r * *nx; *py = y + h - r + r * *ny; return; }
+    s -= q;
+    if (s < shh) { *px = x; *py = y + h - r - s; *nx = -1; *ny = 0; return; }
+    s -= shh;
+    a = 3.1415927f + s / r;
+    *nx = cosf(a); *ny = sinf(a); *px = x + r + r * *nx; *py = y + r + r * *ny;
+}
+
+// The network on a frame's border: nodes along it (some linked to a dot outside), two lights going round
+// (a cyan one, a lilac one, each with a tail) that light the nodes they pass. `a`: its strength.
+static void net_border(float x, float y, float w, float h, float r, float a)
+{
+    static const int cr[2] = { 90, 170 }, cg[2] = { 200, 140 }, cb[2] = { 255, 255 };
+    const float L = rr_length(w, h, r), now = UiTime();
+    const int nodes = (int)(L / 110) > 4 ? (int)(L / 110) : 4;
+    float head[2], px, py, nx, ny;
+    int k, j, i;
+    if (a <= 0.01f) return;
+    UiRoundRing(x, y, w, h, r, 1.0f, D3DCOLOR_ARGB((int)(70 * a), 120, 170, 255));
+    for (j = 0; j < 2; j++) head[j] = fmodf(now * 240.0f + j * L * 0.5f, L);
+    for (k = 0; k < nodes; k++)
+    {
+        const float s = k * L / nodes;
+        float lit = 0;
+        rr_point(x, y, w, h, r, s, &px, &py, &nx, &ny);
+        for (j = 0; j < 2; j++)
+        {
+            const float behind = fmodf(head[j] - s + L, L);
+            if (behind < 80 && 1 - behind / 80 > lit) lit = 1 - behind / 80;
+        }
+        if ((k * 7) % 5 < 2)
+        {
+            // A link out to a dot.
+            const float len = 14.0f + (float)((k * 13) % 18), side = (float)((k * 11) % 9) - 4.0f;
+            const float ex = px + nx * len - ny * side, ey = py + ny * len + nx * side;
+            UiLine(px, py, ex, ey, 1.0f, D3DCOLOR_ARGB((int)(50 * a), 90, 200, 255));
+            UiCircle(ex, ey, 2.0f, D3DCOLOR_ARGB((int)(100 * a), 90, 200, 255));
+        }
+        if (lit > 0)
+        {
+            const float rr = 4 + 10 * (1 - lit);
+            UiCircle(px, py, 9, D3DCOLOR_ARGB((int)(60 * lit * a), 90, 200, 255));
+            UiRoundRing(px - rr, py - rr, 2 * rr, 2 * rr, rr, 1.2f, D3DCOLOR_ARGB((int)(200 * lit * a), 90, 200, 255));
+        }
+        UiCircle(px, py, 3.2f, D3DCOLOR_ARGB((int)(255 * a), 20, 22, 40));
+        UiRoundRing(px - 3.2f, py - 3.2f, 6.4f, 6.4f, 3.2f, 1.3f, D3DCOLOR_ARGB((int)((120 + 135 * lit) * a), 90, 200, 255));
+    }
+    for (j = 0; j < 2; j++)
+    {
+        // The light and its tail (24 steps over 120 pixels).
+        for (i = 23; i >= 0; i--)
+        {
+            const float al = (1.0f - i / 24.0f) * (1.0f - i / 24.0f) * a;
+            rr_point(x, y, w, h, r, head[j] - i * 5.0f, &px, &py, &nx, &ny);
+            UiCircle(px, py, 3.5f, D3DCOLOR_ARGB((int)(60 * al), cr[j], cg[j], cb[j]));
+            UiCircle(px, py, 1.5f, D3DCOLOR_ARGB((int)(255 * al), cr[j], cg[j], cb[j]));
+        }
+        rr_point(x, y, w, h, r, head[j], &px, &py, &nx, &ny);
+        UiCircle(px, py, 8, D3DCOLOR_ARGB((int)(90 * a), cr[j], cg[j], cb[j]));
+        UiCircle(px, py, 2.6f, D3DCOLOR_ARGB((int)(255 * a), 255, 255, 255));
+    }
+}
+
+// The online screens' loading window (online_busy, and where their entrance starts): small, in the middle,
+// a spinner (and the screen's name over it, `title`; NULL: none), a light going round its border. `a` its
+// strength, `k` its scale.
+#define ONLINE_MINI_W 320.0f
+#define ONLINE_MINI_H 110.0f
+static void online_mini(const char *title, float a, float k)
+{
+    const float w = ONLINE_MINI_W * k, h = ONLINE_MINI_H * k, x = (UI_WIDTH - w) * 0.5f, y = (UI_HEIGHT - h) * 0.5f;
+    const float gx = x + w * 0.5f, gy = title && title[0] ? y + h * 0.64f : y + h * 0.5f;
+    float arc[26];
+    int i;
+    if (a <= 0.01f) return;
+    UiRoundRect(x, y, w, h, 16, D3DCOLOR_ARGB((int)(215 * a), 14, 14, 30), D3DCOLOR_ARGB((int)(215 * a), 14, 14, 30));
+    UiRoundRing(x, y, w, h, 16, 2.0f, D3DCOLOR_ARGB((int)(150 * a), 90, 200, 255));
+    net_border(x, y, w, h, 16, a * 0.8f);
+    if (title && title[0]) UiText(UI_BOLD, 18, gx, y + 32 * k, UiAlpha(UI_COL_TEXT2, a), title, UI_CENTER);
+    UiRoundRing(gx - 14, gy - 14, 28, 28, 14, 3.0f, D3DCOLOR_ARGB((int)(40 * a), 255, 255, 255));
+    for (i = 0; i < 13; i++)
+    {
+        const float an = UiTime() * 6.0f + i * 2.3f / 12;
+        arc[i * 2] = gx + cosf(an) * 14;
+        arc[i * 2 + 1] = gy + sinf(an) * 14;
+    }
+    UiPolyline(arc, 13, 3.0f, 1.0f, D3DCOLOR_ARGB((int)(255 * a), 170, 140, 255));
+}
+
 static void hub_frame(const char *title, const char *step, float x, float y, float w, float h)
 {
     UiBackdrop();
@@ -9353,6 +10487,12 @@ static void hub_frame(const char *title, const char *step, float x, float y, flo
     if (step) UiText(UI_REGULAR, 18, x + w, y - 52, UI_COL_ACCENT_HI, step, UI_RIGHT);
     edge_glow(x, y, w, h, 22);
     UiPanel(x, y, w, h, 22);
+    if (s_onlineDrawing)
+    {
+        // An online screen's: the network round it, noted for its entrance.
+        online_frame_note(x, y, w, h);
+        net_border(x, y, w, h, 22, 1.0f);
+    }
 }
 
 // A question with a few answers in a list: D-pad (or the left stick) up/down, A picks one; B
@@ -9402,8 +10542,7 @@ int ChoiceScreen(IDirect3DDevice9 *dev, const char *title, const char *text, con
         }
         UiScreenFooter(footer);
         UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
+        UiPresent(dev);
     }
     for (;;)
     {
@@ -9440,8 +10579,106 @@ static int game_players(u32 crc1, u32 crc2)
 
 static int rom_players(const char *path);
 
+// The QR code of https://github.com/ErickaguirreD/Laika64/issues/new (level M; made on a PC with Python's qrcode).
+static const int s_issuesQrN = 33;
+static const char *const s_issuesQr[33] = {
+    "111111100100101010111101001111111",
+    "100000100100000100100110001000001",
+    "101110101111001000010110001011101",
+    "101110101000100100100010001011101",
+    "101110101010001111001101001011101",
+    "100000101001010000110000001000001",
+    "111111101010101010101010101111111",
+    "000000001111100010011101100000000",
+    "101111100000011011011000001111100",
+    "100101001100110011111101001101100",
+    "100001111000111111001110110010110",
+    "100100001101110101101110101011111",
+    "010111100000101010000011000011011",
+    "000110001000100100100011011101011",
+    "111110111011010111101010011000110",
+    "000011000011100100011101111101100",
+    "000000111100101101000010110110001",
+    "000101001111111010101101001101101",
+    "110001110000110110101000110110100",
+    "100111001011110110011110000111100",
+    "101101100110111100111000000111010",
+    "101010010110110111011101001000101",
+    "101100100101010001101000010011110",
+    "100010010000101010001110111111111",
+    "100110101110001011000011111110000",
+    "000000001111100011110001100010100",
+    "111111100000111111001011101010110",
+    "100000101101011011101111100011110",
+    "101110101010011110010010111111010",
+    "101110101111000100111001110010011",
+    "101110101100001110100010001101100",
+    "100000100110010100011110011011100",
+    "111111101101101101010011111100010"
+};
+
+// Report a game's right side: GitHub's issues (looked at first) by a QR code, and what to bring - a picture of the error,
+// the log, the game (the one highlighted), a save state from before it, what was being done (and LAIKA's version).
+static void report_side(float x, float y, float w, float h, const char *game)
+{
+    const float qs = 196, qx = x + w - 22 - qs, qy = y + 140, mod = (float)(int)(qs / (s_issuesQrN + 4)), off = (qs - s_issuesQrN * mod) * 0.5f;
+    const D3DCOLOR gold = D3DCOLOR_ARGB(255, 250, 210, 110), ink = D3DCOLOR_ARGB(255, 160, 215, 255);
+    float iy, tw;
+    int r, c, k;
+    char t[96];
+    UiShadow(x, y + 6, w, h, 22, 22, D3DCOLOR_ARGB(120, 0, 0, 0));
+    UiRoundRect(x, y, w, h, 22, D3DCOLOR_ARGB(215, 28, 26, 46), D3DCOLOR_ARGB(215, 22, 20, 38));
+    UiRoundRing(x, y, w, h, 22, 1.0f, D3DCOLOR_ARGB(40, 255, 255, 255));
+    // PRIORITY, gold
+    tw = UiTextWidth(UI_BOLD, 12, Tr(T_REPORT_PRIORITY)) + 40;
+    UiRoundRect(x + 18, y + 18, tw, 26, 13, D3DCOLOR_ARGB(50, 240, 190, 70), D3DCOLOR_ARGB(50, 240, 190, 70));
+    UiRoundRing(x + 18, y + 18, tw, 26, 13, 1.0f, D3DCOLOR_ARGB(170, 240, 190, 70));
+    UiText(UI_BOLD, 16, x + 33, y + 31, gold, "*", UI_CENTER);
+    UiText(UI_BOLD, 12, x + 46, y + 31, gold, Tr(T_REPORT_PRIORITY), UI_LEFT);
+    // GitHub's mark (a white disc, a cat's head), why
+    UiCircle(x + 44, y + 92, 24, D3DCOLOR_ARGB(255, 240, 240, 245));
+    UiCircle(x + 44, y + 93, 14, D3DCOLOR_ARGB(255, 24, 24, 30));
+    icon_tri(x + 34, y + 80, 10, 0, D3DCOLOR_ARGB(255, 24, 24, 30));
+    icon_tri(x + 54, y + 80, 10, 0, D3DCOLOR_ARGB(255, 24, 24, 30));
+    UiRect(x + 40, y + 104, 8, 10, D3DCOLOR_ARGB(255, 24, 24, 30));
+    UiText(UI_BOLD, 20, x + 82, y + 80, UI_COL_TEXT, Tr(T_REPORT_GH_TITLE), UI_LEFT);
+    UiTextFit(UI_REGULAR, 15, w - 104, Tr(T_REPORT_GH_SHORT), t, sizeof(t));
+    UiText(UI_REGULAR, 15, x + 82, y + 106, UI_COL_TEXT2, t, UI_LEFT);
+    // the code
+    UiRoundRect(qx, qy, qs, qs, 12, 0xFFFFFFFF, 0xFFFFFFFF);
+    for (r = 0; r < s_issuesQrN; r++)
+        for (c = 0; s_issuesQr[r][c]; c++)
+            if (s_issuesQr[r][c] == '1') UiRect(qx + off + c * mod, qy + off + r * mod, mod, mod, D3DCOLOR_ARGB(255, 0, 0, 0));
+    UiText(UI_BOLD, 13, qx + qs * 0.5f, qy + qs + 18, UI_COL_TEXT, Tr(T_REPORT_SCAN), UI_CENTER);
+    UiText(UI_REGULAR, 11, qx + qs * 0.5f, qy + qs + 36, UI_COL_TEXT3, "github.com/ErickaguirreD/Laika64", UI_CENTER);
+    // what to bring: five cards
+    heading(x + 24, y + 148, Tr(T_REPORT_GH_NEED));
+    iy = y + 170;
+    for (k = 0; k < 5; k++)
+    {
+        static const unsigned char icons[5] = { UI_ICON_SCREEN, UI_ICON_LIST, UI_ICON_PLAY, UI_ICON_SAVE, UI_ICON_CHAT };
+        const float cw = qx - 16 - (x + 20), icx = x + 44, icy = iy + 25;
+        char sub[96];
+        if (k == 2) _snprintf(sub, sizeof(sub) - 1, "%s", game);
+        else if (k == 4) _snprintf(sub, sizeof(sub) - 1, Tr(T_RCARD_S5), H64_VERSION_STRING);
+        else _snprintf(sub, sizeof(sub) - 1, "%s", Tr(k == 0 ? T_RCARD_S1 : k == 1 ? T_RCARD_S2 : T_RCARD_S4));
+        sub[sizeof(sub) - 1] = 0;
+        UiRoundRect(x + 20, iy, cw, 50, 12, D3DCOLOR_ARGB(14, 255, 255, 255), D3DCOLOR_ARGB(10, 255, 255, 255));
+        UiCircle(icx, icy, 16, D3DCOLOR_ARGB(45, 120, 200, 255));
+        menu_icon(icons[k], icx, icy, ink);
+        UiTextFit(UI_BOLD, 15, cw - 64, Tr(T_RCARD_1 + k), t, sizeof(t));
+        UiText(UI_BOLD, 15, x + 70, iy + 17, UI_COL_TEXT, t, UI_LEFT);
+        UiTextFit(UI_REGULAR, 12, cw - 64, sub, t, sizeof(t));
+        UiText(UI_REGULAR, 12, x + 70, iy + 36, UI_COL_TEXT2, t, UI_LEFT);
+        iy += 58;
+    }
+    UiRect(x + 20, y + h - 52, w - 40, 1, UI_COL_LINE);
+    UiTextFit(UI_REGULAR, 13, w - 48, Tr(T_REPORT_NOTE), t, sizeof(t));
+    UiText(UI_REGULAR, 13, x + 24, y + h - 28, UI_COL_TEXT3, t, UI_LEFT);
+}
+
 static int pick_game(IDirect3DDevice9 *dev, const char *title, const char *step, const char *line, const char *footer, PickedGame *out,
-                     int online = 0)
+                     int online = 0, int report = 0)
 {
     static UiAnim selAnim;
     UiInput in;
@@ -9483,7 +10720,8 @@ static int pick_game(IDirect3DDevice9 *dev, const char *title, const char *step,
     UiInputInit(&in);
     for (;;)
     {
-        const float w = 820, h = 520, x = (UI_WIDTH - w) * 0.5f, y = 112, rowH = 42, pad = 14;
+        // (Report a game: the list on the left, GitHub's side on the right.)
+        const float w = report ? 586.0f : 820.0f, h = 520, x = report ? 64.0f : (UI_WIDTH - w) * 0.5f, y = 112, rowH = 42, pad = 14;
         WORD down = UiInputPoll(&in);
         float sy;
         if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) { xb_audio_ui_sound(XB_SFX_BACK); return 0; }
@@ -9549,7 +10787,7 @@ static int pick_game(IDirect3DDevice9 *dev, const char *title, const char *step,
             {
                 char fit[160];
                 const int s1 = top + k == sel;
-                UiTextFit(s1 ? UI_BOLD : UI_REGULAR, 19, w - 300, roms[top + k].shown.c_str(), fit, sizeof(fit));
+                UiTextFit(s1 ? UI_BOLD : UI_REGULAR, 19, w - (report ? 220 : 300), roms[top + k].shown.c_str(), fit, sizeof(fit));
                 UiText(s1 ? UI_BOLD : UI_REGULAR, 19, x + 30, ly + pad + k * rowH + rowH * 0.5f, s1 ? UI_COL_TEXT : UI_COL_TEXT2, fit, UI_LEFT);
                 if (s1 && internal[0] && online && players < 2)
                     UiText(UI_BOLD, 15, x + w - 28, ly + pad + k * rowH + rowH * 0.5f, D3DCOLOR_ARGB(255, 240, 90, 80), Tr(T_ONLINE_SOLO), UI_RIGHT);
@@ -9557,10 +10795,10 @@ static int pick_game(IDirect3DDevice9 *dev, const char *title, const char *step,
                     UiText(UI_REGULAR, 15, x + w - 28, ly + pad + k * rowH + rowH * 0.5f, UI_COL_ACCENT_HI, internal, UI_RIGHT);
             }
         }
+        if (report) report_side(x + w + 20, y, UI_WIDTH - 64 - (x + w + 20), h, n ? roms[sel].shown.c_str() : "");
         UiScreenFooter(footer);
         UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
+        UiPresent(dev);
     }
 }
 
@@ -9605,17 +10843,75 @@ int VoteScreen(IDirect3DDevice9 *dev, const char *game, const char **vote, const
     return 1;
 }
 
+
+// After a report: thanks, and for a quicker fix GitHub's issues (scanned with a phone; those are looked at first) with
+// what helps - a picture of the error, the log, the game's version, what was being done.
+static void report_done(IDirect3DDevice9 *dev, const char *game)
+{
+    const int n = sizeof(s_issuesQr) / sizeof(s_issuesQr[0]);
+    const float openAt = UiTime();
+    UiInput in;
+    UiInputInit(&in);
+    for (;;)
+    {
+        const float w = 940, h = 500, x = (UI_WIDTH - w) * 0.5f, y = (UI_HEIGHT - h) * 0.5f - 10, e = ease_out((UiTime() - openAt) / 0.3f);
+        const float qs = 236, qx = x + w - 40 - qs, qy = y + 112, mod = (float)(int)(qs / (n + 4)), lw = qx - 40 - (x + 40);
+        WORD down = UiInputPoll(&in);
+        float ty;
+        int r, c, k;
+        if (down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) { xb_audio_ui_sound(XB_SFX_SELECT); return; }
+        dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
+        UiBegin(dev);
+        UiBackdrop();
+        browser_effect();
+        UiSetShift(0, 30 * (1 - e), e);
+        edge_glow(x, y, w, h, 22);
+        UiPanel(x, y, w, h, 22);
+        // thanks, the game
+        UiCircle(x + 62, y + 58, 22, D3DCOLOR_ARGB(60, 80, 210, 120));
+        UiLine(x + 51, y + 58, x + 59, y + 66, 3, D3DCOLOR_ARGB(255, 80, 210, 120));
+        UiLine(x + 59, y + 66, x + 74, y + 49, 3, D3DCOLOR_ARGB(255, 80, 210, 120));
+        UiText(UI_BOLD, 24, x + 98, y + 48, UI_COL_TEXT, Tr(T_REPORT_SENT), UI_LEFT);
+        UiText(UI_REGULAR, 16, x + 98, y + 74, UI_COL_TEXT2, game, UI_LEFT);
+        UiRect(x + 32, y + 100, w - 64, 1, UI_COL_LINE);
+        // GitHub: why, and what to bring
+        ty = y + 132;
+        UiText(UI_BOLD, 19, x + 40, ty, UI_COL_TEXT, Tr(T_REPORT_GH_TITLE), UI_LEFT);
+        ty += 16 + paragraph(UI_REGULAR, 16, x + 40, ty + 16, lw, 3, UI_COL_TEXT2, Tr(T_REPORT_GH_TEXT)) + 22;
+        heading(x + 40, ty, Tr(T_REPORT_GH_NEED));
+        ty += 28;
+        for (k = 0; k < 4; k++)
+        {
+            UiCircle(x + 46, ty, 4, UI_COL_ACCENT_HI);
+            ty += paragraph(UI_REGULAR, 16, x + 60, ty, lw - 20, 2, UI_COL_TEXT, Tr(T_REPORT_GH_1 + k)) + 12;
+        }
+        // the code, white, the address under it
+        UiShadow(qx, qy + 6, qs, qs, 14, 20, D3DCOLOR_ARGB(140, 0, 0, 0));
+        UiRoundRect(qx, qy, qs, qs, 12, 0xFFFFFFFF, 0xFFFFFFFF);
+        for (r = 0; r < n; r++)
+            for (c = 0; s_issuesQr[r][c]; c++)
+                if (s_issuesQr[r][c] == '1') UiRect(qx + (qs - n * mod) * 0.5f + c * mod, qy + (qs - n * mod) * 0.5f + r * mod, mod, mod, D3DCOLOR_ARGB(255, 0, 0, 0));
+        UiText(UI_BOLD, 15, qx + qs * 0.5f, qy + qs + 22, UI_COL_TEXT, "GitHub Issues", UI_CENTER);
+        UiText(UI_REGULAR, 13, qx + qs * 0.5f, qy + qs + 44, UI_COL_TEXT3, "github.com/ErickaguirreD/Laika64", UI_CENTER);
+        UiRect(x + 32, y + h - 64, w - 64, 1, UI_COL_LINE);
+        UiFooter(x + 40, y + h - 32, Tr(T_FOOT_REPORT_DONE));
+        UiSetShift(0, 0, 1);
+        UiEnd();
+        UiPresent(dev);
+    }
+}
+
 // Settings > Report a game (ROM list only): a game from the list, how it runs (and
 // what went wrong), sent to the statistics form at once (xb_stats.cpp), then a thank-you.
 static void report_screen(IDirect3DDevice9 *dev, const char *drive)
 {
     PickedGame g;
     const char *vote, *reason, *ok[1];
-    if (!pick_game(dev, Tr(T_REPORT_GAME), Tr(T_REPORT_PICK), "", Tr(T_FOOT_REPORT_GAME), &g)) return;
+    if (!pick_game(dev, Tr(T_REPORT_GAME), Tr(T_REPORT_PICK), "", Tr(T_FOOT_REPORT_GAME), &g, 0, 1)) return;
     if (!VoteScreen(dev, g.shown.c_str(), &vote, &reason)) return;
     StatsSendReport(drive, g.name, g.code, vote, reason);
-    ok[0] = Tr(T_REPORT_OK);
-    ChoiceScreen(dev, Tr(T_REPORT_SENT), g.shown.c_str(), ok, 1, 0, Tr(T_FOOT_ASK), 0);
+    (void)ok;
+    report_done(dev, g.shown.c_str());
 }
 
 // Settings > HD textures > Optimize my pack: step 1, the pack (what the user copied into the
@@ -9706,8 +11002,7 @@ static void import_screen(IDirect3DDevice9 *dev, Config *c)
         }
         UiScreenFooter(Tr(n ? T_FOOT_IMPORT : T_FOOT_IMPORT_EMPTY));
         UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
+        UiPresent(dev);
     }
 }
 
@@ -9871,8 +11166,7 @@ static void hires_delete_screen(IDirect3DDevice9 *dev, Config *c)
             UiFooter(ax + 30, ay + ah - 30, Tr(T_FOOT_DEL_ASK));
         }
         UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
+        UiPresent(dev);
     }
 }
 
@@ -10001,8 +11295,7 @@ static void hires_download_all_screen(IDirect3DDevice9 *dev, Config *c)
         UiRect(x + 30, y + h - 50, w - 60, 1, UI_COL_LINE);
         UiFooter(x + 40, y + h - 24, Tr(phase == 1 ? T_FOOT_DLALL_RUN : phase == 0 && !todo.empty() ? T_FOOT_DLALL_START : T_FOOT_BACK_ONLY));
         UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
+        UiPresent(dev);
     }
 }
 
@@ -10105,8 +11398,7 @@ static void hires_hub(IDirect3DDevice9 *dev, Config *c)
         }
         UiScreenFooter(Tr(sel == HUB_SWITCH ? T_FOOT_HUB_TOGGLE : T_FOOT_HUB));
         UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
+        UiPresent(dev);
     }
 }
 
@@ -10150,8 +11442,7 @@ static void hires_offer(IDirect3DDevice9 *dev, Config *c, const char *rom, int h
         UiRect(x + 24, y + h - 56, w - 48, 1, UI_COL_LINE);
         UiFooter(x + 40, y + h - 28, Tr(e ? T_FOOT_HIRES_OFFER : T_FOOT_HIRES_PNG_OFFER));
         UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
+        UiPresent(dev);
     }
 }
 
@@ -10319,11 +11610,12 @@ static void rom_details_read(const char *path, RomInfo *info)
 // gets its code, the other types it; the room's game then starts on both (main.cpp's netplay).
 static std::string s_onlineLaunch;   // the game an online room starts: RomBrowser launches it as the settings close
 static std::string s_onlineFile;     // ... kept: the room's game when its lobby comes back after it (OnlineRoomBack)
-#define ONLINE_ROOMS_EVERY_MS 8000   // the room list read again this often
+#define ONLINE_ROOMS_EVERY_MS ONLINE_LOBBY_MS   // the room list read again this often (by the online thread: OnlineLobbyWatch)
 static void views_clear(IDirect3DDevice9 *dev);
 
 #define ONLINE_GREEN D3DCOLOR_ARGB(255, 80, 210, 120)
 static IDirect3DTexture9 *s_avatarTex[AVATAR_COUNT];   // made as the online screens open (online_avatars_load), freed as they close
+static IDirect3DTexture9 *s_avatar2Tex[AVATAR2_COUNT];   // the colour ones (xb_avatars2.h), the same
 static IDirect3DTexture9 *s_flagTex[FLAG_COUNTRIES];    // the same for the countries' flags
 // A profile's country (found by the server): one of xb_country_flags.h's (their flags), or "Other".
 static int online_country_index(const char *code)
@@ -10360,6 +11652,15 @@ static void online_avatars_load(IDirect3DDevice9 *dev)
         }
         s_avatarTex[k] = UiImageCreate(dev, rgba, AVATAR_SIZE, AVATAR_SIZE);
     }
+    for (k = 0; k < AVATAR2_COUNT; k++)
+    {
+        int aw = 0, ah = 0;
+        u8 *px;
+        if (s_avatar2Tex[k]) continue;
+        px = h64_png_decode(s_avatar2Png[k], s_avatar2PngSize[k], &aw, &ah, AVATAR2_SIZE * AVATAR2_SIZE);
+        s_avatar2Tex[k] = px ? UiImageCreate(dev, px, aw, ah) : NULL;
+        free(px);
+    }
     for (k = 0; k < FLAG_COUNTRIES; k++)
         if (!s_flagTex[k]) s_flagTex[k] = UiImageCreate(dev, s_flagRgba[k], FLAG_W, FLAG_H);
 }
@@ -10369,12 +11670,14 @@ static void online_avatars_free(IDirect3DDevice9 *dev)
     int k;
     for (k = 0; k < AVATAR_COUNT; k++)
         if (s_avatarTex[k]) { UiImageRelease(dev, s_avatarTex[k]); s_avatarTex[k] = NULL; }
+    for (k = 0; k < AVATAR2_COUNT; k++)
+        if (s_avatar2Tex[k]) { UiImageRelease(dev, s_avatar2Tex[k]); s_avatar2Tex[k] = NULL; }
     for (k = 0; k < FLAG_COUNTRIES; k++)
         if (s_flagTex[k]) { UiImageRelease(dev, s_flagTex[k]); s_flagTex[k] = NULL; }
 }
 
-// The LAIKA team's avatar: the logo's mark on a dark disc in a gold ring. Not in the grid: RB pressed 7
-// times there shows it (online_pick_avatar). The server keeps avatars 0..63, so every player sees it.
+// The LAIKA team's avatar: the logo's mark on a dark disc in a gold ring. Not in the grid: Y pressed 7
+// times there shows it (online_pick_avatar). The server keeps it as 63, so every player sees it.
 #define AVATAR_LAIKA 63
 #define AVATAR_LAIKA_RING D3DCOLOR_ARGB(255, 232, 186, 74)
 
@@ -10383,6 +11686,12 @@ static void online_avatar(float cx, float cy, float r, int avatar, const char *t
 {
     const int k = (unsigned)avatar % AVATAR_COUNT;
     const unsigned rgb = s_avatarDisc[k];
+    if (avatar >= AVATAR2_BASE && avatar < AVATAR2_BASE + AVATAR2_COUNT && s_avatar2Tex[avatar - AVATAR2_BASE])
+    {
+        // A colour one: its round picture, disc and all.
+        UiImage(s_avatar2Tex[avatar - AVATAR2_BASE], cx - r, cy - r, r * 2, r * 2, 0, D3DCOLOR_ARGB(255, 255, 255, 255));
+        return;
+    }
     if (avatar == AVATAR_LAIKA)
     {
         IDirect3DTexture9 *em = UiLaikaEmblem();
@@ -10406,25 +11715,88 @@ static void online_avatar(float cx, float cy, float r, int avatar, const char *t
 // The avatar chosen from all of them in a grid: the D-pad moves, A takes it (its number), B leaves (-1).
 // RB pressed 7 times adds the LAIKA team's avatar after the others (and picks it); a player who has it
 // sees it there from the start.
-static int online_pick_avatar(IDirect3DDevice9 *dev, int sel, const char *tag)
+// The online screens come in as the ROM list's views do (B): under a veil that lifts, here in 0.35 s - each
+// screen opened, and the one gone back to. `screen`: which one (its function's name); also when it was not
+// drawn the frame before.
+static const char *s_onlineScreen = "";
+static unsigned s_onlineFrame;
+static float s_onlineAt = -10.0f;
+static void online_begin(IDirect3DDevice9 *dev, const char *screen)
 {
-    const int cols = 11;
+    const unsigned frame = UiFrameCount();
+    if (strcmp(screen, s_onlineScreen) || frame - s_onlineFrame > 2) s_onlineAt = UiTime();
+    s_onlineScreen = screen;
+    s_onlineFrame = frame;
+    s_onlineDrawing = 1;
+    s_onlineRectN = 0;
+    UiBegin(dev);
+}
+
+// The entrance, over the screen just drawn: the loading window (online_busy's) first, then its border
+// stretching out into each of the screen's frames in turn (their own colour, a light on each), the screen
+// under a veil that lifts once they are in place (0.5 s in all; 0.95 s felt slow going from section to section).
+static void online_end(void)
+{
+    const float t = UiTime() - s_onlineAt;
+    if (t >= 0.0f && t < 0.5f)
+    {
+        const float veil = t < 0.25f ? 0.9f : 0.9f * (1.0f - ease_out((t - 0.25f) / 0.2f));
+        int i;
+        if (veil > 0) UiRect(0, 0, UI_WIDTH, UI_HEIGHT, UiAlpha(UI_COL_BG_BOTTOM, veil));
+        online_mini(NULL, t < 0.06f ? 1.0f : 1.0f - ease_out((t - 0.06f) / 0.08f), 1.0f);
+        for (i = 0; i < s_onlineRectN && t > 0.06f; i++)
+        {
+            const float e = ease_out((t - 0.08f - i * 0.03f) / 0.25f), fade = t < 0.36f ? 1.0f : 1.0f - ease_out((t - 0.36f) / 0.12f);
+            const float mx = (UI_WIDTH - ONLINE_MINI_W) * 0.5f, my = (UI_HEIGHT - ONLINE_MINI_H) * 0.5f;
+            const float x = mx + (s_onlineRects[i][0] - mx) * e, y = my + (s_onlineRects[i][1] - my) * e;
+            const float w = ONLINE_MINI_W + (s_onlineRects[i][2] - ONLINE_MINI_W) * e, h = ONLINE_MINI_H + (s_onlineRects[i][3] - ONLINE_MINI_H) * e;
+            const D3DCOLOR edge = i % 2 ? D3DCOLOR_ARGB((int)(200 * fade), 170, 140, 255) : D3DCOLOR_ARGB((int)(200 * fade), 90, 200, 255);
+            if (fade <= 0) continue;
+            UiRoundRect(x, y, w, h, 18, D3DCOLOR_ARGB((int)(120 * fade * veil), 14, 14, 30), D3DCOLOR_ARGB((int)(120 * fade * veil), 14, 14, 30));
+            UiRoundRing(x, y, w, h, 18, 2.0f, edge);
+            if (e < 1.0f) net_border(x, y, w, h, 18, (1.0f - e * 0.6f) * fade);
+        }
+    }
+    s_onlineDrawing = 0;
+    UiEnd();
+}
+
+static void online_tab_bar(float lx, float y, const char *title, const int *labels, const int *counts, int n, int cur);   // (below)
+// The avatar picker: a tab per set (LB/RB) - the classic icons (with the team's one once unlocked: Y pressed 7 times), then
+// the colour sets (Pixel Art, Robots, Characters) - the one chosen big on the left with the gamertag and as a chat line.
+// The avatar number, or -1 (B).
+static int online_pick_avatar(IDirect3DDevice9 *dev, int cur, const char *tag)
+{
+    static const int labels[1 + AVATAR2_SETS] = { T_AV_TAB_CLASSIC, T_AV_TAB_PIXEL, T_AV_TAB_ROBOTS, T_AV_TAB_CHARS };
+    static const char *const credits[1 + AVATAR2_SETS] = {
+        "game-icons.net (CC BY 3.0)", "Pixel Art: DiceBear (CC0)", "Bottts: Pablo Stanley", "Twemoji (CC BY 4.0)" };
     UiInput in;
-    int k, rbPresses = 0, laika = sel == AVATAR_LAIKA;
-    if (laika) sel = AVATAR_COUNT;   // its cell: after the others
-    if (sel < 0 || sel > AVATAR_COUNT || (sel == AVATAR_COUNT && !laika)) sel = 0;
+    int k, yPresses = 0, laika = cur == AVATAR_LAIKA, tab = 0, sel = 0;
+    if (cur >= AVATAR2_BASE && cur < AVATAR2_BASE + AVATAR2_COUNT) { tab = 1 + (cur - AVATAR2_BASE) / AVATAR2_PER_SET; sel = (cur - AVATAR2_BASE) % AVATAR2_PER_SET; }
+    else if (laika) sel = AVATAR_COUNT;   // its cell: after the others
+    else if (cur > 0 && cur < AVATAR_COUNT) sel = cur;
     UiInputInit(&in);
     for (;;)
     {
-        const float w = 820, h = 520, x = (UI_WIDTH - w) * 0.5f, y = 112, cell = 66, gx = x + (w - cols * cell) * 0.5f, gy = y + 120;
-        const int cells = AVATAR_COUNT + (laika ? 1 : 0), rows = (cells + cols - 1) / cols;
+        const float w = UI_WIDTH - 2 * UI_SAFE_X, h = 520, x = UI_SAFE_X, y = 112, lx = x + 26, lw = w - 52;
+        // The grid: 12 small cells for the classic icons, 8 big ones for a colour set.
+        const int cols = tab ? 8 : 12, cells = tab ? AVATAR2_PER_SET : AVATAR_COUNT + (laika ? 1 : 0), rows = (cells + cols - 1) / cols;
+        const float cell = tab ? 96 : 64, gx = x + w - 26 - cols * cell, gy = y + 96;
+        const float pcx = lx + (gx - lx) * 0.5f - 10, pcy = y + 200;
         WORD down = UiInputPoll(&in);
-        int row = sel / cols, col = sel % cols;
+        int row = sel / cols, col = sel % cols, chosen;
         if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) { xb_audio_ui_sound(XB_SFX_BACK); return -1; }
-        if (down & XINPUT_GAMEPAD_A) { xb_audio_ui_sound(XB_SFX_SELECT); return sel >= AVATAR_COUNT ? AVATAR_LAIKA : sel; }
-        if ((down & XINPUT_GAMEPAD_RIGHT_SHOULDER) && !laika && ++rbPresses >= 7)
+        if (down & (XINPUT_GAMEPAD_LEFT_SHOULDER | XINPUT_GAMEPAD_RIGHT_SHOULDER))
+        {
+            tab = (tab + ((down & XINPUT_GAMEPAD_RIGHT_SHOULDER) ? 1 : AVATAR2_SETS)) % (1 + AVATAR2_SETS);
+            sel = 0;
+            xb_audio_ui_sound(XB_SFX_TAB);
+            continue;
+        }
+        if ((down & XINPUT_GAMEPAD_Y) && !laika && ++yPresses >= 7)
         {
             laika = 1;
+            tab = 0;
             sel = AVATAR_COUNT;
             xb_audio_ui_sound(XB_SFX_NOTIFY);
             continue;
@@ -10439,34 +11811,60 @@ static int online_pick_avatar(IDirect3DDevice9 *dev, int sel, const char *tag)
             if (sel >= cells) sel = cells - 1;   // the last row is short
             xb_audio_ui_sound(XB_SFX_MOVE);
         }
+        chosen = tab ? AVATAR2_BASE + (tab - 1) * AVATAR2_PER_SET + sel : sel >= AVATAR_COUNT ? AVATAR_LAIKA : sel;
+        if (down & XINPUT_GAMEPAD_A) { xb_audio_ui_sound(XB_SFX_SELECT); return chosen; }
         dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
-        UiBegin(dev);
-        hub_frame(Tr(T_ONLINE_AVATAR), NULL, x, y, w, h);
-        // The one chosen, big, with the gamertag beside it (and the team's name under it for the LAIKA one).
-        online_avatar(x + w * 0.5f - 80, y + 60, 38, sel >= AVATAR_COUNT ? AVATAR_LAIKA : sel, tag);
-        UiText(UI_BOLD, 26, x + w * 0.5f - 28, y + (sel >= AVATAR_COUNT ? 48 : 60), UI_COL_TEXT, tag, UI_LEFT);
-        if (sel >= AVATAR_COUNT) UiText(UI_BOLD, 16, x + w * 0.5f - 28, y + 78, AVATAR_LAIKA_RING, Tr(T_ONLINE_TEAM), UI_LEFT);
+        online_begin(dev, __FUNCTION__);
+        hub_frame("", NULL, x, y, w, h);
+        UiOnlineLogo(UI_WIDTH * 0.5f, y - 46, 60);
+        online_tab_bar(lx, y, Tr(T_ONLINE_AVATAR), labels, NULL, 1 + AVATAR2_SETS, tab);
+        UiRect(lx, y + 74, lw, 1, UI_COL_LINE);
+        // The one chosen, big, a glow round it; the gamertag (the team's name under it for the LAIKA one); as a chat line.
+        UiShadow(pcx - 84, pcy - 84, 168, 168, 84, 26, D3DCOLOR_ARGB(110, 150, 120, 255));
+        online_avatar(pcx, pcy, 80, chosen, tag);
+        UiRoundRing(pcx - 84, pcy - 84, 168, 168, 84, 3, chosen == AVATAR_LAIKA ? AVATAR_LAIKA_RING : D3DCOLOR_ARGB(255, 190, 170, 255));
+        UiText(UI_BOLD, 28, pcx, pcy + 116, D3DCOLOR_ARGB(255, 190, 165, 255), tag, UI_CENTER);
+        UiText(UI_REGULAR, 15, pcx, pcy + 146, chosen == AVATAR_LAIKA ? AVATAR_LAIKA_RING : UI_COL_TEXT3,
+               chosen == AVATAR_LAIKA ? Tr(T_ONLINE_TEAM) : Tr(T_AV_PREVIEW), UI_CENTER);
+        {
+            const float bx = lx, by = y + h - 76, bw = gx - lx - 40, tw = UiTextWidth(UI_BOLD, 16, tag);
+            UiRoundRect(bx, by, bw, 46, 14, D3DCOLOR_ARGB(34, 150, 120, 255), D3DCOLOR_ARGB(34, 150, 120, 255));
+            online_avatar(bx + 27, by + 23, 15, chosen, tag);
+            UiText(UI_BOLD, 16, bx + 52, by + 23, D3DCOLOR_ARGB(255, 190, 165, 255), tag, UI_LEFT);
+            UiText(UI_REGULAR, 16, bx + 62 + tw, by + 23, UI_COL_TEXT, Tr(T_AV_SAMPLE), UI_LEFT);
+        }
+        // The grid: the one chosen on a lit cell, a little bigger.
         for (k = 0; k < cells; k++)
         {
-            const float cx = gx + (k % cols) * cell + cell * 0.5f, cy = gy + (k / cols) * cell + cell * 0.5f;
-            if (k == sel) UiRoundRing(cx - cell * 0.5f + 2, cy - cell * 0.5f + 2, cell - 4, cell - 4, 14, 3, UI_COL_ACCENT_HI);
-            online_avatar(cx, cy, k == sel ? 27 : 24, k >= AVATAR_COUNT ? AVATAR_LAIKA : k, tag);
+            const float cx = gx + (k % cols) * cell + cell * 0.5f, cy = gy + (k / cols) * (cell + (tab ? 8 : 0)) + cell * 0.5f, c = cell - 12;
+            const int av = tab ? AVATAR2_BASE + (tab - 1) * AVATAR2_PER_SET + k : k >= AVATAR_COUNT ? AVATAR_LAIKA : k;
+            if (k == sel)
+            {
+                UiShadow(cx - c * 0.5f - 2, cy - c * 0.5f - 2, c + 4, c + 4, 18, 10, D3DCOLOR_ARGB(120, 150, 120, 255));
+                UiRoundRect(cx - c * 0.5f - 2, cy - c * 0.5f - 2, c + 4, c + 4, 18, SEL_HI(255), SEL_HI(220));
+                UiRoundRing(cx - c * 0.5f - 2, cy - c * 0.5f - 2, c + 4, c + 4, 18, 3, D3DCOLOR_ARGB(255, 190, 170, 255));
+            }
+            else if (tab) UiRoundRect(cx - c * 0.5f, cy - c * 0.5f, c, c, 16, D3DCOLOR_ARGB(10, 255, 255, 255), D3DCOLOR_ARGB(10, 255, 255, 255));
+            online_avatar(cx, cy, c * (k == sel ? 0.46f : 0.41f), av, tag);
         }
-        UiScreenFooter(Tr(T_FOOT_ONLINE));
-        UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
+        UiText(UI_REGULAR, 13, x + w - 26, y + h - 22, D3DCOLOR_ARGB(255, 110, 112, 128), credits[tab], UI_RIGHT);
+        UiScreenFooter(Tr(T_FOOT_ONLINE_AVATAR));
+        online_end();
+        UiPresent(dev);
     }
 }
 
-// The frame shown while a request waits for the server.
+// Every online wait (one frame, then the request): the loading window, over the screen dimmed; the screen
+// that follows grows out of it (online_end).
 static void online_busy(IDirect3DDevice9 *dev, const char *title, int text)
 {
-    const float w = 820, h = 520, x = (UI_WIDTH - w) * 0.5f, y = 112;
     dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
     UiBegin(dev);
-    hub_frame(title, NULL, x, y, w, h);
-    UiText(UI_REGULAR, 20, x + w * 0.5f, y + h * 0.5f, UI_COL_TEXT2, Tr(text), UI_CENTER);
+    UiBackdrop();
+    browser_effect();
+    UiRect(0, 0, UI_WIDTH, UI_HEIGHT, UiAlpha(UI_COL_BG_BOTTOM, 0.9f));
+    online_mini(title, 1.0f, 1.0f);
+    (void)text;   // (what it waits for: the spinner says it)
     UiEnd();
     dev->Present(NULL, NULL, NULL, NULL);
 }
@@ -10500,15 +11898,100 @@ static void online_time(int minutes, char *out, size_t size)
     out[size - 1] = 0;
 }
 
+// A message's text with its emojis in it (xb_menu.h).
+#define RICH_EM 1.4f   // an emoji, size x this across
+static int rich_emoji_at(const char *t, int whole)
+{
+    // "@eNN" (an emoji in a message: two digits); `whole`: a message "@eN" that is only its emoji (the quick chat's).
+    if (t[0] != '@' || t[1] != 'e' || t[2] < '0' || t[2] > '9') return -1;
+    if (t[3] >= '0' && t[3] <= '9') return (t[2] - '0') * 10 + (t[3] - '0');
+    return whole ? t[2] - '0' : -1;
+}
+
+int RichText(int font, float size, float x, float cy, float maxW, int maxLines, D3DCOLOR color, const char *text, int draw, float *widest)
+{
+    const float em = size * RICH_EM, sp = size * 0.3f, lineH = size * 1.35f;
+    const int whole = rich_emoji_at(text, 1) >= 0 && strlen(text) <= 4;
+    float lineW = 0, most = 0;
+    int line = 0, i = 0, n = (int)strlen(text);
+    while (i < n && line < maxLines)
+    {
+        // A word: up to the next space, its pieces text and emojis.
+        int j = i, cut;
+        float ww = 0;
+        while (j < n && text[j] != ' ')
+        {
+            const int e = rich_emoji_at(text + j, whole);
+            if (e >= 0) { ww += em; j += whole ? n - j : 4; continue; }
+            {
+                int k = j;
+                char seg[200];
+                while (k < n && text[k] != ' ' && rich_emoji_at(text + k, whole) < 0 && k - j < (int)sizeof(seg) - 1) k++;
+                memcpy(seg, text + j, k - j);
+                seg[k - j] = 0;
+                ww += UiTextWidth(font, size, seg);
+                j = k;
+            }
+        }
+        if (lineW > 0 && lineW + sp + ww > maxW)
+        {
+            // The next line (or the end, "..." after the last one).
+            if (line + 1 >= maxLines)
+            {
+                if (draw) UiText(font, size, x + lineW + sp * 0.5f, cy + line * lineH, color, "...", UI_LEFT);
+                if (lineW + sp + UiTextWidth(font, size, "...") > most) most = lineW + sp + UiTextWidth(font, size, "...");
+                line++;
+                break;
+            }
+            if (lineW > most) most = lineW;
+            line++;
+            lineW = 0;
+        }
+        if (lineW > 0) lineW += sp;
+        for (cut = i; cut < j;)
+        {
+            // The word's pieces, drawn.
+            const int e = rich_emoji_at(text + cut, whole);
+            if (e >= 0)
+            {
+                IDirect3DTexture9 *tex = EmojiTex(e);
+                if (draw && tex) UiImage(tex, x + lineW, cy + line * lineH - em * 0.5f, em, em, 0, D3DCOLOR_ARGB((color >> 24) & 0xFF, 255, 255, 255));
+                lineW += em;
+                cut += whole ? n - cut : 4;
+            }
+            else
+            {
+                int k = cut;
+                char seg[200];
+                while (k < j && rich_emoji_at(text + k, whole) < 0 && k - cut < (int)sizeof(seg) - 1) k++;
+                memcpy(seg, text + cut, k - cut);
+                seg[k - cut] = 0;
+                lineW += draw ? UiText(font, size, x + lineW, cy + line * lineH, color, seg, UI_LEFT) : UiTextWidth(font, size, seg);
+                cut = k;
+            }
+        }
+        i = j;
+        while (i < n && text[i] == ' ') i++;
+        if (i >= n) line++;
+    }
+    if (lineW > most) most = lineW;
+    if (widest) *widest = most;
+    return line > 0 ? (line < maxLines ? line : maxLines) : (n ? 1 : 0);
+}
+
 // The on-screen keyboard: the D-pad moves over the keys, A types, X deletes, Y changes the letters' case
 // (RB a space in a message), START takes the text (minLen characters at least). The keys: a gamertag's
 // or a password's (KBD_NAME: letters, numbers, _), a code's (KBD_DIGITS) or a message's (KBD_CHAT:
-// punctuation too). Used whole screen (online_keyboard) or under the general chat, always shown there.
+// punctuation, the ñ, a space bar; LT turns it to the emojis). Used whole screen (online_keyboard), under the
+// general chat, in a conversation and over a game (the quick chat).
+#define KBD_ENYE '\x01'    // a message's key for the ñ (two bytes of UTF-8 typed)
+#define KBD_SPACE '\x02'   // ... and its space bar (six keys wide)
+#define KBD_EMOJI_COLS 7
 static const char *const *kbd_keys(const OnlineKbd *k, int *rows)
 {
     // The letters as a QWERTY keyboard's, under its row of numbers.
     static const char *const names[] = { "1234567890", "QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM_" },
-                      *const chat[] = { "1234567890", "QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM.,!?", "-:()'@#+=_" },
+                      *const chat[] = { "1234567890", "QWERTYUIOP", "ASDFGHJKL\x01", "ZXCVBNM.,?", "@!\x02-_" },
                       *const nums[] = { "12345", "67890" };
     *rows = k->mode == KBD_DIGITS ? 2 : k->mode == KBD_CHAT ? 5 : 4;
     return k->mode == KBD_DIGITS ? nums : k->mode == KBD_CHAT ? chat : names;
@@ -10523,6 +12006,16 @@ void kbd_init(OnlineKbd *k, char *out, int minLen, int maxLen, int mode)
     k->row = mode == KBD_DIGITS ? 0 : 1;   // the letters first, under the numbers
     k->col = 0;
     k->lower = mode == KBD_CHAT;
+    k->emoji = 0;
+}
+
+void kbd_toggle_emoji(OnlineKbd *k)
+{
+    if (k->mode != KBD_CHAT) return;
+    k->emoji = !k->emoji;
+    k->row = k->emoji ? 0 : 1;
+    k->col = 0;
+    xb_audio_ui_sound(XB_SFX_TAB);
 }
 
 // One press: 1 when START takes the text, 0 otherwise (B is the caller's).
@@ -10530,31 +12023,45 @@ int kbd_input(OnlineKbd *k, WORD down)
 {
     int rows, cols, len = (int)strlen(k->out);
     const char *const *keys = kbd_keys(k, &rows);
+    const int emojis = EmojiCount(), erows = (emojis + KBD_EMOJI_COLS - 1) / KBD_EMOJI_COLS;
+    if (k->emoji) rows = erows;
     if (down & XINPUT_GAMEPAD_DPAD_UP) k->row = (k->row + rows - 1) % rows;
     if (down & XINPUT_GAMEPAD_DPAD_DOWN) k->row = (k->row + 1) % rows;
-    cols = (int)strlen(keys[k->row]);
+    cols = k->emoji ? (k->row < erows - 1 ? KBD_EMOJI_COLS : emojis - (erows - 1) * KBD_EMOJI_COLS) : (int)strlen(keys[k->row]);
     if (k->col >= cols) k->col = cols - 1;
     if (down & XINPUT_GAMEPAD_DPAD_LEFT) k->col = (k->col + cols - 1) % cols;
     if (down & XINPUT_GAMEPAD_DPAD_RIGHT) k->col = (k->col + 1) % cols;
     if (down & (XINPUT_GAMEPAD_DPAD_UP | XINPUT_GAMEPAD_DPAD_DOWN | XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT)) xb_audio_ui_sound(XB_SFX_MOVE);
     if (down & (XINPUT_GAMEPAD_A | (k->mode == KBD_CHAT ? XINPUT_GAMEPAD_RIGHT_SHOULDER : 0)))
     {
-        const int space = (down & XINPUT_GAMEPAD_RIGHT_SHOULDER) != 0;
-        if (len < k->maxLen && !(space && (!len || k->out[len - 1] == ' ')))
+        const int space = (down & XINPUT_GAMEPAD_RIGHT_SHOULDER) != 0 || (!k->emoji && keys[k->row][k->col] == KBD_SPACE);
+        char add[8];
+        int n;
+        if (space) strcpy(add, " ");
+        else if (k->emoji) _snprintf(add, sizeof(add), "@e%02d", k->row * KBD_EMOJI_COLS + k->col);   // its emoji, in the text
+        else if (keys[k->row][k->col] == KBD_ENYE) strcpy(add, k->lower ? "\xC3\xB1" : "\xC3\x91");
+        else { add[0] = k->lower ? (char)tolower((unsigned char)keys[k->row][k->col]) : keys[k->row][k->col]; add[1] = 0; }
+        n = (int)strlen(add);
+        if (len + n <= k->maxLen && !(space && (!len || k->out[len - 1] == ' ')))
         {
-            char ch = space ? ' ' : keys[k->row][k->col];
-            k->out[len++] = k->lower ? (char)tolower((unsigned char)ch) : ch;
-            k->out[len] = 0;
+            memcpy(k->out + len, add, n + 1);
             xb_audio_ui_sound(XB_SFX_SELECT);
         }
         else xb_audio_ui_sound(XB_SFX_ERROR);
     }
     if (down & XINPUT_GAMEPAD_X)
     {
-        if (len) k->out[--len] = 0;
+        // The last character: an emoji's four, a ñ's two bytes, or one.
+        if (len >= 4 && rich_emoji_at(k->out + len - 4, 0) >= 0) len -= 4;
+        else if (len)
+        {
+            len--;
+            while (len > 0 && ((unsigned char)k->out[len] & 0xC0) == 0x80) len--;
+        }
+        k->out[len] = 0;
         xb_audio_ui_sound(XB_SFX_BACK);
     }
-    if (k->mode != KBD_DIGITS && (down & XINPUT_GAMEPAD_Y)) { k->lower = !k->lower; xb_audio_ui_sound(XB_SFX_ACTION); }
+    if (k->mode != KBD_DIGITS && !k->emoji && (down & XINPUT_GAMEPAD_Y)) { k->lower = !k->lower; xb_audio_ui_sound(XB_SFX_ACTION); }
     if (down & XINPUT_GAMEPAD_START)
     {
         if (len >= k->minLen) { xb_audio_ui_sound(XB_SFX_SELECT); return 1; }
@@ -10563,39 +12070,81 @@ int kbd_input(OnlineKbd *k, WORD down)
     return 0;
 }
 
-// The text typed so far in a box (its end when long, a blinking bar after it), centred on cx at y.
+// The text typed so far in a box (its end when long, a blinking bar after it), centred on cx at y; its emojis drawn.
 void kbd_draw_text(const OnlineKbd *k, float cx, float y, float w, float h, float size)
 {
-    char shown[200];
-    const char *tail;
-    _snprintf(shown, sizeof(shown) - 1, "%s%s", k->out, ((int)(UiTime() * 2.0f) & 1) && (int)strlen(k->out) < k->maxLen ? "_" : " ");
-    shown[sizeof(shown) - 1] = 0;
-    for (tail = shown; *tail && UiTextWidth(UI_BOLD, size, tail) > w - 40; tail++) ;
+    const char *tail = k->out;
+    float tw = 0;
     UiRoundRect(cx - w * 0.5f, y, w, h, 14, UI_COL_CARD, UI_COL_CARD);
-    UiText(UI_BOLD, size, cx, y + h * 0.5f, UI_COL_TEXT, tail, UI_CENTER);
+    for (;;)
+    {
+        // As much of its end as fits.
+        RichText(UI_BOLD, size, 0, 0, 99999, 1, 0, tail, 0, &tw);
+        if (tw <= w - 50 || !*tail) break;
+        tail += rich_emoji_at(tail, 0) >= 0 ? 4 : 1;
+        while (((unsigned char)*tail & 0xC0) == 0x80) tail++;
+    }
+    RichText(UI_BOLD, size, cx - tw * 0.5f - 6, y + h * 0.5f, w - 40, 1, UI_COL_TEXT, tail, 1, NULL);
+    if (((int)(UiTime() * 2.0f) & 1) && (int)strlen(k->out) < k->maxLen) UiRect(cx + tw * 0.5f - 2, y + h * 0.2f, 2, h * 0.6f, UI_COL_TEXT);
 }
 
-// The keys, `key` pixels each, centred on cx from y.
-void kbd_draw_keys(const OnlineKbd *k, float cx, float y, float key, float gap)
+// A message's keyboard's tabs: ABC and the emojis (LT changes them).
+float kbd_draw_tabs(const OnlineKbd *k, float x, float cy)
+{
+    const float w1 = 70, w2 = 70;
+    IDirect3DTexture9 *smile = EmojiTex(0);
+    if (!k->emoji) { UiRoundRect(x, cy - 14, w1, 28, 14, SEL_HI(255), SEL_HI(220)); UiRoundRing(x, cy - 14, w1, 28, 14, 2.0f, D3DCOLOR_ARGB(255, 190, 170, 255)); }
+    else UiRoundRing(x, cy - 14, w1, 28, 14, 1.0f, D3DCOLOR_ARGB(50, 255, 255, 255));
+    UiText(UI_BOLD, 15, x + w1 * 0.5f, cy, k->emoji ? UI_COL_TEXT2 : UI_COL_TEXT, "ABC", UI_CENTER);
+    if (k->emoji) { UiRoundRect(x + w1 + 10, cy - 14, w2, 28, 14, SEL_HI(255), SEL_HI(220)); UiRoundRing(x + w1 + 10, cy - 14, w2, 28, 14, 2.0f, D3DCOLOR_ARGB(255, 190, 170, 255)); }
+    else UiRoundRing(x + w1 + 10, cy - 14, w2, 28, 14, 1.0f, D3DCOLOR_ARGB(50, 255, 255, 255));
+    if (smile) UiImage(smile, x + w1 + 10 + w2 * 0.5f - 10, cy - 10, 20, 20, 0, D3DCOLOR_ARGB(255, 255, 255, 255));
+    UiRoundRect(x + w1 + w2 + 22, cy - 11, 34, 22, 11, D3DCOLOR_ARGB(255, 60, 62, 76), D3DCOLOR_ARGB(255, 60, 62, 76));
+    UiText(UI_BOLD, 12, x + w1 + w2 + 39, cy, UI_COL_TEXT2, "LT", UI_CENTER);
+    return w1 + w2 + 56;
+}
+
+// The keys, keyW x keyH each (a message's space bar six wide; the emojis in their grid), centred on cx from y.
+void kbd_draw_keys_wh(const OnlineKbd *k, float cx, float y, float keyW, float keyH, float gap)
 {
     int rows, r, j;
     const char *const *keys = kbd_keys(k, &rows);
-    for (r = 0; r < rows; r++)
+    if (k->emoji)
     {
-        const int n = (int)strlen(keys[r]);
-        const float x0 = cx - (n * (key + gap) - gap) * 0.5f;
+        // The emojis, KBD_EMOJI_COLS a row, square keys.
+        const int n = EmojiCount(), cols = KBD_EMOJI_COLS;
+        const float key = keyH + 8, x0 = cx - (cols * (key + gap) - gap) * 0.5f;
         for (j = 0; j < n; j++)
         {
-            const int on = r == k->row && j == k->col;
-            const float kx = x0 + j * (key + gap), ky = y + r * (key + gap);
-            char t[2];
-            t[0] = k->lower ? (char)tolower((unsigned char)keys[r][j]) : keys[r][j];
-            t[1] = 0;
-            UiRoundRect(kx, ky, key, key, key * 0.2f, on ? UI_COL_ACCENT : UI_COL_CARD, on ? UI_COL_ACCENT : UI_COL_CARD);
-            UiText(UI_BOLD, key * 0.42f, kx + key * 0.5f, ky + key * 0.5f, on ? D3DCOLOR_ARGB(255, 255, 255, 255) : UI_COL_TEXT2, t, UI_CENTER);
+            const int rr = j / cols, cc = j % cols, on = rr == k->row && cc == k->col;
+            const float kx = x0 + cc * (key + gap), ky = y + rr * (key + gap);
+            IDirect3DTexture9 *tex = EmojiTex(j);
+            UiRoundRect(kx, ky, key, key, key * 0.22f, on ? UI_COL_ACCENT : UI_COL_CARD, on ? UI_COL_ACCENT : UI_COL_CARD);
+            if (tex) UiImage(tex, kx + key * (on ? 0.1f : 0.16f), ky + key * (on ? 0.1f : 0.16f), key * (on ? 0.8f : 0.68f), key * (on ? 0.8f : 0.68f), 0, D3DCOLOR_ARGB(255, 255, 255, 255));
+        }
+        return;
+    }
+    for (r = 0; r < rows; r++)
+    {
+        const int n = (int)strlen(keys[r]), wide = strchr(keys[r], KBD_SPACE) ? 5 : 0;
+        const float x0 = cx - ((n + wide) * (keyW + gap) - gap) * 0.5f;
+        float kx = x0;
+        for (j = 0; j < n; j++)
+        {
+            const int on = r == k->row && j == k->col, space = keys[r][j] == KBD_SPACE;
+            const float kw = space ? 6 * keyW + 5 * gap : keyW, ky = y + r * (keyH + gap);
+            char t[4];
+            if (keys[r][j] == KBD_ENYE) strcpy(t, k->lower ? "\xC3\xB1" : "\xC3\x91");
+            else { t[0] = k->lower ? (char)tolower((unsigned char)keys[r][j]) : keys[r][j]; t[1] = 0; }
+            UiRoundRect(kx, ky, kw, keyH, keyH * 0.2f, on ? UI_COL_ACCENT : UI_COL_CARD, on ? UI_COL_ACCENT : UI_COL_CARD);
+            UiText(UI_BOLD, (keyH < keyW ? keyH : keyW) * 0.42f, kx + kw * 0.5f, ky + keyH * 0.5f, on ? D3DCOLOR_ARGB(255, 255, 255, 255) : UI_COL_TEXT2,
+                   space ? Tr(T_KBD_SPACE) : t, UI_CENTER);
+            kx += kw + gap;
         }
     }
 }
+
+void kbd_draw_keys(const OnlineKbd *k, float cx, float y, float key, float gap) { kbd_draw_keys_wh(k, cx, y, key, key, gap); }
 
 // The keyboard as a whole screen: 1 with the text in `out` (START), 0 when left (B).
 static int online_keyboard(IDirect3DDevice9 *dev, const char *title, const char *hint, char *out, int minLen, int maxLen, int mode)
@@ -10618,8 +12167,7 @@ static int online_keyboard(IDirect3DDevice9 *dev, const char *title, const char 
         kbd_draw_keys(&k, cx, y + (mode == KBD_CHAT ? 176 : 200), 56, 8);
         UiScreenFooter(Tr(mode == KBD_CHAT ? T_FOOT_ONLINE_CHATKEYS : T_FOOT_ONLINE_KEYS));
         UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
+        UiPresent(dev);
     }
 }
 
@@ -10667,8 +12215,7 @@ static void ss_account_screen(IDirect3DDevice9 *dev, Config *c)
                   st == PREVIEW_ACCOUNT_OK ? UI_COL_TEXT : st == PREVIEW_ACCOUNT_CHECKING ? UI_COL_TEXT2 : UI_COL_ACCENT_HI, text);
         if (st != PREVIEW_ACCOUNT_CHECKING) UiScreenFooter(Tr(T_FOOT_SS_ACCOUNT));
         UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
+        UiPresent(dev);
     }
 }
 
@@ -10690,258 +12237,672 @@ static int online_setup(IDirect3DDevice9 *dev)
     }
 }
 
-// My profile: the gamertag or the avatar (the country is found by itself).
-static void online_profile(IDirect3DDevice9 *dev)
-{
-    const OnlineProfile *me = OnlineMe();
-    const char *labels[2];
-    char country[4] = "";
-    int v, avatar = me->avatar;
-    labels[0] = Tr(T_ONLINE_GAMERTAG);
-    labels[1] = Tr(T_ONLINE_AVATAR);
-    v = ChoiceScreen(dev, Tr(T_ONLINE_PROFILE), "", labels, 2, 0, Tr(T_FOOT_ONLINE), 1);
-    if (v < 0) return;
-    if (v == 0)
-    {
-        char tag[ONLINE_TAG_MAX + 1];
-        _snprintf(tag, sizeof(tag) - 1, "%s", me->tag);
-        tag[sizeof(tag) - 1] = 0;
-        if (!online_keyboard(dev, Tr(T_ONLINE_GAMERTAG), Tr(T_ONLINE_TAG_RULES), tag, ONLINE_TAG_MIN, ONLINE_TAG_MAX, KBD_NAME) || !strcmp(tag, me->tag)) return;
-        online_busy(dev, Tr(T_ONLINE_PROFILE), T_ONLINE_CONNECTING);
-        if (!OnlineRename(tag)) online_message(dev, Tr(T_ONLINE_GAMERTAG), online_error_text());
-        return;
-    }
-    if ((avatar = online_pick_avatar(dev, avatar, me->tag)) < 0) return;
-    online_busy(dev, Tr(T_ONLINE_PROFILE), T_ONLINE_CONNECTING);
-    _snprintf(country, sizeof(country) - 1, "%s", me->country);   // a copy: OnlineSetProfile writes the profile's own
-    if (!OnlineSetProfile(country, avatar)) online_message(dev, Tr(T_ONLINE_PROFILE), online_error_text());
-}
 
-// A player's statistics: the time played, how many games, the place in the ranking, then each game's time.
-static void online_stats(IDirect3DDevice9 *dev, const char *name)
+// A player's profile (A on a player): on the left a card - the avatar big on a band of colour, a green dot when online,
+// the gamertag in its chat colour, flag and country, what it does now, then friends since when, its connection, the
+// games played together; on the right three tiles (time played, games, place in the ranking) and the games it played
+// most: a medal for the first three, the box art when this console has it in its cache (the game's initial on a
+// colour when not), a bar of its share of the time. X a message (friends), Y asks a friendship (others). 1 when a game
+// starts (from the conversation).
+static void online_me_corner(float x, float y, float w);                // below
+static int online_conversation(IDirect3DDevice9 *dev, const char *with, int avatar);   // below (1: a game starts)
+static D3DCOLOR online_tag_colour(const char *tag);                    // below, with the chat
+static float online_ping_bars(float x, float cy, float h, int ms);
+static float online_conn_tag(float rx, float cy, int conn);
+#define PROFILE_COVER_W 34
+#define PROFILE_COVER_H 42
+static int online_stats(IDirect3DDevice9 *dev, const char *name)
 {
+    static const D3DCOLOR gameCol[6] = { D3DCOLOR_ARGB(255, 240, 90, 90), D3DCOLOR_ARGB(255, 255, 160, 60), D3DCOLOR_ARGB(255, 90, 170, 255),
+                                         D3DCOLOR_ARGB(255, 180, 120, 255), D3DCOLOR_ARGB(255, 90, 210, 150), D3DCOLOR_ARGB(255, 240, 200, 80) };
+    static const D3DCOLOR medal[3] = { D3DCOLOR_ARGB(255, 232, 186, 74), D3DCOLOR_ARGB(255, 200, 205, 215), D3DCOLOR_ARGB(255, 205, 135, 80) };
     OnlineStats st;
     UiInput in;
-    const int rows = 6;
-    int top = 0, k;
+    std::vector<IDirect3DTexture9 *> cover;
+    std::vector<int> coverW, coverH, coverTried;
+    char note[120] = "";
+    DWORD noteAt = 0;
+    const int rows = 6, isMe = !_stricmp(name, OnlineMe()->tag);
+    int top = 0, k, result = 0;
     online_busy(dev, Tr(T_ONLINE_STATS), T_ONLINE_CONNECTING);
-    if (!OnlineStatsOf(name, &st)) { online_message(dev, Tr(T_ONLINE_STATS), online_error_text()); return; }
+    if (!OnlineStatsOf(name, &st)) { online_message(dev, Tr(T_ONLINE_STATS), online_error_text()); return 0; }
+    cover.assign(st.list.size(), (IDirect3DTexture9 *)NULL);
+    coverW.assign(st.list.size(), 0);
+    coverH.assign(st.list.size(), 0);
+    coverTried.assign(st.list.size(), 0);
     UiInputInit(&in);
     for (;;)
     {
-        const float w = 820, h = 520, x = (UI_WIDTH - w) * 0.5f, y = 112, rowH = 52, tw = (w - 48 - 32) / 3, ly = y + 150;
-        const int n = (int)st.list.size();
+        const float w = UI_WIDTH - 2 * UI_SAFE_X, h = 520, x = UI_SAFE_X, y = 112;
+        const float lx0 = x + 18, lx1 = x + 326, ccx = (lx0 + lx1) * 0.5f, rx0 = x + 350, rx1 = x + w - 18;
+        const int n = (int)st.list.size(), friends = st.isFriend == 1;
+        int total = 0, loads = 1;
         WORD down = UiInputPoll(&in);
-        char value[3][48];
-        if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) { xb_audio_ui_sound(XB_SFX_BACK); return; }
+        if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) { xb_audio_ui_sound(XB_SFX_BACK); break; }
         if ((down & XINPUT_GAMEPAD_DPAD_DOWN) && top + rows < n) { top++; xb_audio_ui_sound(XB_SFX_MOVE); }
         if ((down & XINPUT_GAMEPAD_DPAD_UP) && top > 0) { top--; xb_audio_ui_sound(XB_SFX_MOVE); }
-        dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
-        UiBegin(dev);
-        hub_frame(Tr(T_ONLINE_STATS), name, x, y, w, h);
-        online_time(st.minutes, value[0], sizeof(value[0]));
-        _snprintf(value[1], sizeof(value[1]), "%d", st.games);
-        _snprintf(value[2], sizeof(value[2]), "#%d", st.rank);
-        for (k = 0; k < 3; k++)
-        {
-            static const int labels[3] = { T_ONLINE_TOTAL, T_ONLINE_GAMES, T_ONLINE_POS };
-            const float tx = x + 24 + k * (tw + 16), ty = y + 24;
-            UiRoundRect(tx, ty, tw, 96, 14, UI_COL_CARD, UI_COL_CARD);
-            UiText(UI_REGULAR, 16, tx + tw * 0.5f, ty + 30, UI_COL_TEXT2, Tr(labels[k]), UI_CENTER);
-            UiText(UI_BOLD, 26, tx + tw * 0.5f, ty + 64, UI_COL_ACCENT_HI, value[k], UI_CENTER);
-        }
-        if (!n) UiText(UI_REGULAR, 20, x + w * 0.5f, ly + 150, UI_COL_TEXT2, Tr(T_ONLINE_EMPTY), UI_CENTER);
-        for (k = 0; k < rows && top + k < n; k++)
-        {
-            const float cy = ly + k * rowH + rowH * 0.5f;
-            char fit[120], t[48];
-            UiTextFit(UI_REGULAR, 19, w - 280, st.list[top + k].game.c_str(), fit, sizeof(fit));
-            online_time(st.list[top + k].minutes, t, sizeof(t));
-            UiText(UI_REGULAR, 19, x + 30, cy, UI_COL_TEXT, fit, UI_LEFT);
-            UiText(UI_REGULAR, 18, x + w - 30, cy, UI_COL_TEXT2, t, UI_RIGHT);
-            UiRect(x + 24, ly + (k + 1) * rowH, w - 48, 1, UI_COL_LINE);
-        }
-        UiScreenFooter(Tr(T_FOOT_BACK_ONLY));
-        UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
-    }
-}
-
-// The players (all, the friends, or the ranking): A a player's statistics, X makes one a friend or not.
-static void online_list(IDirect3DDevice9 *dev, int kind)
-{
-    static UiAnim selAnim;
-    const char *title = Tr(kind == ONLINE_LIST_FRIENDS ? T_ONLINE_FRIENDS : kind == ONLINE_LIST_RANK ? T_ONLINE_RANK : T_ONLINE_USERS);
-    const int rank = kind == ONLINE_LIST_RANK;
-    std::vector<OnlineUser> users, more;
-    UiInput in;
-    const int rows = 9;
-    int sel = 0, top = 0, k, n, full;
-    online_busy(dev, title, T_ONLINE_CONNECTING);
-    if (!OnlineList(kind, 0, &users)) { online_message(dev, title, online_error_text()); return; }
-    full = kind != ONLINE_LIST_FRIENDS && users.size() == 50;   // a full page: there may be more
-    UiInputInit(&in);
-    for (;;)
-    {
-        const float w = 820, h = 520, x = (UI_WIDTH - w) * 0.5f, y = 112, rowH = 52, pad = 14;
-        WORD down = UiInputPoll(&in);
-        float sy;
-        n = (int)users.size();
-        if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) { xb_audio_ui_sound(XB_SFX_BACK); return; }
-        if (n && (down & XINPUT_GAMEPAD_DPAD_DOWN) && sel == n - 1 && full)
-        {
-            // The end of what was read: the next page.
-            online_busy(dev, title, T_ONLINE_CONNECTING);
-            full = OnlineList(kind, n, &more) && !more.empty();
-            users.insert(users.end(), more.begin(), more.end());
-            if (more.size() < 50) full = 0;
-            n = (int)users.size();
-            if (sel < n - 1) sel++;
-            UiInputInit(&in);
-        }
-        else if (n && (down & (XINPUT_GAMEPAD_DPAD_UP | XINPUT_GAMEPAD_DPAD_DOWN)))
-        {
-            sel = (sel + ((down & XINPUT_GAMEPAD_DPAD_DOWN) ? 1 : n - 1)) % n;
-            xb_audio_ui_sound(XB_SFX_MOVE);
-        }
-        if (n && (down & (XINPUT_GAMEPAD_LEFT_SHOULDER | XINPUT_GAMEPAD_RIGHT_SHOULDER)))
-        {
-            sel = (down & XINPUT_GAMEPAD_RIGHT_SHOULDER) ? (sel + rows < n ? sel + rows : n - 1) : (sel > rows ? sel - rows : 0);
-            xb_audio_ui_sound(XB_SFX_PAGE);
-        }
-        if (n && (down & XINPUT_GAMEPAD_A))
+        if (!isMe && friends && (down & XINPUT_GAMEPAD_X))
         {
             xb_audio_ui_sound(XB_SFX_SELECT);
-            online_stats(dev, users[sel].name);
+            if (online_conversation(dev, name, st.avatar)) { result = 1; break; }
             UiInputInit(&in);
             continue;
         }
-        if (n && !rank && (down & XINPUT_GAMEPAD_X) && _stricmp(users[sel].name, OnlineMe()->tag))
+        if (!isMe && !st.isFriend && (down & XINPUT_GAMEPAD_Y))
         {
-            const int add = !users[sel].isFriend;
             char how[16] = "";
-            if (users[sel].isFriend == 1)
+            xb_audio_ui_sound(XB_SFX_SELECT);
+            online_busy(dev, Tr(T_ONLINE_FRIENDS), T_ONLINE_CONNECTING);
+            if (OnlineFriend(name, 1, how, sizeof(how)))
             {
-                const char *labels[2];
-                char q[96];
-                labels[0] = Tr(T_ONLINE_UNFRIEND);
-                labels[1] = Tr(T_ONLINE_KICK_NO);
-                _snprintf(q, sizeof(q) - 1, Tr(T_ONLINE_UNFRIEND_ASK), users[sel].name);
-                q[sizeof(q) - 1] = 0;
-                if (ChoiceScreen(dev, Tr(T_ONLINE_FRIENDS), q, labels, 2, 1, Tr(T_FOOT_ONLINE), 1) != 0) { UiInputInit(&in); continue; }
+                _snprintf(note, sizeof(note) - 1, Tr(strcmp(how, "sent") ? T_ONLINE_NOW_FRIENDS : T_ONLINE_REQUEST_SENT), name);
+                note[sizeof(note) - 1] = 0;
+                st.isFriend = strcmp(how, "sent") ? 1 : 2;
+                if (st.isFriend == 1) st.friendDays = 0;
             }
-            online_busy(dev, title, T_ONLINE_CONNECTING);
-            if (OnlineFriend(users[sel].name, add, how, sizeof(how)))
-            {
-                char t[96];
-                xb_audio_ui_sound(add ? XB_SFX_VALUE_UP : XB_SFX_VALUE_DOWN);
-                users[sel].isFriend = !add ? 0 : strcmp(how, "sent") ? 1 : 2;
-                if (add)
-                {
-                    _snprintf(t, sizeof(t) - 1, Tr(users[sel].isFriend == 2 ? T_ONLINE_REQUEST_SENT : T_ONLINE_NOW_FRIENDS), users[sel].name);
-                    t[sizeof(t) - 1] = 0;
-                    online_message(dev, Tr(T_ONLINE_FRIENDS), t);
-                }
-                if (kind == ONLINE_LIST_FRIENDS && !add)
-                {
-                    users.erase(users.begin() + sel);
-                    if (sel && sel >= (int)users.size()) sel--;
-                }
-            }
-            else xb_audio_ui_sound(XB_SFX_ERROR);
+            else _snprintf(note, sizeof(note) - 1, "%s", online_error_text());
+            noteAt = GetTickCount();
             UiInputInit(&in);
             continue;
         }
-        if (sel < top) top = sel;
-        if (sel >= top + rows) top = sel - rows + 1;
+        for (k = 0; k < n; k++) total += st.list[k].minutes;
         dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
-        UiBegin(dev);
-        hub_frame(title, NULL, x, y, w, h);
-        if (!n) UiText(UI_REGULAR, 20, x + w * 0.5f, y + h * 0.5f, UI_COL_TEXT2, Tr(T_ONLINE_EMPTY), UI_CENTER);
-        else
+        online_begin(dev, __FUNCTION__);
+        hub_frame("", NULL, x, y, w, h);
+        UiOnlineLogo(UI_WIDTH * 0.5f, y - 46, 60);
+        online_me_corner(x, y, w);
         {
-            sy = anim_step(&selAnim, y + pad + (sel - top) * rowH, 0);
-            selection_bar(x + 10, sy + 1, w - 20, rowH - 2);
+            // The card: its frame, a band of colour fading down behind the avatar.
+            const float cy = y + 124;
+            const D3DCOLOR ring = st.avatar == AVATAR_LAIKA ? AVATAR_LAIKA_RING : D3DCOLOR_ARGB(255, 190, 170, 255);
+            const int ci = online_country_index(st.country);
+            char t[96], v[64];
+            float fw, rowY;
+            UiRoundRect(lx0, y + 24, lx1 - lx0, h - 48, 20, D3DCOLOR_ARGB(12, 255, 255, 255), D3DCOLOR_ARGB(12, 255, 255, 255));
+            UiRoundRect(lx0, y + 24, lx1 - lx0, 150, 20, D3DCOLOR_ARGB(150, 118, 82, 205), D3DCOLOR_ARGB(0, 118, 82, 205));
+            UiRoundRing(lx0, y + 24, lx1 - lx0, h - 48, 20, 1.0f, D3DCOLOR_ARGB(30, 255, 255, 255));
+            UiShadow(ccx - 78, cy - 78, 156, 156, 78, 20, D3DCOLOR_ARGB(120, 150, 120, 255));
+            online_avatar(ccx, cy, 70, st.avatar, name);
+            UiRoundRing(ccx - 74, cy - 74, 148, 148, 74, 4, ring);
+            if (st.online)
+            {
+                UiCircle(ccx + 53, cy + 53, 13, D3DCOLOR_ARGB(255, 20, 22, 32));
+                UiCircle(ccx + 53, cy + 53, 9, ONLINE_GREEN);
+            }
+            UiTextFit(UI_BOLD, 32, lx1 - lx0 - 30, name, t, sizeof(t));
+            UiText(UI_BOLD, 32, ccx, y + 228, online_tag_colour(name), t, UI_CENTER);
+            fw = UiTextWidth(UI_REGULAR, 17, online_country_name(ci)) + 30;   // the flag, then the country's name, centred
+            online_flag(ccx - fw * 0.5f, y + 260, 16, ci);
+            UiText(UI_REGULAR, 17, ccx - fw * 0.5f + 30, y + 260, UI_COL_TEXT2, online_country_name(ci), UI_LEFT);
+            // What it does now, in a pill (green while playing).
+            if (!st.online) _snprintf(t, sizeof(t) - 1, "%s", Tr(T_PROF_OFFLINE));
+            else if (st.status[0]) _snprintf(t, sizeof(t) - 1, Tr(T_ONLINE_PLAYING), st.status);
+            else _snprintf(t, sizeof(t) - 1, "%s", Tr(st.inRoom ? T_ONLINE_ST_ROOM : T_ONLINE_ST_LOBBY));
+            t[sizeof(t) - 1] = 0;
+            {
+                char fit[96];
+                const D3DCOLOR c = !st.online ? UI_COL_TEXT3 : st.status[0] ? ONLINE_GREEN : UI_COL_ACCENT_HI;
+                float pw;
+                UiTextFit(UI_BOLD, 16, lx1 - lx0 - 80, t, fit, sizeof(fit));
+                pw = UiTextWidth(UI_BOLD, 16, fit) + 44;
+                UiRoundRect(ccx - pw * 0.5f, y + 284, pw, 32, 16, UiAlpha(c, 0.16f), UiAlpha(c, 0.16f));
+                UiRoundRing(ccx - pw * 0.5f, y + 284, pw, 32, 16, 1.0f, UiAlpha(c, 0.5f));
+                UiCircle(ccx - pw * 0.5f + 18, y + 300, 4, c);
+                UiText(UI_BOLD, 16, ccx - pw * 0.5f + 30, y + 300, c, fit, UI_LEFT);
+            }
+            // Friends (since when), the connection, the games played together.
+            rowY = y + 344;
+            for (k = 0; k < 3; k++, rowY += 44)
+            {
+                static const int keys[3] = { T_ONLINE_FRIENDS, T_PROF_CONN, T_PROF_TOGETHER };
+                float vx = lx1 - 22;
+                D3DCOLOR vc = UI_COL_TEXT;
+                UiRect(lx0 + 18, rowY - 8, lx1 - lx0 - 36, 1, UI_COL_LINE);
+                UiText(UI_REGULAR, 15, lx0 + 22, rowY + 12, UI_COL_TEXT3, Tr(keys[k]), UI_LEFT);
+                if (k == 0)
+                {
+                    if (isMe) _snprintf(v, sizeof(v) - 1, "-");
+                    else if (st.isFriend == 2) _snprintf(v, sizeof(v) - 1, "%s", Tr(T_PROF_ASKED));
+                    else if (!st.isFriend) _snprintf(v, sizeof(v) - 1, "%s", Tr(T_PROF_NO));
+                    else if (st.friendDays < 0) _snprintf(v, sizeof(v) - 1, "%s", Tr(T_PROF_YES));
+                    else if (st.friendDays == 0) _snprintf(v, sizeof(v) - 1, "%s", Tr(T_PROF_SINCE_TODAY));
+                    else _snprintf(v, sizeof(v) - 1, Tr(T_PROF_SINCE_DAYS), st.friendDays);
+                    if (st.isFriend == 1) vc = D3DCOLOR_ARGB(255, 190, 165, 255);
+                }
+                else if (k == 1)
+                {
+                    const int ms = isMe && OnlineMyMs() ? OnlineMyMs() : st.ms, conn = isMe ? OnlineMyConn() : st.conn;
+                    if (!st.online && !isMe) _snprintf(v, sizeof(v) - 1, "-");
+                    else
+                    {
+                        if (ms > 0)
+                        {
+                            vx -= online_ping_bars(vx - 26, rowY + 12, 14, ms) + 12;
+                            _snprintf(v, sizeof(v) - 1, "%d ms", ms);
+                        }
+                        else v[0] = 0;
+                        if (conn) vx -= online_conn_tag(vx, rowY + 12, conn) + (v[0] ? 8 : 0);
+                    }
+                }
+                else if (isMe) _snprintf(v, sizeof(v) - 1, "-");
+                else _snprintf(v, sizeof(v) - 1, Tr(T_PROF_TOGETHER_N), st.together);
+                v[sizeof(v) - 1] = 0;
+                UiText(UI_BOLD, 15, vx, rowY + 12, vc, v, UI_RIGHT);
+            }
         }
+        {
+            // The three tiles, each with its icon on a disc of its colour.
+            const float tw = (rx1 - rx0 - 28) / 3;
+            for (k = 0; k < 3; k++)
+            {
+                static const int labels[3] = { T_ONLINE_TOTAL, T_ONLINE_GAMES, T_ONLINE_POS };
+                static const D3DCOLOR col[3] = { D3DCOLOR_ARGB(255, 90, 160, 255), D3DCOLOR_ARGB(255, 190, 120, 255), D3DCOLOR_ARGB(255, 232, 186, 74) };
+                const float tx = rx0 + k * (tw + 14), ty = y + 24, icx = tx + 42, icy = ty + 43;
+                char value[48];
+                if (k == 0) online_time(st.minutes, value, sizeof(value));
+                else _snprintf(value, sizeof(value), k == 1 ? "%d" : "#%d", k == 1 ? st.games : st.rank);
+                UiRoundRect(tx, ty, tw, 86, 16, D3DCOLOR_ARGB(14, 255, 255, 255), D3DCOLOR_ARGB(14, 255, 255, 255));
+                UiRoundRing(tx, ty, tw, 86, 16, 1.0f, D3DCOLOR_ARGB(28, 255, 255, 255));
+                UiCircle(icx, icy, 24, UiAlpha(col[k], 0.2f));
+                if (k == 0)
+                {
+                    // a clock
+                    UiRoundRing(icx - 13, icy - 13, 26, 26, 13, 3, col[k]);
+                    UiRect(icx - 1.5f, icy - 8, 3, 9, col[k]);
+                    UiRect(icx - 1.5f, icy - 1.5f, 8, 3, col[k]);
+                }
+                else if (k == 1)
+                {
+                    // a controller
+                    UiRoundRing(icx - 16, icy - 9, 32, 18, 9, 3, col[k]);
+                    UiRect(icx - 10, icy - 1, 7, 2, col[k]);
+                    UiRect(icx - 7.5f, icy - 4, 2, 8, col[k]);
+                    UiCircle(icx + 6, icy - 2, 2, col[k]);
+                    UiCircle(icx + 10, icy + 2, 2, col[k]);
+                }
+                else
+                {
+                    // a cup
+                    UiRoundRect(icx - 10, icy - 11, 20, 13, 6, col[k], col[k]);
+                    UiRect(icx - 1.5f, icy + 1, 3, 6, col[k]);
+                    UiRoundRect(icx - 8, icy + 7, 16, 4, 2, col[k], col[k]);
+                    UiRoundRing(icx - 16, icy - 9, 9, 9, 4.5f, 2, col[k]);
+                    UiRoundRing(icx + 7, icy - 9, 9, 9, 4.5f, 2, col[k]);
+                }
+                UiText(UI_REGULAR, 15, tx + 82, ty + 28, UI_COL_TEXT2, Tr(labels[k]), UI_LEFT);
+                UiText(UI_BOLD, 28, tx + 82, ty + 58, UI_COL_TEXT, value, UI_LEFT);
+            }
+        }
+        // The games played most: a row each.
+        {
+            char t[48];
+            UiText(UI_BOLD, 19, rx0 + 4, y + 140, UI_COL_TEXT, Tr(T_PROF_MOST), UI_LEFT);
+            if (n > rows)
+            {
+                _snprintf(t, sizeof(t) - 1, "%d-%d / %d", top + 1, top + rows, n);
+                t[sizeof(t) - 1] = 0;
+                UiText(UI_REGULAR, 14, rx1, y + 140, UI_COL_TEXT3, t, UI_RIGHT);
+            }
+        }
+        if (!n) UiText(UI_REGULAR, 19, (rx0 + rx1) * 0.5f, y + 330, UI_COL_TEXT3, Tr(T_ONLINE_EMPTY), UI_CENTER);
         for (k = 0; k < rows && top + k < n; k++)
         {
-            const OnlineUser *u = &users[top + k];
-            const int s1 = top + k == sel, me = !_stricmp(u->name, OnlineMe()->tag);
-            const float cy = y + pad + k * rowH + rowH * 0.5f, ax = x + (rank ? 100 : 52);
-            char t[80];
-            if (rank)
+            const int i = top + k;
+            const OnlineGameTime *g = &st.list[i];
+            const float ry = y + 166 + k * 54, pcx = rx0 + 26, pcy = ry + 23, bx0 = rx0 + 98, bx1 = rx1 - 130;
+            const D3DCOLOR gc = gameCol[i % 6];
+            char fit[96], t[48], letter[2];
+            UiRoundRect(rx0, ry, rx1 - rx0, 46, 12, D3DCOLOR_ARGB(i % 2 ? 10 : 16, 255, 255, 255), D3DCOLOR_ARGB(i % 2 ? 10 : 16, 255, 255, 255));
+            // its place: a medal for the first three
+            _snprintf(t, sizeof(t) - 1, "%d", i + 1);
+            t[sizeof(t) - 1] = 0;
+            if (i < 3)
             {
-                _snprintf(t, sizeof(t), "%d", u->pos);
-                UiText(UI_BOLD, 19, x + 56, cy, u->pos <= 3 ? UI_COL_ACCENT_HI : UI_COL_TEXT3, t, UI_RIGHT);
+                UiCircle(pcx, pcy, 13, medal[i]);
+                UiText(UI_BOLD, 15, pcx, pcy, D3DCOLOR_ARGB(255, 30, 30, 40), t, UI_CENTER);
             }
-            online_avatar(ax, cy, 19, u->avatar, u->name);
-            UiText(s1 || me ? UI_BOLD : UI_REGULAR, 19, ax + 36, cy, me ? UI_COL_ACCENT_HI : s1 ? UI_COL_TEXT : UI_COL_TEXT2, u->name, UI_LEFT);
-            if (!online_flag(x + 330, cy, 18, online_country_index(u->country))) UiText(UI_REGULAR, 15, x + 330, cy, UI_COL_TEXT3, u->country, UI_LEFT);
-            if (u->isFriend) UiText(UI_BOLD, 15, x + 380, cy, u->isFriend == 2 ? UI_COL_TEXT3 : UI_COL_ACCENT_HI, Tr(u->isFriend == 2 ? T_ONLINE_ASKED : T_ONLINE_FRIEND), UI_LEFT);
-            if (rank) online_time(u->minutes, t, sizeof(t));
-            else if (u->online && u->status[0])
+            else UiText(UI_BOLD, 16, pcx, pcy, UI_COL_TEXT3, t, UI_CENTER);
+            // its box art when this console has it (looked for one a frame), else its initial on its colour
+            if (!coverTried[i] && loads > 0)
             {
-                _snprintf(t, sizeof(t) - 1, Tr(T_ONLINE_PLAYING), u->status);
-                t[sizeof(t) - 1] = 0;
+                char key[16];
+                u8 *rgba = NULL;
+                int cw = 0, ch = 0;
+                coverTried[i] = 1;
+                loads--;
+                if (!g->code.empty() && ArtKeyFromCode(g->game.c_str(), g->code.c_str(), key) &&
+                    ArtReadCoverKey(key, ART_KIND_BOX, &rgba, &cw, &ch, NULL) && rgba && cw > 0 && ch > 0)
+                {
+                    u8 *small;
+                    h64_image_fit(cw, ch, PROFILE_COVER_W * 2, PROFILE_COVER_H * 2, &coverW[i], &coverH[i]);
+                    small = h64_image_scale(rgba, cw, ch, coverW[i], coverH[i]);
+                    if (small) cover[i] = UiImageCreate(dev, small, coverW[i], coverH[i]);
+                    free(small);
+                }
+                free(rgba);
             }
-            else _snprintf(t, sizeof(t), "%s", Tr(u->online ? T_ONLINE_ON : T_ONLINE_OFF));
+            if (cover[i])
             {
-                char fit[80];
-                float tw;
-                UiTextFit(UI_REGULAR, 17, 300, t, fit, sizeof(fit));
-                tw = UiText(UI_REGULAR, 17, x + w - 30, cy, u->online && !rank ? UI_COL_TEXT : UI_COL_TEXT2, fit, UI_RIGHT);
-                UiCircle(x + w - 30 - tw - 14, cy, 5, u->online ? ONLINE_GREEN : UI_COL_TEXT3);
+                float cw2 = (float)coverW[i], ch2 = (float)coverH[i], sc = PROFILE_COVER_W / cw2 < PROFILE_COVER_H / ch2 ? PROFILE_COVER_W / cw2 : PROFILE_COVER_H / ch2;
+                cw2 *= sc;
+                ch2 *= sc;
+                UiImage(cover[i], rx0 + 67 - cw2 * 0.5f, pcy - ch2 * 0.5f, cw2, ch2, 4, D3DCOLOR_ARGB(255, 255, 255, 255));
             }
+            else
+            {
+                letter[0] = (char)toupper((unsigned char)g->game[0]);
+                letter[1] = 0;
+                UiRoundRect(rx0 + 50, ry + 6, 34, 34, 7, gc, gc);
+                UiText(UI_BOLD, 17, rx0 + 67, pcy, D3DCOLOR_ARGB(235, 255, 255, 255), letter, UI_CENTER);
+            }
+            UiTextFit(i == 0 ? UI_BOLD : UI_REGULAR, 17, bx1 - bx0, g->game.c_str(), fit, sizeof(fit));
+            UiText(i == 0 ? UI_BOLD : UI_REGULAR, 17, bx0, ry + 15, UI_COL_TEXT, fit, UI_LEFT);
+            // its share of the time, as a bar under the name and in numbers under the time
+            UiRoundRect(bx0, ry + 31, bx1 - bx0, 5, 2.5f, D3DCOLOR_ARGB(24, 255, 255, 255), D3DCOLOR_ARGB(24, 255, 255, 255));
+            if (st.list[0].minutes > 0)
+            {
+                float bw = (bx1 - bx0) * g->minutes / st.list[0].minutes;
+                if (bw < 8) bw = 8;
+                UiRoundRect(bx0, ry + 31, bw, 5, 2.5f, gc, gc);
+            }
+            online_time(g->minutes, t, sizeof(t));
+            UiText(UI_BOLD, 17, rx1 - 16, ry + 17, UI_COL_TEXT, t, UI_RIGHT);
+            _snprintf(t, sizeof(t) - 1, "%d %%", total > 0 ? g->minutes * 100 / total : 0);
+            t[sizeof(t) - 1] = 0;
+            UiText(UI_REGULAR, 12, rx1 - 16, ry + 35, UI_COL_TEXT3, t, UI_RIGHT);
         }
-        UiScreenFooter(Tr(rank ? T_FOOT_ONLINE_RANK : T_FOOT_ONLINE_LIST));
-        UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
+        if (noteAt && GetTickCount() - noteAt < 6000) UiToast(note, (float)(GetTickCount() - noteAt), 6000.0f);
+        UiScreenFooter(Tr(isMe ? T_FOOT_BACK_ONLY : friends ? T_FOOT_PROFILE_FRIEND : st.isFriend ? T_FOOT_BACK_ONLY : T_FOOT_PROFILE_OTHER));
+        online_end();
+        UiPresent(dev);
     }
+    for (k = 0; k < (int)cover.size(); k++)
+        if (cover[k]) UiImageRelease(dev, cover[k]);
+    return result;
 }
 
-// The news of LAIKA 64 (the server's news.txt, in the menus' language when it has them).
-static void online_news(IDirect3DDevice9 *dev, const Config *c)
+// The players one played with lately (Players' friends tab): <drive>:\config\recent_players.txt, "<gamertag>\t<avatar>\t<game>"
+// per line, the newest first, eight at most.
+struct RecentPlayer { std::string tag, game; int avatar; };
+static std::vector<RecentPlayer> s_recent;
+static int s_recentLoaded;
+static void recent_load(void)
 {
-    static char wrapped[700];
-    std::vector<OnlineNews> news;
+    char path[64], line[200];
+    FILE *f;
+    if (s_recentLoaded) return;
+    s_recentLoaded = 1;
+    lib_file("recent_players.txt", path, sizeof(path));
+    if (!(f = fopen(path, "r"))) return;
+    while (fgets(line, sizeof(line), f) && s_recent.size() < 8)
+    {
+        char *t1 = strchr(line, '\t'), *t2 = t1 ? strchr(t1 + 1, '\t') : NULL;
+        RecentPlayer r;
+        line[strcspn(line, "\r\n")] = 0;
+        if (!t1 || !t2) continue;
+        *t1 = *t2 = 0;
+        r.tag = line;
+        r.avatar = atoi(t1 + 1);
+        r.game = t2 + 1;
+        if (!r.tag.empty()) s_recent.push_back(r);
+    }
+    fclose(f);
+}
+
+static void recent_add(const char *tag, int avatar, const char *game)
+{
+    char path[64];
+    FILE *f;
+    RecentPlayer r;
+    size_t k;
+    if (!tag || !tag[0]) return;
+    recent_load();
+    for (k = 0; k < s_recent.size(); k++)
+        if (!_stricmp(s_recent[k].tag.c_str(), tag)) { s_recent.erase(s_recent.begin() + k); break; }
+    r.tag = tag;
+    r.avatar = avatar;
+    r.game = game ? game : "";
+    s_recent.insert(s_recent.begin(), r);
+    if (s_recent.size() > 8) s_recent.resize(8);
+    lib_file("recent_players.txt", path, sizeof(path));
+    if (!(f = fopen(path, "w"))) return;
+    for (k = 0; k < s_recent.size(); k++) fprintf(f, "%s\t%d\t%s\n", s_recent[k].tag.c_str(), s_recent[k].avatar, s_recent[k].game.c_str());
+    fclose(f);
+}
+
+static int online_lobby(IDirect3DDevice9 *dev, const std::string &hostFile);   // below
+static D3DCOLOR online_tag_colour(const char *tag);                    // below, with the chat
+static D3DCOLOR online_ping_colour(int ms);
+static float online_ping_bars(float x, float cy, float h, int ms);
+
+// The player's profile in the top right corner of an online screen: avatar, gamertag, flag and country, online.
+static void online_me_corner(float x, float y, float w)
+{
+    const OnlineProfile *me = OnlineMe();
+    const int ci = online_country_index(me->country);
+    const float ax = x + w - 26, ay = y - 52, tx = ax - 38, fw = ci < FLAG_COUNTRIES ? 24 + 8 : 0;
+    const float cw = UiTextWidth(UI_REGULAR, 15, online_country_name(ci));
+    online_avatar(ax, ay, 26, me->avatar, me->tag);
+    UiCircle(ax + 18, ay + 18, 6, ONLINE_GREEN);
+    UiText(UI_BOLD, 21, tx, ay - 11, UI_COL_TEXT, me->tag, UI_RIGHT);
+    UiText(UI_REGULAR, 15, tx, ay + 13, UI_COL_TEXT2, online_country_name(ci), UI_RIGHT);
+    online_flag(tx - cw - fw, ay + 13, 15, ci);
+}
+
+static int online_conversation(IDirect3DDevice9 *dev, const char *with, int avatar);   // below (1: a game starts)
+
+// Players: one screen, three tabs (LB/RB) - the friends (online first; then the players one played with lately),
+// the players online, the ranking. Each row: the avatar with a dot of where the player is, the name in its chat
+// colour and its flag, what it is doing, the connection in a word; a friend waiting in a room of theirs: "Join".
+// A the player's statistics, X a message, Y joins that room (else makes the player a friend, or not). Each tab
+// read when first shown. Returns 1 when a game starts (a room joined from here).
+static int online_players(IDirect3DDevice9 *dev)
+{
+    enum { PT_FRIENDS = 0, PT_ONLINE, PT_RANK, PT_COUNT };
+    static const int tabLabel[PT_COUNT] = { T_ONLINE_FRIENDS, T_ONLINE_TAB_ONLINE, T_ONLINE_TAB_RANK };
+    static const int tabKind[PT_COUNT] = { ONLINE_LIST_FRIENDS, ONLINE_LIST_USERS, ONLINE_LIST_RANK };
+    static UiAnim selAnim;
+    std::vector<OnlineUser> lists[PT_COUNT], more;
+    std::vector<OnlineRoomInfo> rooms;
+    int loaded[PT_COUNT] = { 0, 0, 0 }, full[PT_COUNT] = { 0, 0, 0 };
+    int tab = PT_FRIENDS, sel = 0, top = 0, k;
     UiInput in;
-    const int rows = 3;
-    int top = 0, k;
-    online_busy(dev, Tr(T_ONLINE_NEWS), T_ONLINE_CONNECTING);
-    if (!OnlineNewsGet(c->lang[0] ? c->lang : "en", &news)) { online_message(dev, Tr(T_ONLINE_NEWS), online_error_text()); return; }
+    recent_load();
     UiInputInit(&in);
     for (;;)
     {
-        const float w = 820, h = 520, x = (UI_WIDTH - w) * 0.5f, y = 112, itemH = 160;
-        const int n = (int)news.size();
-        WORD down = UiInputPoll(&in);
-        if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) { xb_audio_ui_sound(XB_SFX_BACK); return; }
-        if ((down & XINPUT_GAMEPAD_DPAD_DOWN) && top + rows < n) { top++; xb_audio_ui_sound(XB_SFX_MOVE); }
-        if ((down & XINPUT_GAMEPAD_DPAD_UP) && top > 0) { top--; xb_audio_ui_sound(XB_SFX_MOVE); }
-        dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
-        UiBegin(dev);
-        hub_frame(Tr(T_ONLINE_NEWS), NULL, x, y, w, h);
-        if (!n) UiText(UI_REGULAR, 20, x + w * 0.5f, y + h * 0.5f, UI_COL_TEXT2, Tr(T_ONLINE_EMPTY), UI_CENTER);
-        for (k = 0; k < rows && top + k < n; k++)
+        const float w = UI_WIDTH - 2 * UI_SAFE_X, h = 520, x = UI_SAFE_X, y = 112, lx = x + 26, lw = w - 52, rowH = 82;
+        std::vector<OnlineUser> &users = lists[tab];
+        int n, nr, rows, recentSel;
+        WORD down;
+        if (!loaded[tab])
         {
-            const OnlineNews *it = &news[top + k];
-            const float iy = y + 16 + k * itemH;
-            char fit[200];
-            UiText(UI_REGULAR, 15, x + w - 30, iy + 26, UI_COL_TEXT3, it->date.c_str(), UI_RIGHT);
-            UiTextFit(UI_BOLD, 21, w - 190, it->title.c_str(), fit, sizeof(fit));
-            UiText(UI_BOLD, 21, x + 30, iy + 26, UI_COL_ACCENT_HI, fit, UI_LEFT);
-            UiTextWrap(UI_REGULAR, 17, w - 60, 4, it->text.c_str(), wrapped, sizeof(wrapped));
-            UiText(UI_REGULAR, 17, x + 30, iy + 60, UI_COL_TEXT2, wrapped, UI_LEFT);
-            if (k < rows - 1 && top + k + 1 < n) UiRect(x + 24, iy + itemH - 6, w - 48, 1, UI_COL_LINE);
+            // This tab's players (and, for the friends, the rooms waiting: a friend's own can be joined).
+            online_busy(dev, Tr(T_ONLINE_USERS), T_ONLINE_CONNECTING);
+            if (!OnlineList(tabKind[tab], 0, &users)) { online_message(dev, Tr(T_ONLINE_USERS), online_error_text()); return 0; }
+            if (tab == PT_FRIENDS)
+            {
+                // Online first.
+                size_t a2, b2;
+                for (a2 = 1; a2 < users.size(); a2++)
+                    for (b2 = a2; b2 > 0 && users[b2].online && !users[b2 - 1].online; b2--) std::swap(users[b2], users[b2 - 1]);
+                if (!OnlineRooms(&rooms)) rooms.clear();
+            }
+            full[tab] = tab != PT_FRIENDS && users.size() == 50;   // a full page: there may be more
+            loaded[tab] = 1;
+            sel = top = 0;
+            UiInputInit(&in);
         }
-        UiScreenFooter(Tr(T_FOOT_BACK_ONLY));
-        UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
+        n = (int)users.size();
+        nr = tab == PT_FRIENDS ? (int)(s_recent.size() < 3 ? s_recent.size() : 3) : 0;
+        rows = nr ? 3 : 4;
+        recentSel = sel >= n ? sel - n : -1;   // the played-with-lately cards: after the friends
+        down = UiInputPoll(&in);
+        if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) { xb_audio_ui_sound(XB_SFX_BACK); return 0; }
+        if (down & (XINPUT_GAMEPAD_LEFT_SHOULDER | XINPUT_GAMEPAD_RIGHT_SHOULDER))
+        {
+            tab = (tab + ((down & XINPUT_GAMEPAD_RIGHT_SHOULDER) ? 1 : PT_COUNT - 1)) % PT_COUNT;
+            sel = top = 0;
+            xb_audio_ui_sound(XB_SFX_TAB);
+            continue;
+        }
+        if (n + nr)
+        {
+            if (recentSel >= 0 && (down & (XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT)))
+            {
+                sel = n + (recentSel + ((down & XINPUT_GAMEPAD_DPAD_RIGHT) ? 1 : nr - 1)) % nr;
+                xb_audio_ui_sound(XB_SFX_MOVE);
+            }
+            if (down & XINPUT_GAMEPAD_DPAD_DOWN)
+            {
+                if (recentSel < 0 && sel == n - 1 && full[tab])
+                {
+                    // The end of what was read: the next page.
+                    online_busy(dev, Tr(T_ONLINE_USERS), T_ONLINE_CONNECTING);
+                    full[tab] = OnlineList(tabKind[tab], n, &more) && !more.empty();
+                    users.insert(users.end(), more.begin(), more.end());
+                    if (more.size() < 50) full[tab] = 0;
+                    n = (int)users.size();
+                    UiInputInit(&in);
+                }
+                if (recentSel < 0 && sel + 1 < n + (nr ? 1 : 0)) sel++;
+                else if (recentSel < 0) sel = 0;
+                xb_audio_ui_sound(XB_SFX_MOVE);
+            }
+            if (down & XINPUT_GAMEPAD_DPAD_UP)
+            {
+                if (recentSel >= 0) sel = n ? n - 1 : n;
+                else sel = sel > 0 ? sel - 1 : (nr ? n : n - 1);
+                xb_audio_ui_sound(XB_SFX_MOVE);
+            }
+        }
+        recentSel = sel >= n ? sel - n : -1;
+        {
+            // The player selected, and a room of theirs waiting (a friend's: "Join").
+            const char *name = recentSel >= 0 ? (recentSel < nr ? s_recent[recentSel].tag.c_str() : "") : n ? users[sel].name : "";
+            const int avatar = recentSel >= 0 ? (recentSel < nr ? s_recent[recentSel].avatar : 0) : n ? users[sel].avatar : 0;
+            const int isMe = name[0] && !_stricmp(name, OnlineMe()->tag), isFriend = recentSel < 0 && n ? users[sel].isFriend : 0;
+            int room = -1;
+            for (k = 0; recentSel < 0 && name[0] && k < (int)rooms.size(); k++)
+                if (!_stricmp(rooms[k].host, name) && rooms[k].players < rooms[k].max) room = k;
+            if (name[0] && (down & XINPUT_GAMEPAD_A))
+            {
+                xb_audio_ui_sound(XB_SFX_SELECT);
+                if (online_stats(dev, name)) return 1;
+                UiInputInit(&in);
+                continue;
+            }
+            if (name[0] && !isMe && (down & XINPUT_GAMEPAD_X))
+            {
+                xb_audio_ui_sound(XB_SFX_SELECT);
+                if (online_conversation(dev, name, avatar)) return 1;
+                UiInputInit(&in);
+                continue;
+            }
+            if (name[0] && !isMe && (down & XINPUT_GAMEPAD_Y))
+            {
+                xb_audio_ui_sound(XB_SFX_SELECT);
+                if (room >= 0)
+                {
+                    // Into the friend's room (its password asked when it has one).
+                    char pass[ONLINE_ROOM_PASS + 1] = "";
+                    if (!rooms[room].locked || online_keyboard(dev, rooms[room].name, Tr(T_ONLINE_PASSWORD_ASK), pass, 1, ONLINE_ROOM_PASS, KBD_NAME))
+                    {
+                        online_busy(dev, Tr(T_ONLINE_PLAY), T_ONLINE_CONNECTING);
+                        if (OnlineRoomJoin(rooms[room].code, pass)) { if (online_lobby(dev, std::string())) return 1; }
+                        else online_message(dev, Tr(T_ONLINE_PLAY), online_error_text());
+                    }
+                    loaded[PT_FRIENDS] = 0;   // the rooms again
+                }
+                else
+                {
+                    // A friend, or not any more (asked first).
+                    const int add = !isFriend;
+                    char how[16] = "";
+                    if (isFriend == 1)
+                    {
+                        const char *labels[2];
+                        char q[96];
+                        labels[0] = Tr(T_ONLINE_UNFRIEND);
+                        labels[1] = Tr(T_ONLINE_KICK_NO);
+                        _snprintf(q, sizeof(q) - 1, Tr(T_ONLINE_UNFRIEND_ASK), name);
+                        q[sizeof(q) - 1] = 0;
+                        if (ChoiceScreen(dev, Tr(T_ONLINE_FRIENDS), q, labels, 2, 1, Tr(T_FOOT_ONLINE), 1) != 0) { UiInputInit(&in); continue; }
+                    }
+                    online_busy(dev, Tr(T_ONLINE_FRIENDS), T_ONLINE_CONNECTING);
+                    if (OnlineFriend(name, add, how, sizeof(how)))
+                    {
+                        char t[96];
+                        xb_audio_ui_sound(add ? XB_SFX_VALUE_UP : XB_SFX_VALUE_DOWN);
+                        if (add)
+                        {
+                            _snprintf(t, sizeof(t) - 1, Tr(strcmp(how, "sent") ? T_ONLINE_NOW_FRIENDS : T_ONLINE_REQUEST_SENT), name);
+                            t[sizeof(t) - 1] = 0;
+                            online_message(dev, Tr(T_ONLINE_FRIENDS), t);
+                        }
+                        loaded[PT_FRIENDS] = 0;   // the friends again (and this tab's marks)
+                        if (tab != PT_FRIENDS) loaded[tab] = 0;
+                    }
+                    else xb_audio_ui_sound(XB_SFX_ERROR);
+                }
+                UiInputInit(&in);
+                continue;
+            }
+            if (recentSel < 0)
+            {
+                if (sel < top) top = sel;
+                if (sel >= top + rows) top = sel - rows + 1;
+            }
+            dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
+            online_begin(dev, __FUNCTION__);
+            hub_frame("", NULL, x, y, w, h);
+            UiOnlineLogo(UI_WIDTH * 0.5f, y - 46, 60);
+            online_me_corner(x, y, w);
+            {
+                // The title, the tabs between LB and RB (each with its count), what the tab holds on the right.
+                float tx = lx + UiTextWidth(UI_BOLD, 28, Tr(T_ONLINE_USERS)) + 30;
+                int t2, on = 0;
+                char num[48];
+                UiText(UI_BOLD, 28, lx, y + 38, UI_COL_TEXT, Tr(T_ONLINE_USERS), UI_LEFT);
+                UiRoundRect(tx, y + 26, 38, 24, 12, D3DCOLOR_ARGB(255, 60, 62, 76), D3DCOLOR_ARGB(255, 60, 62, 76));
+                UiText(UI_BOLD, 13, tx + 19, y + 38, UI_COL_TEXT2, "LB", UI_CENTER);
+                tx += 52;
+                for (t2 = 0; t2 < PT_COUNT; t2++)
+                {
+                    const int cur = t2 == tab, cnt = loaded[t2] && t2 != PT_RANK ? (int)lists[t2].size() : -1;
+                    const float lw2 = UiTextWidth(cur ? UI_BOLD : UI_REGULAR, 18, Tr(tabLabel[t2]));
+                    float bw;
+                    num[0] = 0;
+                    if (cnt >= 0) _snprintf(num, sizeof(num), "%d", cnt);
+                    bw = lw2 + 36 + (num[0] ? UiTextWidth(UI_BOLD, 13, num) + 22 : 0);
+                    if (cur) { UiRoundRect(tx, y + 20, bw, 36, 18, SEL_HI(255), SEL_HI(220)); UiRoundRing(tx, y + 20, bw, 36, 18, 2.0f, D3DCOLOR_ARGB(255, 190, 170, 255)); }
+                    else UiRoundRing(tx, y + 20, bw, 36, 18, 1.0f, D3DCOLOR_ARGB(40, 255, 255, 255));
+                    UiText(cur ? UI_BOLD : UI_REGULAR, 18, tx + 18, y + 38, cur ? UI_COL_TEXT : UI_COL_TEXT2, Tr(tabLabel[t2]), UI_LEFT);
+                    if (num[0])
+                    {
+                        const float nx = tx + 18 + lw2 + 8, nw = UiTextWidth(UI_BOLD, 13, num) + 14;
+                        const D3DCOLOR nc = t2 == PT_FRIENDS ? D3DCOLOR_ARGB(255, 40, 200, 190) : ONLINE_GREEN;
+                        UiRoundRect(nx, y + 29, nw, 18, 9, UiAlpha(nc, 0.24f), UiAlpha(nc, 0.24f));
+                        UiText(UI_BOLD, 13, nx + nw * 0.5f, y + 38, nc, num, UI_CENTER);
+                    }
+                    tx += bw + 10;
+                }
+                UiRoundRect(tx, y + 26, 38, 24, 12, D3DCOLOR_ARGB(255, 60, 62, 76), D3DCOLOR_ARGB(255, 60, 62, 76));
+                UiText(UI_BOLD, 13, tx + 19, y + 38, UI_COL_TEXT2, "RB", UI_CENTER);
+                if (tab == PT_FRIENDS)
+                {
+                    for (k = 0; k < n; k++) on += users[k].online != 0;
+                    _snprintf(num, sizeof(num) - 1, Tr(T_ONLINE_FRIENDS_SUM), n, on);
+                    num[sizeof(num) - 1] = 0;
+                    UiText(UI_REGULAR, 15, lx + lw, y + 38, UI_COL_TEXT3, num, UI_RIGHT);
+                }
+                UiRect(lx, y + 74, lw, 1, UI_COL_LINE);
+            }
+            if (!n) UiText(UI_REGULAR, 19, lx + lw * 0.5f, y + 150, UI_COL_TEXT3, Tr(T_ONLINE_EMPTY), UI_CENTER);
+            for (k = 0; k < rows && top + k < n; k++)
+            {
+                const OnlineUser *u = &users[top + k];
+                const int s1 = top + k == sel, me = !_stricmp(u->name, OnlineMe()->tag), ms = me && OnlineMyMs() ? OnlineMyMs() : u->ms;
+                const float ry = y + 94 + k * rowH, cy = ry + 35, ax = lx + (tab == PT_RANK ? 82 : 40);
+                const D3DCOLOR state = !u->online ? D3DCOLOR_ARGB(255, 90, 92, 105) : u->status[0] ? ONLINE_GREEN : D3DCOLOR_ARGB(255, 40, 200, 190);
+                char t[96], fit[96];
+                float nw, rx = lx + lw - 16;
+                int j, hosts = 0;
+                if (s1)
+                {
+                    UiShadow(lx - 2, ry - 2, lw + 4, 74, 18, 12, SEL_LO(90));
+                    UiRoundRect(lx, ry, lw, 70, 14, D3DCOLOR_ARGB(230, 70, 52, 130), D3DCOLOR_ARGB(230, 62, 46, 116));
+                    UiRoundRing(lx, ry, lw, 70, 14, 2.0f, D3DCOLOR_ARGB(255, 190, 170, 255));
+                }
+                else
+                {
+                    UiRoundRect(lx, ry, lw, 70, 14, D3DCOLOR_ARGB(12, 255, 255, 255), D3DCOLOR_ARGB(12, 255, 255, 255));
+                    UiRoundRing(lx, ry, lw, 70, 14, 1.0f, D3DCOLOR_ARGB(24, 255, 255, 255));
+                }
+                if (tab == PT_RANK)
+                {
+                    _snprintf(t, sizeof(t), "%d", u->pos);
+                    UiText(UI_BOLD, 22, lx + 44, cy, u->pos <= 3 ? D3DCOLOR_ARGB(255, 255, 205, 70) : UI_COL_TEXT3, t, UI_RIGHT);
+                }
+                online_avatar(ax, cy, 23, u->avatar, u->name);
+                if (!u->online) UiCircle(ax, cy, 23, D3DCOLOR_ARGB(130, 30, 30, 40));   // offline: dimmed
+                UiCircle(ax + 16, cy + 16, 7, D3DCOLOR_ARGB(255, 20, 20, 32));
+                UiCircle(ax + 16, cy + 16, 5, state);
+                nw = UiText(UI_BOLD, 20, ax + 42, cy - 11, u->online || tab == PT_RANK ? online_tag_colour(u->name) : UI_COL_TEXT2, u->name, UI_LEFT);
+                if (!online_flag(ax + 42 + nw + 12, cy - 11, 15, online_country_index(u->country)))
+                    UiText(UI_REGULAR, 13, ax + 42 + nw + 12, cy - 11, UI_COL_TEXT3, u->country, UI_LEFT);
+                if (tab == PT_RANK) online_time(u->minutes, t, sizeof(t));
+                else if (u->online && u->status[0]) { _snprintf(t, sizeof(t) - 1, Tr(T_ONLINE_PLAYING), u->status); t[sizeof(t) - 1] = 0; }
+                else _snprintf(t, sizeof(t), "%s", Tr(u->online ? T_ONLINE_ON : T_ONLINE_OFF));
+                UiTextFit(UI_REGULAR, 15, 420, t, fit, sizeof(fit));
+                UiText(UI_REGULAR, 15, ax + 42, cy + 13, tab == PT_RANK ? UI_COL_TEXT2 : u->online ? state : UI_COL_TEXT3, fit, UI_LEFT);
+                for (j = 0; tab == PT_FRIENDS && j < (int)rooms.size(); j++)
+                    if (!_stricmp(rooms[j].host, u->name) && rooms[j].players < rooms[j].max) hosts = 1;
+                if (hosts)
+                {
+                    // Waiting in a room of theirs: Y joins it.
+                    const float bw = UiTextWidth(UI_BOLD, 14, Tr(T_ONLINE_JOIN)) + 30;
+                    UiRoundRect(rx - bw, cy - 14, bw, 28, 14, D3DCOLOR_ARGB(50, 80, 210, 120), D3DCOLOR_ARGB(50, 80, 210, 120));
+                    UiRoundRing(rx - bw, cy - 14, bw, 28, 14, 1.0f, D3DCOLOR_ARGB(160, 80, 210, 120));
+                    UiText(UI_BOLD, 14, rx - bw * 0.5f, cy, ONLINE_GREEN, Tr(T_ONLINE_JOIN), UI_CENTER);
+                    rx -= bw + 22;
+                }
+                if (tab != PT_FRIENDS && u->isFriend && !me)
+                {
+                    const char *ft = Tr(u->isFriend == 2 ? T_ONLINE_ASKED : T_ONLINE_FRIEND);
+                    const float fw = UiTextWidth(UI_BOLD, 13, ft) + 18;
+                    UiRoundRect(rx - fw, cy - 11, fw, 22, 11, D3DCOLOR_ARGB(40, 40, 200, 190), D3DCOLOR_ARGB(40, 40, 200, 190));
+                    UiText(UI_BOLD, 13, rx - fw * 0.5f, cy, D3DCOLOR_ARGB(255, 40, 200, 190), ft, UI_CENTER);
+                    rx -= fw + 22;
+                }
+                if (u->online && ms > 0 && tab != PT_RANK)
+                {
+                    const char *word = Tr(ms < 90 ? T_ONLINE_LINK_GOOD : ms < 160 ? T_ONLINE_LINK_OK : T_ONLINE_LINK_BAD);
+                    const float ww = UiTextWidth(UI_BOLD, 15, word);
+                    UiText(UI_BOLD, 15, rx, cy, online_ping_colour(ms), word, UI_RIGHT);
+                    online_ping_bars(rx - ww - 34, cy, 16, ms);
+                }
+            }
+            if (nr)
+            {
+                // The players one played with lately (friends or not): A their statistics, Y a friend.
+                const float ry = y + 94 + 3 * rowH + 12, cw = (lw - 2 * 14) / 3;
+                UiText(UI_BOLD, 16, lx, ry, UI_COL_TEXT2, Tr(T_ONLINE_RECENT), UI_LEFT);
+                for (k = 0; k < nr; k++)
+                {
+                    const float cx0 = lx + k * (cw + 14), cy0 = ry + 18;
+                    const int s1 = recentSel == k;
+                    char fit[64];
+                    if (s1)
+                    {
+                        UiRoundRect(cx0, cy0, cw, 52, 12, D3DCOLOR_ARGB(230, 70, 52, 130), D3DCOLOR_ARGB(230, 62, 46, 116));
+                        UiRoundRing(cx0, cy0, cw, 52, 12, 2.0f, D3DCOLOR_ARGB(255, 190, 170, 255));
+                    }
+                    else
+                    {
+                        UiRoundRect(cx0, cy0, cw, 52, 12, D3DCOLOR_ARGB(10, 255, 255, 255), D3DCOLOR_ARGB(10, 255, 255, 255));
+                        UiRoundRing(cx0, cy0, cw, 52, 12, 1.0f, D3DCOLOR_ARGB(24, 255, 255, 255));
+                    }
+                    online_avatar(cx0 + 27, cy0 + 26, 15, s_recent[k].avatar, s_recent[k].tag.c_str());
+                    UiText(UI_BOLD, 16, cx0 + 52, cy0 + 18, online_tag_colour(s_recent[k].tag.c_str()), s_recent[k].tag.c_str(), UI_LEFT);
+                    UiTextFit(UI_REGULAR, 13, cw - 64, s_recent[k].game.c_str(), fit, sizeof(fit));
+                    UiText(UI_REGULAR, 13, cx0 + 52, cy0 + 37, UI_COL_TEXT3, fit, UI_LEFT);
+                }
+            }
+            {
+                // The buttons: Y joins the room when there is one, else makes a friend (or not).
+                char foot[200];
+                _snprintf(foot, sizeof(foot) - 1, "A:%s|X:%s|Y:%s|LB/RB:%s|B:%s", Tr(T_ONLINE_F_PROFILE), Tr(T_ONLINE_F_MESSAGE),
+                          Tr(room >= 0 ? T_ONLINE_JOIN : isFriend == 1 ? T_ONLINE_F_REMOVE : T_ONLINE_F_ADD), Tr(T_ONLINE_F_TAB), Tr(T_ONLINE_F_BACK));
+                foot[sizeof(foot) - 1] = 0;
+                UiScreenFooter(foot);
+            }
+            online_end();
+            UiPresent(dev);
+        }
     }
 }
+
 
 // Check for updates: GitHub asked now; a newer release is offered as the ROM list offers it.
 static void online_update(IDirect3DDevice9 *dev)
@@ -10991,24 +12952,145 @@ static int online_find_rom(u32 crc1, u32 crc2, std::string *file)
 // A chat line drawn: the avatar, the gamertag in the accent colour, the text after it (cut to fit `w`).
 static void online_chat_line(float x, float cy, float w, const OnlineChatLine *m)
 {
-    char fit[200];
     float tw;
     const float when = m->when[0] ? UiTextWidth(UI_REGULAR, 14, m->when) + 12 : 0;
     online_avatar(x + 14, cy, 13, m->avatar, m->tag);
     tw = UiText(UI_BOLD, 17, x + 36, cy, UI_COL_ACCENT_HI, m->tag, UI_LEFT);
-    UiTextFit(UI_REGULAR, 17, w - 52 - tw - when, m->text.c_str(), fit, sizeof(fit));
-    UiText(UI_REGULAR, 17, x + 46 + tw, cy, UI_COL_TEXT, fit, UI_LEFT);
+    RichText(UI_REGULAR, 17, x + 46 + tw, cy, w - 52 - tw - when, 1, UI_COL_TEXT, m->text.c_str(), 1, NULL);
     if (m->when[0]) UiText(UI_REGULAR, 14, x + w, cy, UI_COL_TEXT3, m->when, UI_RIGHT);
 }
 
-// "Last message: HH:MM", right-aligned at (rx, cy); nothing while the chat is empty.
-static void online_last_time(float rx, float cy, const std::vector<OnlineChatLine> &chat)
+// A player's colour in the chats and lists: this console's player's lilac, the others' one of seven,
+// always the same for a name.
+static D3DCOLOR online_tag_colour(const char *tag)
+{
+    static const D3DCOLOR pal[7] = { D3DCOLOR_ARGB(255, 255, 184, 92), D3DCOLOR_ARGB(255, 110, 214, 150), D3DCOLOR_ARGB(255, 90, 200, 255),
+                                     D3DCOLOR_ARGB(255, 255, 130, 170), D3DCOLOR_ARGB(255, 240, 210, 90), D3DCOLOR_ARGB(255, 130, 165, 255),
+                                     D3DCOLOR_ARGB(255, 70, 210, 200) };
+    unsigned hsh = 5381;
+    const char *p;
+    if (!_stricmp(tag, OnlineMe()->tag)) return D3DCOLOR_ARGB(255, 190, 165, 255);
+    for (p = tag; *p; p++) hsh = hsh * 33 + (unsigned char)tolower((unsigned char)*p);
+    return pal[hsh % 7];
+}
+
+// A local player's symbol in place of an avatar, r round at (cx, cy): a controller in a ring of its console's
+// player's colour, and its number ("P2").
+static void online_local_icon(float cx, float cy, float r, int number, D3DCOLOR col)
+{
+    const D3DCOLOR g = UI_COL_TEXT;
+    char t[8];
+    UiCircle(cx, cy, r, D3DCOLOR_ARGB(255, 34, 37, 52));
+    UiRoundRing(cx - r, cy - r, 2 * r, 2 * r, r, 2.5f, col);
+    UiRoundRing(cx - 15, cy - 13, 30, 15, 7, 2.0f, g);   // the controller
+    UiRect(cx - 9, cy - 6.5f, 6, 2, g);
+    UiRect(cx - 7, cy - 8.5f, 2, 6, g);
+    UiCircle(cx + 6, cy - 7.5f, 1.6f, g);
+    UiCircle(cx + 9.5f, cy - 4.5f, 1.6f, g);
+    _snprintf(t, sizeof(t), "P%d", number);
+    UiText(UI_BOLD, 14, cx, cy + 11, col, t, UI_CENTER);
+}
+
+// "HH:MM" as minutes of the day; -1 when it is not one.
+static int chat_minutes(const char *when)
+{
+    int hh, mm;
+    if (sscanf(when, "%d:%d", &hh, &mm) != 2) return -1;
+    return hh * 60 + mm;
+}
+
+// The general chat from `bottom` up to `top` (the newest at the bottom, the older ones going out of view):
+// each player in their colour, this console's player's messages on a band of theirs, a player's messages one
+// after another under one name and avatar, long ones over up to three lines, and a faint line with how long it
+// was where the talk paused 10 minutes or more.
+// A chat line's height in online_chat_view (with its name and avatar when `first`).
+static float chat_item_h(const OnlineChatLine *m, int first, float x, float w)
+{
+    const float size = 17, timeW = m->when[0] ? UiTextWidth(UI_REGULAR, 14, m->when) + 10 : 0;
+    const float tx = x + 36 + (first ? UiTextWidth(UI_BOLD, size, m->tag) + 8 : 0);
+    const int lines = RichText(UI_REGULAR, size, 0, 0, x + w - timeW - tx, 3, 0, m->text.c_str(), 0, NULL);
+    return (first ? 6 : 0) + lines * size * 1.35f + 4;
+}
+
+static int chat_pause(const std::vector<OnlineChatLine> &chat, int k)
+{
+    const int now = chat_minutes(chat[k].when), before = k > 0 ? chat_minutes(chat[k - 1].when) : -1;
+    return k > 0 && now >= 0 && before >= 0 && (now - before + 1440) % 1440 >= 10;
+}
+
+static void online_chat_view(float x, float top, float bottom, float w, const std::vector<OnlineChatLine> &chat)
+{
+    const float size = 17, lineH = size * 1.35f, sepH = 24;
+    const char *me = OnlineMe()->tag;
+    float yb = bottom;
+    int k, kTop = 0;
+    {
+        // The highest message that fits: it shows its writer even in the middle of a run (the name above, out of view).
+        float hb = bottom;
+        for (k = (int)chat.size() - 1; k >= 0; k--)
+        {
+            const int pause = chat_pause(chat, k), first = k == 0 || pause || _stricmp(chat[k - 1].tag, chat[k].tag);
+            const float hgt = chat_item_h(&chat[k], first, x, w);
+            if (hb - hgt < top) break;
+            hb -= hgt + (pause ? sepH : 0);
+            kTop = k;
+        }
+        if (kTop < (int)chat.size() && !(kTop == 0 || chat_pause(chat, kTop) || _stricmp(chat[kTop - 1].tag, chat[kTop].tag)) &&
+            hb + chat_item_h(&chat[kTop], 0, x, w) - chat_item_h(&chat[kTop], 1, x, w) < top)
+            kTop++;   // (with its name it no longer fits: the next one shows it)
+    }
+    for (k = (int)chat.size() - 1; k >= kTop; k--)
+    {
+        const OnlineChatLine *m = &chat[k];
+        const int now = chat_minutes(m->when), before = k > 0 ? chat_minutes(chat[k - 1].when) : -1;
+        const int gap = now >= 0 && before >= 0 ? (now - before + 1440) % 1440 : 0;
+        const int pause = k > 0 && gap >= 10, first = k == 0 || k == kTop || pause || _stricmp(chat[k - 1].tag, m->tag);
+        const float timeW = m->when[0] ? UiTextWidth(UI_REGULAR, 14, m->when) + 10 : 0;
+        const float nameW = first ? UiTextWidth(UI_BOLD, size, m->tag) + 8 : 0, tx = x + 36 + nameW;
+        const int lines = RichText(UI_REGULAR, size, 0, 0, x + w - timeW - tx, 3, 0, m->text.c_str(), 0, NULL);
+        float hgt = (first ? 6 : 0) + lines * lineH + 4, y0, cy;
+        if (yb - hgt < top) break;
+        y0 = yb - hgt + (first ? 6 : 0);
+        cy = y0 + lineH * 0.5f;
+        if (!_stricmp(m->tag, me))
+            UiRoundRect(x - 6, y0 - 2, w + 10, lines * lineH + 3, 7, D3DCOLOR_ARGB(34, 150, 120, 255), D3DCOLOR_ARGB(34, 150, 120, 255));
+        if (first)
+        {
+            online_avatar(x + 14, cy, 13, m->avatar, m->tag);
+            UiText(UI_BOLD, size, x + 36, cy, online_tag_colour(m->tag), m->tag, UI_LEFT);
+        }
+        RichText(UI_REGULAR, size, tx, cy, x + w - timeW - tx, 3, UI_COL_TEXT, m->text.c_str(), 1, NULL);   // (its emojis drawn)
+        if (m->when[0]) UiText(UI_REGULAR, 14, x + w, cy, UI_COL_TEXT3, m->when, UI_RIGHT);
+        yb -= hgt;
+        if (pause)
+        {
+            // The pause: "15 min later", "2 h later".
+            char t[48];
+            float sw, cyy = yb - sepH * 0.5f;
+            if (yb - sepH < top) break;
+            if (gap >= 60) _snprintf(t, sizeof(t) - 1, Tr(T_ONLINE_GAP_H), gap / 60);
+            else _snprintf(t, sizeof(t) - 1, Tr(T_ONLINE_GAP_MIN), gap);
+            t[sizeof(t) - 1] = 0;
+            sw = UiTextWidth(UI_REGULAR, 13, t);
+            UiRect(x, cyy, w * 0.5f - sw * 0.5f - 10, 1, D3DCOLOR_ARGB(38, 255, 255, 255));
+            UiRect(x + w * 0.5f + sw * 0.5f + 10, cyy, w * 0.5f - sw * 0.5f - 10, 1, D3DCOLOR_ARGB(38, 255, 255, 255));
+            UiText(UI_REGULAR, 13, x + w * 0.5f, cyy, UI_COL_TEXT3, t, UI_CENTER);
+            yb -= sepH;
+        }
+    }
+}
+
+// "12 players online" with a green dot, right-aligned at (rx, cy); nothing while not known.
+static void online_count_text(float rx, float cy, int players)
 {
     char t[64];
-    if (chat.empty() || !chat.back().when[0]) return;
-    _snprintf(t, sizeof(t) - 1, Tr(T_ONLINE_LAST_MSG), chat.back().when);
+    float tw;
+    if (players < 0) return;
+    if (players == 1) strncpy(t, Tr(T_ONLINE_ONLINE_1), sizeof(t) - 1);
+    else _snprintf(t, sizeof(t) - 1, Tr(T_ONLINE_ONLINE_N), players);
     t[sizeof(t) - 1] = 0;
-    UiText(UI_REGULAR, 15, rx, cy, UI_COL_TEXT3, t, UI_RIGHT);
+    tw = UiText(UI_REGULAR, 15, rx, cy, UI_COL_TEXT3, t, UI_RIGHT);
+    UiCircle(rx - tw - 12, cy, 5, ONLINE_GREEN);
 }
 
 // A padlock `s` pixels high, centred on (cx, cy): a room with a password.
@@ -11145,7 +13227,7 @@ static int online_invite(IDirect3DDevice9 *dev)
             if (sel[j] >= top[j] + rows) top[j] = sel[j] - rows + 1;
         }
         dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
-        UiBegin(dev);
+        online_begin(dev, __FUNCTION__);
         UiBackdrop();
         browser_effect();
         UiText(UI_BOLD, 30, x, y - 40, UI_COL_TEXT, Tr(T_ONLINE_INVITE), UI_LEFT);
@@ -11187,9 +13269,8 @@ static int online_invite(IDirect3DDevice9 *dev)
         }
         if (noteAt && GetTickCount() - noteAt < 4000) UiToast(note, (float)(GetTickCount() - noteAt), 4000.0f);
         UiScreenFooter(Tr(T_FOOT_ONLINE_INVITE));
-        UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
+        online_end();
+        UiPresent(dev);
     }
 }
 
@@ -11237,6 +13318,9 @@ static int online_lobby(IDirect3DDevice9 *dev, const std::string &hostFile)
         }
         if (r == 2)
         {
+            int j;
+            for (j = 0; j < lb->count; j++)
+                if (j != lb->mine) recent_add(lb->tag[j], lb->avatar[j], lb->game);   // Players: "played with them lately"
             s_onlineLaunch = s_onlineFile = file;
             return 1;
         }
@@ -11299,21 +13383,42 @@ static int online_lobby(IDirect3DDevice9 *dev, const std::string &hostFile)
             ltWas = lt;
         }
         dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
-        UiBegin(dev);
+        online_begin(dev, __FUNCTION__);
         UiBackdrop();
         browser_effect();
         UiText(UI_BOLD, 30, x, y - 40, UI_COL_TEXT, lb->name[0] ? lb->name : Tr(T_ONLINE_PLAY), UI_LEFT);
         UiText(UI_REGULAR, 18, x + w, y - 40, UI_COL_ACCENT_HI, lb->game, UI_RIGHT);
         edge_glow(x, y, w, h, 22);
         UiPanel(x, y, w, h, 22);
-        // The consoles in the room, the host's first, each with its time to this console (and "+1", "+2" when two or
-        // three play on it); then the places still free.
-        for (k = 0; k < lb->count + (places > lb->players ? places - lb->players : 0) && k < ONLINE_ROOM_PLAYERS; k++)
+        // The consoles in the room, the host's first, each with its time to this console, and under each the
+        // players who play on it too (its local players, a row each); then the places still free.
         {
-            const float sy = y + 20 + k * slotH, cy = sy + slotH * 0.5f - 6;
-            const int sel = host && k == pick && k > 0 && k < lb->count;
+        int slot = 0, sub = 0;
+        for (k = 0; k < lb->count + (places > lb->players ? places - lb->players : 0) && slot < ONLINE_ROOM_PLAYERS; slot++)
+        {
+            const float sy = y + 20 + slot * slotH, cy = sy + slotH * 0.5f - 6;
+            const int sel = host && k == pick && k > 0 && k < lb->count && !sub;
             UiRoundRect(x + 20, sy, colW - 20, slotH - 12, 16, UI_COL_CARD, UI_COL_CARD);
             if (sel) UiRoundRing(x + 20, sy, colW - 20, slotH - 12, 16, 3, UI_COL_ACCENT_HI);
+            if (k < lb->count && sub)
+            {
+                // A local player of console k: the controller symbol, "Local player" (another console's: of whose).
+                online_local_icon(x + 66, cy, 30, sub + 1, online_tag_colour(lb->tag[k]));
+                UiText(UI_BOLD, 22, x + 110, cy - 12, UI_COL_TEXT, Tr(T_ONLINE_LOCAL_PLAYER), UI_LEFT);
+                if (k == lb->mine) strncpy(t, Tr(T_ONLINE_LOCAL_HERE), sizeof(t) - 1);
+                else _snprintf(t, sizeof(t) - 1, Tr(T_ONLINE_LOCAL_OF), lb->tag[k]);
+                t[sizeof(t) - 1] = 0;
+                UiText(UI_REGULAR, 15, x + 110, cy + 14, UI_COL_TEXT2, t, UI_LEFT);
+                {
+                    // The tag on the right: "LOCAL".
+                    const char *tag = Tr(T_ONLINE_LOCAL_TAG);
+                    const float tw = UiTextWidth(UI_BOLD, 13, tag) + 16;
+                    UiRoundRect(x + colW - 16 - tw, cy - 22, tw, 22, 11, D3DCOLOR_ARGB(60, 80, 210, 120), D3DCOLOR_ARGB(60, 80, 210, 120));
+                    UiText(UI_BOLD, 13, x + colW - 16 - tw * 0.5f, cy - 11, ONLINE_GREEN, tag, UI_CENTER);
+                }
+                if (++sub >= lb->local[k]) { sub = 0; k++; }
+                continue;
+            }
             if (k < lb->count)
             {
                 // Mine: to the server and back; another's: that, and its own (both sides of the server).
@@ -11325,14 +13430,7 @@ static int online_lobby(IDirect3DDevice9 *dev, const std::string &hostFile)
                 const int conn = k == lb->mine ? OnlineMyConn() : lb->conn[k];
                 float fw;
                 online_avatar(x + 66, cy, 30, lb->avatar[k], lb->tag[k]);
-                {
-                    const float tw = UiText(UI_BOLD, 22, x + 110, cy - 12, k == lb->mine ? UI_COL_ACCENT_HI : UI_COL_TEXT, lb->tag[k], UI_LEFT);
-                    if (lb->local[k] > 1)
-                    {
-                        _snprintf(t, sizeof(t), "+%d", lb->local[k] - 1);
-                        UiText(UI_BOLD, 20, x + 118 + tw, cy - 12, ONLINE_GREEN, t, UI_LEFT);
-                    }
-                }
+                UiText(UI_BOLD, 22, x + 110, cy - 12, k == lb->mine ? UI_COL_ACCENT_HI : UI_COL_TEXT, lb->tag[k], UI_LEFT);
                 fw = online_flag(x + 110, cy + 14, 14, online_country_index(lb->country[k]));
                 if (!fw && lb->country[k][0] && strcmp(lb->country[k], "--")) fw = UiText(UI_BOLD, 13, x + 110, cy + 14, UI_COL_TEXT3, lb->country[k], UI_LEFT);
                 _snprintf(t, sizeof(t) - 1, "%s %d%s%s", Tr(T_ONLINE_PLAYER), k + 1, k == 0 ? " " UI_CH_MIDDOT " " : "", k == 0 ? Tr(T_ONLINE_HOST) : "");
@@ -11343,8 +13441,15 @@ static int online_lobby(IDirect3DDevice9 *dev, const std::string &hostFile)
                 UiCircle(x + colW - 92, cy - 10, 5, online_ping_colour(ms));
                 UiText(UI_BOLD, 17, x + colW - 16, cy - 10, online_ping_colour(ms), t, UI_RIGHT);
                 online_conn_tag(x + colW - 16, cy + 14, conn);
+                if (lb->local[k] > 1) sub = 1;   // its local players next
+                else k++;
             }
-            else UiText(UI_REGULAR, 18, x + 20 + (colW - 20) * 0.5f, cy, UI_COL_TEXT3, Tr(T_ONLINE_EMPTY_SLOT), UI_CENTER);
+            else
+            {
+                UiText(UI_REGULAR, 18, x + 20 + (colW - 20) * 0.5f, cy, UI_COL_TEXT3, Tr(T_ONLINE_EMPTY_SLOT), UI_CENTER);
+                k++;
+            }
+        }
         }
         UiText(UI_REGULAR, 16, x + 20 + (colW - 20) * 0.5f, y + h - 28, host && lb->count >= 2 ? UI_COL_ACCENT_HI : UI_COL_TEXT2,
                Tr(!host ? T_ONLINE_WAIT_HOST : lb->count < 2 ? T_ONLINE_NEED_TWO : T_ONLINE_CAN_START), UI_CENTER);
@@ -11376,9 +13481,8 @@ static int online_lobby(IDirect3DDevice9 *dev, const std::string &hostFile)
             UiText(UI_BOLD, 150 - 40 * frac, UI_WIDTH * 0.5f, UI_HEIGHT * 0.5f + 10, UiAlpha(UI_COL_ACCENT_HI, 1.0f - frac * 0.6f), t, UI_CENTER);
         }
         UiScreenFooter(Tr(host ? T_FOOT_ONLINE_LOBBY_HOST : T_FOOT_ONLINE_LOBBY));
-        UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
+        online_end();
+        UiPresent(dev);
     }
 }
 
@@ -11424,6 +13528,11 @@ static int online_create(IDirect3DDevice9 *dev, std::string *file)
     crc1 = rom.crc1;
     crc2 = rom.crc2;
     h64_rom_free(&rom);
+    {
+        // The game's name as the others see it: the databases' title ("Mario Kart 64"), else the list's name.
+        H64GameInfo gi;
+        if (ArtReadInfo(g.file.c_str(), &gi) && gi.found && gi.title[0]) g.shown = gi.title;
+    }
     online_busy(dev, Tr(T_ONLINE_CREATE), T_ONLINE_CONNECTING);
     if (!ArtKeyOf(g.file.c_str(), art)) art[0] = 0;   // its box art's key: the others see its cover beside the room
     if (!OnlineRoomCreate(name, pass, g.shown.c_str(), crc1, crc2, art, max, &code)) { online_message(dev, Tr(T_ONLINE_CREATE), online_error_text()); return 0; }
@@ -11494,6 +13603,8 @@ static void online_column(float x, float y, float w, float h, const char *title,
     if (focused) edge_glow(x, y, w, h, 18);
     UiPanel(x, y, w, h, 18);
     if (focused) UiRoundRing(x, y, w, h, 18, 2, UiAlpha(UI_COL_ACCENT_HI, 0.8f));
+    online_frame_note(x, y, w, h);
+    if (focused) net_border(x, y, w, h, 18, 1.0f);   // the one with the controller: the network round it
     UiText(UI_BOLD, 20, x + 22, y + 26, focused ? UI_COL_ACCENT_HI : UI_COL_TEXT, title, UI_LEFT);
     UiRect(x + 14, y + 48, w - 28, 1, UI_COL_LINE);
 }
@@ -11523,6 +13634,7 @@ static int online_play(IDirect3DDevice9 *dev)
     int sel = 0, top = 0, usel = 0, utop = 0, k, n, nu, last = 0, focus = COL_ROOMS;
     BYTE rtWas = 255, ltWas = 255;
     int rsWas = 0;   // the right stick's last side (-1 left, 1 right)
+    float chatOpen = 0, chatAt = -1;   // the chat's window grown (0..1) and when that was last moved
     unsigned invited = OnlineInvitedTo();   // the room of an invitation: selected when listed
     char note[200] = "";                    // online news while here (an invitation...), as a toast
     DWORD noteAt = 0;
@@ -11532,13 +13644,26 @@ static int online_play(IDirect3DDevice9 *dev)
     if (!chat.empty()) last = chat.back().id;
     for (k = 0; invited && k < (int)rooms.size(); k++)
         if (rooms[k].code == invited) { sel = k; invited = 0; }
+    OnlineLobbyWatch(1, last);   // read again by the online thread from now on
     readAt = GetTickCount() + ONLINE_ROOMS_EVERY_MS;
     UiInputInit(&in);
     for (;;)
     {
         const float x = UI_SAFE_X, y = UI_SAFE_Y + 64, w = UI_WIDTH - 2 * UI_SAFE_X, h = 636 - 14 - y, gap = 16;
-        const float leftW = 460, chatW = 380, roomsH = 316;
-        const float chatX = x + leftW + gap, usersX = chatX + chatW + gap, usersW = x + w - usersX, ccx = chatX + chatW * 0.5f;
+        const float leftW = 460, chatW0 = 380, roomsH = 316, usersW = x + w - (x + leftW + gap + chatW0 + gap);
+        // The chat with the controller: its window growing to the right over the players' column, which shrinks to a strip
+        // of their avatars (still seen while writing); the keyboard in the room gained; back as it was when it is left
+        // (0.35 s each way).
+        const float now = UiTime(), step = chatAt >= 0 ? (now - chatAt) / 0.35f : 0.0f;
+        float chatOpenE;
+        chatAt = now;
+        chatOpen += focus == COL_CHAT ? step : -step;
+        if (chatOpen < 0) chatOpen = 0;
+        if (chatOpen > 1) chatOpen = 1;
+        chatOpenE = ease_out(chatOpen);
+        const float slimW = 72, colW = usersW - chatOpenE * (usersW - slimW), usersX = x + w - colW;
+        const float chatX = x + leftW + gap, chatW = usersX - gap - chatX;
+        const float ccx = chatX + chatW * 0.5f;
         const float gamesY = y + roomsH + 12, gamesH = h - roomsH - 12, rowH = 50, gameH = 28, userH = 37;
         WORD down = UiInputPoll(&in);
         XINPUT_STATE st;
@@ -11547,24 +13672,32 @@ static int online_play(IDirect3DDevice9 *dev)
         int invite = 0;
         n = (int)rooms.size();
         nu = (int)users.size();
+        s_noteOwned = 1;   // its own notices (an invitation selects the room): not the hook's
         if (OnlineNoticeTake(note, sizeof(note), &invite))
         {
             noteAt = GetTickCount() | 1;
             xb_audio_ui_sound(XB_SFX_NOTIFY);
             if (invite) { invited = OnlineInvitedTo(); readAt = GetTickCount(); }   // the lists again: its room selected
         }
-        if ((int)(GetTickCount() - readAt) >= 0 || (focus == COL_ROOMS && (down & XINPUT_GAMEPAD_Y)))
+        if (readAt == 0) { OnlineLobbyWatch(1, last); readAt = GetTickCount() + ONLINE_ROOMS_EVERY_MS; }   // back from another screen
+        if (focus == COL_ROOMS && (down & XINPUT_GAMEPAD_Y))
         {
-            // Everything again (one request), the same room and the same player kept selected.
+            OnlineLobbyRefresh();   // Y: read again now
+            xb_audio_ui_sound(XB_SFX_ACTION);
+            down = 0;
+        }
+        {
+            // A new read (the online thread's): the same room and the same player kept selected.
             const unsigned was = sel < n ? rooms[sel].code : 0;
             std::string uwas = usel < nu ? users[usel].name : "";
-            if (OnlineLobbyGet(last, &freshRooms, &freshGames, &freshUsers, &freshChat))
+            if (OnlineLobbyTake(&freshRooms, &freshGames, &freshUsers, &freshChat))
             {
+                readAt = GetTickCount() + ONLINE_ROOMS_EVERY_MS;
                 rooms.swap(freshRooms);
                 games.swap(freshGames);
                 users.swap(freshUsers);
                 for (k = 0; k < (int)freshChat.size(); k++) { chat.push_back(freshChat[k]); last = freshChat[k].id; }
-                if ((int)chat.size() > shown * 4) chat.erase(chat.begin(), chat.end() - shown);
+                if ((int)chat.size() > shown * 6) chat.erase(chat.begin(), chat.end() - shown * 4);
                 sel = usel = 0;
                 for (k = 0; k < (int)rooms.size(); k++)
                     if (rooms[k].code == was) sel = k;
@@ -11575,28 +13708,27 @@ static int online_play(IDirect3DDevice9 *dev)
                 n = (int)rooms.size();
                 nu = (int)users.size();
             }
-            if (down & XINPUT_GAMEPAD_Y) xb_audio_ui_sound(XB_SFX_ACTION);
-            readAt = GetTickCount() + ONLINE_ROOMS_EVERY_MS;
-            UiInputInit(&in);
-            down = 0;
         }
-        if (down & XINPUT_GAMEPAD_B) { xb_audio_ui_sound(XB_SFX_BACK); return 0; }
+        if ((down & XINPUT_GAMEPAD_B) && focus == COL_CHAT) { focus = COL_ROOMS; xb_audio_ui_sound(XB_SFX_BACK); down = 0; }   // the keyboard closed
+        if (down & XINPUT_GAMEPAD_B) { xb_audio_ui_sound(XB_SFX_BACK); OnlineLobbyWatch(0, 0); return 0; }
         {
-            // LB and RB: the column on the left or on the right; the right stick left or right too.
+            // LB and RB: the column on the left or on the right; the right stick left or right too. On the chat RB is the
+            // keyboard's space (LB, B or the stick leave it).
             const SHORT rx = padOk ? st.Gamepad.sThumbRX : 0;
             const int stick = rx < -20000 ? -1 : rx > 20000 ? 1 : 0, was = focus;
             if (((down & XINPUT_GAMEPAD_LEFT_SHOULDER) || (stick < 0 && rsWas >= 0)) && focus > 0) focus--;
-            if (((down & XINPUT_GAMEPAD_RIGHT_SHOULDER) || (stick > 0 && rsWas <= 0)) && focus < COL_COUNT - 1) focus++;
+            if ((((down & XINPUT_GAMEPAD_RIGHT_SHOULDER) && focus != COL_CHAT) || (stick > 0 && rsWas <= 0)) && focus < COL_COUNT - 1) focus++;
             rsWas = stick;
             if (focus != was) { xb_audio_ui_sound(XB_SFX_TAB); down = 0; }
-            down &= ~(WORD)(XINPUT_GAMEPAD_LEFT_SHOULDER | XINPUT_GAMEPAD_RIGHT_SHOULDER);
+            down &= ~(WORD)XINPUT_GAMEPAD_LEFT_SHOULDER;
+            if (focus != COL_CHAT) down &= ~(WORD)XINPUT_GAMEPAD_RIGHT_SHOULDER;
         }
         if (focus == COL_CHAT)
         {
-            // The chat: the keyboard, LT a space (RB is the next column), RT sends.
+            // The chat: the keyboard (RB a space), LT the letters or the emojis, RT sends.
             const BYTE rt = padOk ? st.Gamepad.bRightTrigger : 0, lt = padOk ? st.Gamepad.bLeftTrigger : 0;
             kbd_input(&kb, down & ~(WORD)XINPUT_GAMEPAD_START);
-            if (lt > 128 && ltWas <= 128) kbd_input(&kb, XINPUT_GAMEPAD_RIGHT_SHOULDER);   // the keyboard's space
+            if (lt > 128 && ltWas <= 128) kbd_toggle_emoji(&kb);
             if (rt > 128 && rtWas <= 128 && text[0])
             {
                 if (OnlineChatSay(text)) { text[0] = 0; xb_audio_ui_sound(XB_SFX_SELECT); readAt = 0; }
@@ -11615,7 +13747,7 @@ static int online_play(IDirect3DDevice9 *dev)
             if (nu && (down & XINPUT_GAMEPAD_A))
             {
                 xb_audio_ui_sound(XB_SFX_SELECT);
-                online_stats(dev, users[usel].name);
+                if (online_stats(dev, users[usel].name)) { OnlineLobbyWatch(0, 0); return 1; }
                 UiInputInit(&in);
                 continue;
             }
@@ -11626,7 +13758,7 @@ static int online_play(IDirect3DDevice9 *dev)
             {
                 std::string file;
                 xb_audio_ui_sound(XB_SFX_SELECT);
-                if (online_create(dev, &file)) return online_lobby(dev, file);
+                if (online_create(dev, &file)) { OnlineLobbyWatch(0, 0); return online_lobby(dev, file); }
                 readAt = 0;
                 UiInputInit(&in);
                 continue;
@@ -11644,7 +13776,7 @@ static int online_play(IDirect3DDevice9 *dev)
                 else if (!rooms[sel].locked || online_keyboard(dev, rooms[sel].name, Tr(T_ONLINE_PASSWORD_ASK), pass, 1, ONLINE_ROOM_PASS, KBD_NAME))
                 {
                     online_busy(dev, Tr(T_ONLINE_PLAY), T_ONLINE_CONNECTING);
-                    if (OnlineRoomJoin(rooms[sel].code, pass)) return online_lobby(dev, std::string());
+                    if (OnlineRoomJoin(rooms[sel].code, pass)) { OnlineLobbyWatch(0, 0); return online_lobby(dev, std::string()); }
                     online_message(dev, Tr(T_ONLINE_PLAY), online_error_text());
                 }
                 readAt = 0;   // the list again: that room may be gone or full
@@ -11659,15 +13791,21 @@ static int online_play(IDirect3DDevice9 *dev)
         if (usel >= utop + userRows) utop = usel - userRows + 1;
         if (utop > 0 && utop + userRows > nu) utop = nu > userRows ? nu - userRows : 0;
         dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
-        UiBegin(dev);
+        online_begin(dev, __FUNCTION__);
         UiBackdrop();
         browser_effect();
         UiOnlineLogo(UI_WIDTH * 0.5f, y - 34, 60);   // the title: the LAIKA 64 ONLINE logo, centred
         {
-            // How many play online and how many rooms there are, top right.
-            char t[96];
+            // How many play online and how many rooms there are, top right ("1 player  ·  0 rooms").
+            char t[96], pl[48], rm[48];
+            const int nr = n + (int)games.size();
             float tw;
-            _snprintf(t, sizeof(t) - 1, Tr(T_ONLINE_COUNTS), nu, n + (int)games.size());
+            if (nu == 1) strncpy(pl, Tr(T_ONLINE_PLAYERS_1), sizeof(pl) - 1);
+            else _snprintf(pl, sizeof(pl) - 1, Tr(T_ONLINE_PLAYERS_N), nu);
+            if (nr == 1) strncpy(rm, Tr(T_ONLINE_ROOMS_C_1), sizeof(rm) - 1);
+            else _snprintf(rm, sizeof(rm) - 1, Tr(T_ONLINE_ROOMS_C_N), nr);
+            pl[sizeof(pl) - 1] = rm[sizeof(rm) - 1] = 0;
+            _snprintf(t, sizeof(t) - 1, "%s  " UI_CH_MIDDOT "  %s", pl, rm);
             t[sizeof(t) - 1] = 0;
             tw = UiText(UI_REGULAR, 18, x + w, y - 40, UI_COL_TEXT2, t, UI_RIGHT);
             UiCircle(x + w - tw - 16, y - 40, 6, ONLINE_GREEN);
@@ -11678,9 +13816,23 @@ static int online_play(IDirect3DDevice9 *dev)
             _snprintf(t, sizeof(t) - 1, Tr(T_ONLINE_ROOMS_N), n);
             t[sizeof(t) - 1] = 0;
             online_column(x, y, leftW, roomsH, t, focus == COL_ROOMS);
-            UiText(UI_REGULAR, 14, x + leftW - 150, y + 26, UI_COL_TEXT3, "Ping", UI_LEFT);
+            if (n) UiText(UI_REGULAR, 14, x + leftW - 150, y + 26, UI_COL_TEXT3, "Ping", UI_LEFT);   // (over rooms only)
         }
-        if (!n) UiText(UI_REGULAR, 18, x + leftW * 0.5f, y + 48 + (roomsH - 48) * 0.5f, UI_COL_TEXT2, Tr(T_ONLINE_NO_ROOMS), UI_CENTER);
+        if (!n)
+        {
+            // None: a "+" in a box, the words, and the button that makes one.
+            const float cx = x + leftW * 0.5f, cy = y + 48 + (roomsH - 48) * 0.5f, pw = UiTextWidth(UI_BOLD, 16, Tr(T_ONLINE_CREATE)) + 52;
+            const D3DCOLOR blue = D3DCOLOR_ARGB(200, 120, 175, 255);
+            UiRoundRing(cx - 26, cy - 64, 52, 40, 8, 2.0f, D3DCOLOR_ARGB(150, 120, 175, 255));
+            UiRect(cx - 1.5f, cy - 53, 3, 18, blue);
+            UiRect(cx - 9, cy - 45.5f, 18, 3, blue);
+            UiText(UI_BOLD, 19, cx, cy - 2, UI_COL_TEXT, Tr(T_ONLINE_NO_ROOMS), UI_CENTER);
+            UiRoundRect(cx - pw * 0.5f, cy + 20, pw, 32, 16, D3DCOLOR_ARGB(70, 60, 120, 230), D3DCOLOR_ARGB(70, 60, 120, 230));
+            UiRoundRing(cx - pw * 0.5f, cy + 20, pw, 32, 16, 1.0f, D3DCOLOR_ARGB(150, 110, 165, 255));
+            UiCircle(cx - pw * 0.5f + 19, cy + 36, 11, D3DCOLOR_ARGB(255, 40, 110, 220));
+            UiText(UI_BOLD, 14, cx - pw * 0.5f + 19, cy + 36, UI_COL_TEXT, "X", UI_CENTER);
+            UiText(UI_BOLD, 16, cx - pw * 0.5f + 40, cy + 36, UI_COL_TEXT, Tr(T_ONLINE_CREATE), UI_LEFT);
+        }
         else if (focus == COL_ROOMS) selection_bar(x + 8, anim_step(&selAnim, y + 56 + (sel - top) * rowH, 0) + 1, leftW - 16, rowH - 2);
         for (k = 0; k < rows && top + k < n; k++)
         {
@@ -11693,19 +13845,20 @@ static int online_play(IDirect3DDevice9 *dev)
             IDirect3DTexture9 *cover = room_cover(dev, rm->art, &coverLoads, &cw, &chh);
             if (cover && chh > 0)
             {
-                // Its game's box, small, left of the name.
-                const float ch = rowH - 16, cwv = ch * cw / chh;
-                UiImage(cover, x + 30 - cwv * 0.5f, cy - ch * 0.5f, cwv, ch, 3, D3DCOLOR_ARGB(255, 255, 255, 255));
+                // Its game's box, small, in a 44 x 36 room on the left (wider, it covered the name).
+                float ch = 36, cwv = ch * cw / chh;
+                if (cwv > 44) { ch *= 44 / cwv; cwv = 44; }
+                UiImage(cover, x + 38 - cwv * 0.5f, cy - ch * 0.5f, cwv, ch, 3, D3DCOLOR_ARGB(255, 255, 255, 255));
             }
             {
                 // The name, and right after it a padlock when the room has a password.
                 float nw;
-                UiTextFit(UI_BOLD, 18, leftW - 210 - (rm->locked ? 26 : 0), rm->name, fit, sizeof(fit));
-                nw = UiText(UI_BOLD, 18, x + 50, cy - 10, s1 ? UI_COL_TEXT : UI_COL_TEXT2, fit, UI_LEFT);
-                if (rm->locked) online_padlock(x + 50 + nw + 14, cy - 11, 16, s1 ? UI_COL_ACCENT_HI : D3DCOLOR_ARGB(255, 240, 200, 70));
+                UiTextFit(UI_BOLD, 18, leftW - 234 - (rm->locked ? 26 : 0), rm->name, fit, sizeof(fit));
+                nw = UiText(UI_BOLD, 18, x + 70, cy - 10, s1 ? UI_COL_TEXT : UI_COL_TEXT2, fit, UI_LEFT);
+                if (rm->locked) online_padlock(x + 70 + nw + 14, cy - 11, 16, s1 ? UI_COL_ACCENT_HI : D3DCOLOR_ARGB(255, 240, 200, 70));
             }
-            UiTextFit(UI_REGULAR, 14, leftW - 210, rm->game, fit, sizeof(fit));
-            UiText(UI_REGULAR, 14, x + 50, cy + 11, UI_COL_ACCENT_HI, fit, UI_LEFT);
+            UiTextFit(UI_REGULAR, 14, leftW - 234, rm->game, fit, sizeof(fit));
+            UiText(UI_REGULAR, 14, x + 70, cy + 11, UI_COL_ACCENT_HI, fit, UI_LEFT);
             online_ping_bars(x + leftW - 150, cy, 16, ms);
             if (ms) _snprintf(t, sizeof(t), "%d ms", ms);
             else _snprintf(t, sizeof(t), "-- ms");
@@ -11722,7 +13875,18 @@ static int online_play(IDirect3DDevice9 *dev)
         }
         // The games being played: who, which game, for how long.
         online_column(x, gamesY, leftW, gamesH, Tr(T_ONLINE_LIVE), 0);
-        if (games.empty()) UiText(UI_REGULAR, 17, x + leftW * 0.5f, gamesY + 48 + (gamesH - 48) * 0.5f, UI_COL_TEXT3, Tr(T_ONLINE_NO_GAMES), UI_CENTER);
+        if (games.empty())
+        {
+            // Nobody playing: a faint controller over the words.
+            const float gx = x + leftW * 0.5f, gy = gamesY + 48 + (gamesH - 48) * 0.5f - 18;
+            const D3DCOLOR g = D3DCOLOR_ARGB(150, 160, 162, 178);
+            UiRoundRing(gx - 22, gy - 11, 44, 22, 10, 2.0f, g);
+            UiRect(gx - 13, gy - 1, 8, 2, g);
+            UiRect(gx - 10, gy - 4, 2, 8, g);
+            UiCircle(gx + 9, gy - 2, 2, g);
+            UiCircle(gx + 14, gy + 3, 2, g);
+            UiText(UI_REGULAR, 17, gx, gy + 34, UI_COL_TEXT3, Tr(T_ONLINE_NO_GAMES), UI_CENTER);
+        }
         else
         {
             UiText(UI_REGULAR, 13, x + 22, gamesY + 64, UI_COL_TEXT3, Tr(T_ONLINE_COL_PLAYERS), UI_LEFT);
@@ -11749,91 +13913,221 @@ static int online_play(IDirect3DDevice9 *dev)
             UiText(UI_BOLD, 15, x + leftW - 20, cy, ONLINE_GREEN, t, UI_RIGHT);
         }
         // The general chat (the newest at the bottom), the keyboard under it.
+        // The keyboard only while the chat has the controller; a bar to write in otherwise (what was typed, or the hint).
         online_column(chatX, y, chatW, h, Tr(T_ONLINE_GENERAL), focus == COL_CHAT);
-        online_last_time(chatX + chatW - 22, y + 26, chat);
+        online_chat_view(chatX + 14, y + 60, focus == COL_CHAT ? y + h - 274 : y + h - 62, chatW - 30, chat);
+        if (chat.empty()) UiText(UI_REGULAR, 17, chatX + 22, y + 72, UI_COL_TEXT3, Tr(T_ONLINE_CHAT_EMPTY), UI_LEFT);
+        if (focus == COL_CHAT)
         {
-            const int first = (int)chat.size() > shown ? (int)chat.size() - shown : 0;
-            for (k = first; k < (int)chat.size(); k++) online_chat_line(chatX + 14, y + 72 + (k - first) * 29, chatW - 30, &chat[k]);
-            if (chat.empty()) UiText(UI_REGULAR, 17, chatX + 22, y + 72, UI_COL_TEXT3, Tr(T_ONLINE_CHAT_EMPTY), UI_LEFT);
+            // The text, the tabs (ABC, the emojis), the keys: as wide as the window lets them be.
+            const float kw = (chatW - 40 - 9 * 5) / 10 < 58 ? (chatW - 40 - 9 * 5) / 10 : 58;
+            kbd_draw_text(&kb, ccx, y + h - 264, chatW - 28, 36, 18);
+            kbd_draw_tabs(&kb, chatX + 14, y + h - 206);
+            kbd_draw_keys_wh(&kb, ccx, y + h - 184, kw, 30, 5);
         }
-        kbd_draw_text(&kb, ccx, y + h - 236, chatW - 28, 38, 18);
-        kbd_draw_keys(&kb, ccx, y + h - 188, 29, 4);
-        if (focus != COL_CHAT) UiRect(chatX + 6, y + h - 240, chatW - 12, 232, UiAlpha(UI_COL_BG_BOTTOM, 0.55f));   // another column has the controller
-        // The players online: flag, name, where they are, their time to the server, cable or Wi-Fi.
-        online_column(usersX, y, usersW, h, Tr(T_ONLINE_COL_PLAYERS), focus == COL_PLAYERS);
-        if (!nu) UiText(UI_REGULAR, 17, usersX + usersW * 0.5f, y + h * 0.5f, UI_COL_TEXT3, Tr(T_ONLINE_EMPTY), UI_CENTER);
-        else if (focus == COL_PLAYERS) selection_bar(usersX + 6, anim_step(&userAnim, y + 56 + (usel - utop) * userH, 0) + 1, usersW - 12, userH - 2);
-        for (k = 0; k < userRows && utop + k < nu; k++)
+        else
         {
-            const OnlineUser *u = &users[utop + k];
-            const int s1 = focus == COL_PLAYERS && utop + k == usel, me = !_stricmp(u->name, OnlineMe()->tag);
-            const int ms = me && OnlineMyMs() ? OnlineMyMs() : u->ms;
-            const float cy = y + 56 + k * userH + userH * 0.5f;
-            const float fw = online_flag(usersX + 16, cy - 7, 13, online_country_index(u->country));
-            const D3DCOLOR where = u->status[0] ? ONLINE_GREEN : u->inRoom ? UI_COL_ACCENT_HI : UI_COL_TEXT3;
-            float right = usersX + usersW - 14;
-            char fit[64];
-            right -= online_conn_tag(right, cy, me ? OnlineMyConn() : u->conn) + 6;
-            if (me || u->conn != ONLINE_CONN_OLD)   // an old LAIKA tells no time: no bars
+            char fit[120];
+            const float bx = chatX + 14, by = y + h - 50, bw = chatW - 28;
+            UiRoundRect(bx, by, bw, 32, 16, D3DCOLOR_ARGB(18, 255, 255, 255), D3DCOLOR_ARGB(18, 255, 255, 255));
+            UiRoundRing(bx, by, bw, 32, 16, 1.0f, D3DCOLOR_ARGB(40, 255, 255, 255));
+            if (text[0]) RichText(UI_REGULAR, 16, bx + 18, by + 16, bw - 36, 1, UI_COL_TEXT2, text, 1, NULL);
+            else
             {
-                right -= 18;
-                online_ping_bars(right, cy, 14, ms);
+                UiTextFit(UI_REGULAR, 16, bw - 36, Tr(T_ONLINE_CHAT_HINT), fit, sizeof(fit));
+                UiText(UI_REGULAR, 16, bx + 18, by + 16, UI_COL_TEXT3, fit, UI_LEFT);
             }
-            right -= 8;
-            UiTextFit(s1 || me ? UI_BOLD : UI_REGULAR, 16, right - usersX - 30 - fw, u->name, fit, sizeof(fit));
-            UiText(s1 || me ? UI_BOLD : UI_REGULAR, 16, usersX + 22 + fw, cy - 7, me ? UI_COL_ACCENT_HI : s1 ? UI_COL_TEXT : UI_COL_TEXT2, fit, UI_LEFT);
-            UiTextFit(UI_REGULAR, 13, right - usersX - 22, Tr(u->status[0] ? T_ONLINE_ST_GAME : u->inRoom ? T_ONLINE_ST_ROOM : T_ONLINE_ST_LOBBY), fit, sizeof(fit));
-            UiText(UI_REGULAR, 13, usersX + 16, cy + 10, where, fit, UI_LEFT);
         }
-        if (nu > userRows)
+        if (chatOpenE < 0.05f)
         {
-            const float trackY = y + 58, trackH = userRows * userH - 4, barH = trackH * userRows / nu;
-            UiRect(usersX + usersW - 6, trackY, 3, trackH, UiAlpha(UI_COL_TEXT3, 0.3f));
-            UiRect(usersX + usersW - 6, trackY + (trackH - barH) * utop / (nu - userRows), 3, barH, UI_COL_ACCENT_HI);
+            // The players online: flag, name, what they do, their time, cable or Wi-Fi.
+            online_column(usersX, y, usersW, h, Tr(T_ONLINE_COL_PLAYERS), focus == COL_PLAYERS);
+            if (!nu) UiText(UI_REGULAR, 17, usersX + usersW * 0.5f, y + h * 0.5f, UI_COL_TEXT3, Tr(T_ONLINE_EMPTY), UI_CENTER);
+            else if (focus == COL_PLAYERS) selection_bar(usersX + 6, anim_step(&userAnim, y + 56 + (usel - utop) * userH, 0) + 1, usersW - 12, userH - 2);
+            for (k = 0; k < userRows && utop + k < nu; k++)
+            {
+                const OnlineUser *u = &users[utop + k];
+                const int s1 = focus == COL_PLAYERS && utop + k == usel, me = !_stricmp(u->name, OnlineMe()->tag);
+                const int ms = me && OnlineMyMs() ? OnlineMyMs() : u->ms;
+                const float cy = y + 56 + k * userH + userH * 0.5f;
+                const float ax = usersX + 26, fw = online_flag(usersX + 46, cy - 7, 13, online_country_index(u->country)) + 30;
+                const D3DCOLOR where = u->status[0] ? ONLINE_GREEN : u->inRoom ? UI_COL_ACCENT_HI : UI_COL_TEXT3;
+                float right = usersX + usersW - 14;
+                char fit[64], doing[80];
+                // The name the whole row's width (cut, long ones were cut short); the connection on the line under it.
+                right -= online_conn_tag(right, cy + 10, me ? OnlineMyConn() : u->conn) + 6;
+                if (me || u->conn != ONLINE_CONN_OLD)   // an old LAIKA tells no time: no bars
+                {
+                    right -= 18;
+                    online_ping_bars(right, cy + 10, 12, ms);
+                }
+                right -= 8;
+                UiTextFit(s1 || me ? UI_BOLD : UI_REGULAR, 16, usersX + usersW - 14 - (usersX + 22 + fw), u->name, fit, sizeof(fit));
+                online_avatar(ax, cy, 14, u->avatar, u->name);   // its avatar, as in the chat; the name in its chat colour
+                UiText(s1 || me ? UI_BOLD : UI_REGULAR, 16, usersX + 22 + fw, cy - 7, online_tag_colour(u->name), fit, UI_LEFT);
+                UiCircle(usersX + 50, cy + 10, 3, where);
+                // What they do: the game they play by its name ("In game" read as an online game: there were none).
+                if (u->status[0]) { _snprintf(doing, sizeof(doing) - 1, Tr(T_ONLINE_PLAYING), u->status); doing[sizeof(doing) - 1] = 0; }
+                else _snprintf(doing, sizeof(doing), "%s", Tr(u->inRoom ? T_ONLINE_ST_ROOM : T_ONLINE_ST_LOBBY));
+                UiTextFit(UI_REGULAR, 13, right - usersX - 58, doing, fit, sizeof(fit));
+                UiText(UI_REGULAR, 13, usersX + 58, cy + 10, u->status[0] ? UiAlpha(ONLINE_GREEN, 0.9f) : UI_COL_TEXT3, fit, UI_LEFT);
+            }
+            if (y + 56 + (nu < userRows ? nu : userRows) * userH < y + h - 160)
+            {
+                // Room under the players: how to play with friends.
+                const float cx0 = usersX + 14, cy0 = y + h - 150, cw = usersW - 28;
+                UiRoundRect(cx0, cy0, cw, 132, 14, D3DCOLOR_ARGB(12, 255, 255, 255), D3DCOLOR_ARGB(12, 255, 255, 255));
+                UiRoundRing(cx0, cy0, cw, 132, 14, 1.0f, D3DCOLOR_ARGB(34, 255, 255, 255));
+                UiRoundRing(cx0 + 20, cy0 + 20, 12, 12, 6, 2.0f, D3DCOLOR_ARGB(220, 170, 140, 255));
+                UiRoundRing(cx0 + 15, cy0 + 35, 22, 13, 6, 2.0f, D3DCOLOR_ARGB(220, 170, 140, 255));
+                UiRoundRing(cx0 + 42, cy0 + 20, 12, 12, 6, 2.0f, D3DCOLOR_ARGB(220, 90, 200, 255));
+                UiRoundRing(cx0 + 37, cy0 + 35, 22, 13, 6, 2.0f, D3DCOLOR_ARGB(220, 90, 200, 255));
+                UiRect(cx0 + 66, cy0 + 33, 12, 2, ONLINE_GREEN);
+                UiRect(cx0 + 71, cy0 + 28, 2, 12, ONLINE_GREEN);
+                UiText(UI_BOLD, 16, cx0 + 86, cy0 + 34, UI_COL_TEXT, Tr(T_ONLINE_FRIENDS_CARD), UI_LEFT);
+                paragraph(UI_REGULAR, 14, cx0 + 14, cy0 + 60, cw - 28, 3, UI_COL_TEXT2, Tr(T_ONLINE_FRIENDS_HOW));
+            }
+            if (nu > userRows)
+            {
+                const float trackY = y + 58, trackH = userRows * userH - 4, barH = trackH * userRows / nu;
+                UiRect(usersX + usersW - 6, trackY, 3, trackH, UiAlpha(UI_COL_TEXT3, 0.3f));
+                UiRect(usersX + usersW - 6, trackY + (trackH - barH) * utop / (nu - userRows), 3, barH, UI_COL_ACCENT_HI);
+            }
+        }
+        else
+        {
+            // The chat grown: the players as a strip - how many on top, their avatars one under another (a green dot on
+            // those playing, "+N" for the ones that do not fit); while it shrinks or grows back, its frame alone.
+            char num[16];
+            const float scx = usersX + colW * 0.5f, step2 = 46;
+            const int fit = (int)((h - 66) / step2);
+            _snprintf(num, sizeof(num) - 1, "%d", nu);
+            num[sizeof(num) - 1] = 0;
+            online_column(usersX, y, colW, h, "", 0);
+            if (chatOpenE > 0.7f)
+            {
+                const float a = (chatOpenE - 0.7f) / 0.3f;
+                UiCircle(scx - UiTextWidth(UI_BOLD, 18, num) * 0.5f - 10, y + 26, 4, UiAlpha(ONLINE_GREEN, a));
+                UiText(UI_BOLD, 18, scx + 4, y + 26, UiAlpha(UI_COL_TEXT, a), num, UI_CENTER);
+                for (k = 0; k < nu && k < fit; k++)
+                {
+                    const float cy = y + 58 + k * step2 + step2 * 0.5f;
+                    if (k == fit - 1 && nu > fit)
+                    {
+                        char more[16];
+                        _snprintf(more, sizeof(more) - 1, "+%d", nu - fit + 1);
+                        more[sizeof(more) - 1] = 0;
+                        UiCircle(scx, cy, 18, UiAlpha(UI_COL_CARD, a));
+                        UiText(UI_BOLD, 14, scx, cy, UiAlpha(UI_COL_TEXT2, a), more, UI_CENTER);
+                        break;
+                    }
+                    online_avatar(scx, cy, 18, users[k].avatar, users[k].name);
+                    if (users[k].status[0])
+                    {
+                        UiCircle(scx + 13, cy + 13, 6, UI_COL_BG_BOTTOM);
+                        UiCircle(scx + 13, cy + 13, 4, ONLINE_GREEN);
+                    }
+                }
+            }
         }
         if (noteAt && GetTickCount() - noteAt < 9000) UiToast(note, (float)(GetTickCount() - noteAt), 9000.0f);
         UiScreenFooter(Tr(focus == COL_CHAT ? T_FOOT_ONLINE_PLAY_CHAT : focus == COL_PLAYERS ? T_FOOT_ONLINE_PLAYERS : T_FOOT_ONLINE_ROOMS));
-        UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
+        online_end();
+        UiPresent(dev);
     }
 }
 
-// A conversation with a friend: the messages (mine on the right), read again every few seconds, the keyboard
-// always under them; RT sends.
-static void online_conversation(IDirect3DDevice9 *dev, const char *with, int avatar)
+// A conversation with a friend, as a messaging app's: who (avatar, name, flag, what they are doing; a room of theirs
+// waiting: Y joins it), the messages in bubbles (theirs on the left with their avatar, mine on the right, the time under
+// each run of them, a line where the day changes), quick phrases (left and right, A sends one) and the bar to write in
+// (X opens the keyboard - it used to be always there, under half of the screen; B closes it, RT sends). Read again every
+// few seconds. Returns 1 when a game starts (the friend's room joined from here).
+#define QUICK_PHRASES 6
+static int online_conversation(IDirect3DDevice9 *dev, const char *with, int avatar)
 {
     std::vector<OnlineDmLine> lines, fresh;
+    std::vector<OnlineUser> friends;
+    std::vector<OnlineRoomInfo> rooms;
+    OnlineUser who;
     OnlineKbd kb;
     UiInput in;
     DWORD readAt;
     char text[124] = "";
-    int last = 0, k;
-    BYTE rtWas = 255;
-    const int shown = 7;
+    int last = 0, k, typing = 0, phrase = 0, room = -1;
+    BYTE rtWas = 255, ltWas = 255;
     kbd_init(&kb, text, 1, 120, KBD_CHAT);
     online_busy(dev, with, T_ONLINE_CONNECTING);
-    if (!OnlineConv(with, 0, &lines)) { online_message(dev, with, online_error_text()); return; }
+    if (!OnlineConv(with, 0, &lines)) { online_message(dev, with, online_error_text()); return 0; }
+    // Where the friend is, and a room of theirs.
+    memset(&who, 0, sizeof(who));
+    strncpy(who.name, with, sizeof(who.name) - 1);
+    who.avatar = avatar;
+    if (OnlineList(ONLINE_LIST_FRIENDS, 0, &friends))
+        for (k = 0; k < (int)friends.size(); k++)
+            if (!_stricmp(friends[k].name, with)) who = friends[k];
+    if (OnlineRooms(&rooms))
+        for (k = 0; k < (int)rooms.size(); k++)
+            if (!_stricmp(rooms[k].host, with) && rooms[k].players < rooms[k].max) room = k;
     if (!lines.empty()) last = lines.back().id;
     OnlineUnreadClear(with);
     readAt = GetTickCount() + 5000;
     UiInputInit(&in);
     for (;;)
     {
-        const float w = 960, h = 584, x = (UI_WIDTH - w) * 0.5f, y = 96, cx = x + w * 0.5f;
+        const float w = UI_WIDTH - 2 * UI_SAFE_X, h = 520, x = UI_SAFE_X, y = 112, lx = x + 26, lw = w - 52, cx = x + w * 0.5f;
+        const float msgTop = y + 92, msgBottom = y + 396, barY = y + 466;
         WORD down = UiInputPoll(&in);
         XINPUT_STATE st;
         const BYTE rt = XInputGetState(0, &st) == ERROR_SUCCESS ? st.Gamepad.bRightTrigger : 0;
-        int first;
-        if (down & XINPUT_GAMEPAD_B) { xb_audio_ui_sound(XB_SFX_BACK); return; }
-        kbd_input(&kb, down & ~(WORD)XINPUT_GAMEPAD_START);
-        if (rt > 128 && rtWas <= 128 && text[0])
+        const char *sendText = NULL;
+        if (typing)
         {
-            if (OnlineDm(with, text)) { text[0] = 0; xb_audio_ui_sound(XB_SFX_SELECT); readAt = 0; }
+            // Writing: the keyboard's (B closes it, RT sends).
+            const BYTE lt = XInputGetState(0, &st) == ERROR_SUCCESS ? st.Gamepad.bLeftTrigger : 0;
+            if (down & XINPUT_GAMEPAD_B) { typing = 0; xb_audio_ui_sound(XB_SFX_BACK); UiInputInit(&in); continue; }
+            kbd_input(&kb, down & ~(WORD)XINPUT_GAMEPAD_START);
+            if (lt > 128 && ltWas <= 128) kbd_toggle_emoji(&kb);   // the letters or the emojis
+            ltWas = lt;
+            if (rt > 128 && rtWas <= 128 && text[0]) sendText = text;
+        }
+        else
+        {
+            if (down & XINPUT_GAMEPAD_B) { xb_audio_ui_sound(XB_SFX_BACK); return 0; }
+            if (down & (XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT))
+            {
+                phrase = (phrase + ((down & XINPUT_GAMEPAD_DPAD_RIGHT) ? 1 : QUICK_PHRASES - 1)) % QUICK_PHRASES;
+                xb_audio_ui_sound(XB_SFX_MOVE);
+            }
+            if (down & XINPUT_GAMEPAD_A) sendText = Tr(T_QP_1 + phrase);
+            if (down & XINPUT_GAMEPAD_X) { typing = 1; xb_audio_ui_sound(XB_SFX_SELECT); UiInputInit(&in); continue; }
+            if (rt > 128 && rtWas <= 128 && text[0]) sendText = text;
+            if (room >= 0 && (down & XINPUT_GAMEPAD_Y))
+            {
+                // Into the friend's room (its password asked when it has one).
+                char pass[ONLINE_ROOM_PASS + 1] = "";
+                xb_audio_ui_sound(XB_SFX_SELECT);
+                if (!rooms[room].locked || online_keyboard(dev, rooms[room].name, Tr(T_ONLINE_PASSWORD_ASK), pass, 1, ONLINE_ROOM_PASS, KBD_NAME))
+                {
+                    online_busy(dev, Tr(T_ONLINE_PLAY), T_ONLINE_CONNECTING);
+                    if (OnlineRoomJoin(rooms[room].code, pass)) { if (online_lobby(dev, std::string())) return 1; }
+                    else online_message(dev, Tr(T_ONLINE_PLAY), online_error_text());
+                }
+                UiInputInit(&in);
+                continue;
+            }
+        }
+        rtWas = rt;
+        if (sendText)
+        {
+            if (OnlineDm(with, sendText))
+            {
+                if (sendText == text) { text[0] = 0; typing = 0; }
+                xb_audio_ui_sound(XB_SFX_SELECT);
+                readAt = 0;
+            }
             else online_message(dev, with, !strcmp(OnlineError(), "busy") ? Tr(T_ONLINE_CHAT_SOON) : online_error_text());
             UiInputInit(&in);
         }
-        rtWas = rt;
         if ((int)(GetTickCount() - readAt) >= 0)
         {
             if (OnlineConv(with, last, &fresh))
@@ -11842,39 +14136,135 @@ static void online_conversation(IDirect3DDevice9 *dev, const char *with, int ava
             readAt = GetTickCount() + 5000;
         }
         dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
-        UiBegin(dev);
-        UiBackdrop();
-        browser_effect();
-        online_avatar(x + 18, y - 40, 18, avatar, with);
-        UiText(UI_BOLD, 28, x + 46, y - 40, UI_COL_TEXT, with, UI_LEFT);
-        edge_glow(x, y, w, h, 22);
-        UiPanel(x, y, w, h, 22);
-        first = (int)lines.size() > shown ? (int)lines.size() - shown : 0;
-        if (lines.empty()) UiText(UI_REGULAR, 19, cx, y + 130, UI_COL_TEXT2, Tr(T_ONLINE_DM_EMPTY), UI_CENTER);
-        for (k = first; k < (int)lines.size(); k++)
+        online_begin(dev, __FUNCTION__);
+        hub_frame("", NULL, x, y, w, h);
+        UiOnlineLogo(UI_WIDTH * 0.5f, y - 46, 60);
+        online_me_corner(x, y, w);
         {
-            // A bubble: mine on the right in the accent colour, the friend's on the left.
-            const OnlineDmLine *m = &lines[k];
-            char fit[200];
-            float tw, bx;
-            const float by = y + 18 + (k - first) * 34;
-            UiTextFit(UI_REGULAR, 17, w - 260, m->text.c_str(), fit, sizeof(fit));
-            tw = UiTextWidth(UI_REGULAR, 17, fit) + 28;
-            bx = m->mine ? x + w - 24 - tw : x + 24;
-            UiRoundRect(bx, by, tw, 28, 14, m->mine ? UI_COL_ACCENT : UI_COL_CARD, m->mine ? UI_COL_ACCENT : UI_COL_CARD);
-            UiText(UI_REGULAR, 17, bx + 14, by + 14, m->mine ? D3DCOLOR_ARGB(255, 255, 255, 255) : UI_COL_TEXT, fit, UI_LEFT);
+            // Who.
+            const D3DCOLOR state = !who.online ? D3DCOLOR_ARGB(255, 90, 92, 105) : who.status[0] ? ONLINE_GREEN : D3DCOLOR_ARGB(255, 40, 200, 190);
+            char t[96];
+            float nw;
+            online_avatar(lx + 24, y + 42, 24, who.avatar, with);
+            UiCircle(lx + 41, y + 59, 8, D3DCOLOR_ARGB(255, 20, 20, 32));
+            UiCircle(lx + 41, y + 59, 5, state);
+            nw = UiText(UI_BOLD, 24, lx + 62, y + 29, online_tag_colour(with), with, UI_LEFT);
+            online_flag(lx + 62 + nw + 12, y + 29, 15, online_country_index(who.country));
+            if (who.online && who.status[0]) { _snprintf(t, sizeof(t) - 1, Tr(T_ONLINE_PLAYING), who.status); t[sizeof(t) - 1] = 0; }
+            else _snprintf(t, sizeof(t), "%s", Tr(who.online ? T_ONLINE_ON : T_ONLINE_OFF));
+            UiText(UI_REGULAR, 15, lx + 62, y + 55, who.online ? state : UI_COL_TEXT3, t, UI_LEFT);
+            if (room >= 0)
+            {
+                const float bw = UiTextWidth(UI_BOLD, 15, Tr(T_ONLINE_JOIN_ROOM)) + 50;
+                UiRoundRect(lx + lw - bw, y + 26, bw, 32, 16, D3DCOLOR_ARGB(40, 80, 210, 120), D3DCOLOR_ARGB(40, 80, 210, 120));
+                UiRoundRing(lx + lw - bw, y + 26, bw, 32, 16, 1.0f, D3DCOLOR_ARGB(150, 80, 210, 120));
+                UiCircle(lx + lw - bw + 19, y + 42, 11, D3DCOLOR_ARGB(255, 225, 170, 30));
+                UiText(UI_BOLD, 13, lx + lw - bw + 19, y + 42, UI_COL_TEXT, "Y", UI_CENTER);
+                UiText(UI_BOLD, 15, lx + lw - bw + 38, y + 42, ONLINE_GREEN, Tr(T_ONLINE_JOIN_ROOM), UI_LEFT);
+            }
+            UiRect(lx, y + 80, lw, 1, UI_COL_LINE);
         }
-        kbd_draw_text(&kb, cx, y + 266, w - 80, 44, 20);
-        kbd_draw_keys(&kb, cx, y + 324, 40, 5);
-        UiScreenFooter(Tr(T_FOOT_ONLINE_DM));
-        UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
+        if (lines.empty()) UiText(UI_REGULAR, 18, cx, msgTop + 120, UI_COL_TEXT3, Tr(T_ONLINE_DM_EMPTY), UI_CENTER);
+        {
+            // The messages, from the newest at the bottom up: bubbles (up to three lines), the time under the last of a
+            // run, a line with the day where it changes.
+            float yb = msgBottom;
+            for (k = (int)lines.size() - 1; k >= 0; k--)
+            {
+                const OnlineDmLine *m = &lines[k];
+                const int lastOfRun = k == (int)lines.size() - 1 || lines[k + 1].mine != m->mine || lines[k + 1].daysAgo != m->daysAgo;
+                const int dayChange = m->daysAgo >= 0 && (k == 0 || lines[k - 1].daysAgo != m->daysAgo);
+                float widest = 0;
+                const int nl = RichText(UI_REGULAR, 17, 0, 0, lw * 0.6f, 3, 0, m->text.c_str(), 0, &widest);
+                const float bh = 14 + nl * 17 * 1.35f, tw = widest + 32;
+                const float hgt = bh + (lastOfRun && m->when[0] ? 20 : 6), bx = m->mine ? lx + lw - tw - 8 : lx + 46;
+                float by;
+                if (yb - hgt < msgTop) break;
+                by = yb - hgt;
+                UiRoundRect(bx, by, tw, bh, 16, m->mine ? D3DCOLOR_ARGB(255, 118, 82, 205) : D3DCOLOR_ARGB(255, 52, 54, 72),
+                            m->mine ? D3DCOLOR_ARGB(255, 110, 76, 192) : D3DCOLOR_ARGB(255, 48, 50, 66));
+                RichText(UI_REGULAR, 17, bx + 16, by + 7 + 17 * 1.35f * 0.5f, lw * 0.6f, 3, UI_COL_TEXT, m->text.c_str(), 1, NULL);
+                if (lastOfRun)
+                {
+                    if (m->when[0]) UiText(UI_REGULAR, 12, m->mine ? bx + tw : bx, by + bh + 10, UI_COL_TEXT3, m->when, m->mine ? UI_RIGHT : UI_LEFT);
+                    if (!m->mine) online_avatar(lx + 15, by + bh - 15, 15, who.avatar, with);
+                }
+                yb = by;
+                if (dayChange)
+                {
+                    // "Today", "Yesterday", "3 days ago".
+                    char t[48];
+                    float sw;
+                    if (yb - 26 < msgTop) break;
+                    if (m->daysAgo == 0) strcpy(t, Tr(T_DM_TODAY));
+                    else if (m->daysAgo == 1) strcpy(t, Tr(T_DM_YESTERDAY));
+                    else { _snprintf(t, sizeof(t) - 1, Tr(T_DM_DAYS_AGO), m->daysAgo); t[sizeof(t) - 1] = 0; }
+                    sw = UiTextWidth(UI_REGULAR, 13, t);
+                    UiRect(lx + 120, yb - 13, lw * 0.5f - 120 - sw * 0.5f - 12, 1, D3DCOLOR_ARGB(34, 255, 255, 255));
+                    UiRect(cx + sw * 0.5f + 12, yb - 13, lw * 0.5f - 120 - sw * 0.5f - 12, 1, D3DCOLOR_ARGB(34, 255, 255, 255));
+                    UiText(UI_REGULAR, 13, cx, yb - 13, UI_COL_TEXT3, t, UI_CENTER);
+                    yb -= 26;
+                }
+            }
+        }
+        {
+            // The quick phrases, the one picked lit.
+            float px = lx;
+            UiText(UI_BOLD, 14, lx, y + 408, UI_COL_TEXT3, Tr(T_QP_TITLE), UI_LEFT);
+            for (k = 0; k < QUICK_PHRASES; k++)
+            {
+                const int on = !typing && k == phrase;
+                const float pw = UiTextWidth(on ? UI_BOLD : UI_REGULAR, 15, Tr(T_QP_1 + k)) + 30;
+                if (on) { UiRoundRect(px, y + 422, pw, 32, 16, SEL_HI(255), SEL_HI(220)); UiRoundRing(px, y + 422, pw, 32, 16, 2.0f, D3DCOLOR_ARGB(255, 190, 170, 255)); }
+                else
+                {
+                    UiRoundRect(px, y + 422, pw, 32, 16, D3DCOLOR_ARGB(14, 255, 255, 255), D3DCOLOR_ARGB(14, 255, 255, 255));
+                    UiRoundRing(px, y + 422, pw, 32, 16, 1.0f, D3DCOLOR_ARGB(40, 255, 255, 255));
+                }
+                UiText(on ? UI_BOLD : UI_REGULAR, 15, px + pw * 0.5f, y + 438, on ? UI_COL_TEXT : UI_COL_TEXT2, Tr(T_QP_1 + k), UI_CENTER);
+                px += pw + 10;
+            }
+        }
+        if (typing)
+        {
+            // The keyboard, over the messages' lower part, the text in the bar.
+            UiShadow(lx + 160, y + 214, lw - 320, 250, 18, 24, D3DCOLOR_ARGB(160, 0, 0, 0));
+            UiRoundRect(lx + 160, y + 214, lw - 320, 250, 18, D3DCOLOR_ARGB(245, 22, 22, 36), D3DCOLOR_ARGB(245, 18, 18, 30));
+            UiRoundRing(lx + 160, y + 214, lw - 320, 250, 18, 1.5f, D3DCOLOR_ARGB(120, 170, 150, 255));
+            kbd_draw_tabs(&kb, lx + 176, y + 232);
+            kbd_draw_keys_wh(&kb, cx, y + 254, 44, 36, 5);
+            kbd_draw_text(&kb, cx, barY, lw, 34, 17);
+        }
+        else
+        {
+            // The bar to write in: X opens the keyboard.
+            char hint[120];
+            _snprintf(hint, sizeof(hint) - 1, Tr(T_DM_WRITE_TO), with);
+            hint[sizeof(hint) - 1] = 0;
+            UiRoundRect(lx, barY, lw, 34, 17, D3DCOLOR_ARGB(16, 255, 255, 255), D3DCOLOR_ARGB(16, 255, 255, 255));
+            UiRoundRing(lx, barY, lw, 34, 17, 1.0f, D3DCOLOR_ARGB(40, 255, 255, 255));
+            UiCircle(lx + 19, barY + 17, 11, D3DCOLOR_ARGB(255, 40, 110, 220));
+            UiText(UI_BOLD, 13, lx + 19, barY + 17, UI_COL_TEXT, "X", UI_CENTER);
+            if (text[0]) RichText(UI_REGULAR, 16, lx + 42, barY + 17, lw - 60, 1, UI_COL_TEXT2, text, 1, NULL);
+            else UiText(UI_REGULAR, 16, lx + 42, barY + 17, UI_COL_TEXT3, hint, UI_LEFT);
+        }
+        if (typing) UiScreenFooter(Tr(T_FOOT_ONLINE_DM));
+        else
+        {
+            char foot[200];
+            if (room >= 0)
+                _snprintf(foot, sizeof(foot) - 1, "A:%s|X:%s|Y:%s|B:%s", Tr(T_DM_SEND_PHRASE), Tr(T_DM_WRITE), Tr(T_ONLINE_JOIN), Tr(T_ONLINE_F_BACK));
+            else _snprintf(foot, sizeof(foot) - 1, "A:%s|X:%s|B:%s", Tr(T_DM_SEND_PHRASE), Tr(T_DM_WRITE), Tr(T_ONLINE_F_BACK));
+            foot[sizeof(foot) - 1] = 0;
+            UiScreenFooter(foot);
+        }
+        online_end();
+        UiPresent(dev);
     }
 }
 
 // Messages: the friends, those with messages not read first marked; A opens the conversation.
-static void online_messages(IDirect3DDevice9 *dev)
+static int online_messages(IDirect3DDevice9 *dev)
 {
     static UiAnim selAnim;
     std::vector<OnlineUser> friends;
@@ -11882,14 +14272,14 @@ static void online_messages(IDirect3DDevice9 *dev)
     const int rows = 8;
     int sel = 0, top = 0, k, n;
     online_busy(dev, Tr(T_ONLINE_MESSAGES), T_ONLINE_CONNECTING);
-    if (!OnlineList(ONLINE_LIST_FRIENDS, 0, &friends)) { online_message(dev, Tr(T_ONLINE_MESSAGES), online_error_text()); return; }
+    if (!OnlineList(ONLINE_LIST_FRIENDS, 0, &friends)) { online_message(dev, Tr(T_ONLINE_MESSAGES), online_error_text()); return 0; }
     UiInputInit(&in);
     for (;;)
     {
         const float w = 820, h = 520, x = (UI_WIDTH - w) * 0.5f, y = 112, rowH = 56, pad = 16;
         WORD down = UiInputPoll(&in);
         n = (int)friends.size();
-        if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) { xb_audio_ui_sound(XB_SFX_BACK); return; }
+        if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) { xb_audio_ui_sound(XB_SFX_BACK); return 0; }
         if (n && (down & (XINPUT_GAMEPAD_DPAD_UP | XINPUT_GAMEPAD_DPAD_DOWN)))
         {
             sel = (sel + ((down & XINPUT_GAMEPAD_DPAD_DOWN) ? 1 : n - 1)) % n;
@@ -11898,14 +14288,14 @@ static void online_messages(IDirect3DDevice9 *dev)
         if (n && (down & XINPUT_GAMEPAD_A))
         {
             xb_audio_ui_sound(XB_SFX_SELECT);
-            online_conversation(dev, friends[sel].name, friends[sel].avatar);
+            if (online_conversation(dev, friends[sel].name, friends[sel].avatar)) return 1;   // the friend's room joined: its game
             UiInputInit(&in);
             continue;
         }
         if (sel < top) top = sel;
         if (sel >= top + rows) top = sel - rows + 1;
         dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
-        UiBegin(dev);
+        online_begin(dev, __FUNCTION__);
         hub_frame(Tr(T_ONLINE_MESSAGES), NULL, x, y, w, h);
         if (!n) UiText(UI_REGULAR, 20, x + w * 0.5f, y + h * 0.5f, UI_COL_TEXT2, Tr(T_ONLINE_NO_FRIENDS), UI_CENTER);
         else selection_bar(x + 10, anim_step(&selAnim, y + pad + (sel - top) * rowH, 0) + 1, w - 20, rowH - 2);
@@ -11927,9 +14317,8 @@ static void online_messages(IDirect3DDevice9 *dev)
             }
         }
         UiScreenFooter(Tr(T_FOOT_ONLINE));
-        UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
+        online_end();
+        UiPresent(dev);
     }
 }
 
@@ -11955,29 +14344,6 @@ static void online_answer_requests(IDirect3DDevice9 *dev)
     }
 }
 
-// Online play > Donate: what the donations pay for (the online play's servers, LAIKA 64 getting better) and
-// every way to give (the About page's Donate tab's cards).
-static void online_donate(IDirect3DDevice9 *dev)
-{
-    UiInput in;
-    UiInputInit(&in);
-    for (;;)
-    {
-        const float w = 960, h = 520, x = (UI_WIDTH - w) * 0.5f, y = 112, tx = x + 40;
-        WORD down = UiInputPoll(&in);
-        float ty;
-        if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK | XINPUT_GAMEPAD_A)) { xb_audio_ui_sound(XB_SFX_BACK); return; }
-        dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
-        UiBegin(dev);
-        hub_frame(Tr(T_DONATE_TITLE), NULL, x, y, w, h);
-        ty = y + 40 + paragraph(UI_REGULAR, 18, tx, y + 40, w - 80, 5, UI_COL_TEXT2, Tr(T_ONLINE_DONATE_TEXT)) + 24;
-        donate_cards(tx, ty, w - 80);
-        UiScreenFooter(Tr(T_FOOT_BACK_ONLY));
-        UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
-    }
-}
 
 // The Telegram group's QR code of https://t.me/+RFVZZHEr_ZczYzAx (version 3, level M; made on a PC with
 // Python's qrcode and decoded back to check it).
@@ -12014,34 +14380,6 @@ static const char *const s_telegramQr[29] = {
     "11111110111110110101100111011"
 };
 
-// Online play > Telegram group: what the group is for (agreeing on times for games, only that) beside its QR
-// code for a phone to scan.
-static void online_telegram(IDirect3DDevice9 *dev)
-{
-    UiInput in;
-    UiInputInit(&in);
-    for (;;)
-    {
-        const float w = 960, h = 520, x = (UI_WIDTH - w) * 0.5f, y = 112, tx = x + 40;
-        const float mod = 9, qs = mod * 33, qx = x + w - 40 - qs, qy = y + 60;
-        WORD down = UiInputPoll(&in);
-        int r, c;
-        if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK | XINPUT_GAMEPAD_A)) { xb_audio_ui_sound(XB_SFX_BACK); return; }
-        dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
-        UiBegin(dev);
-        hub_frame(Tr(T_ONLINE_TELEGRAM), NULL, x, y, w, h);
-        paragraph(UI_REGULAR, 18, tx, y + 60, qx - 40 - tx, 14, UI_COL_TEXT2, Tr(T_ONLINE_TELEGRAM_TEXT));
-        UiRoundRect(qx, qy, qs, qs, 10, 0xFFFFFFFF, 0xFFFFFFFF);
-        for (r = 0; r < 29; r++)
-            for (c = 0; s_telegramQr[r][c]; c++)
-                if (s_telegramQr[r][c] == '1') UiRect(qx + (c + 2) * mod, qy + (r + 2) * mod, mod, mod, D3DCOLOR_ARGB(255, 0, 0, 0));
-        UiText(UI_BOLD, 17, qx + qs * 0.5f, qy + qs + 24, UI_COL_ACCENT_HI, TELEGRAM_URL, UI_CENTER);
-        UiScreenFooter(Tr(T_FOOT_BACK_ONLY));
-        UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
-    }
-}
 
 // ---- The online intro: down a tunnel of data, the LAIKA 64 ONLINE logo coming out of it ----
 // Every time online play opens: 4.2 s (A, B or START cut it short), the menus' music stopped meanwhile and its
@@ -12303,24 +14641,304 @@ static void online_intro(IDirect3DDevice9 *dev, int leaving = 0)
 
 // Settings > Online play: the list of what it has, the general chat beside it to read (written in Play
 // online), read again every few seconds; the player's profile in the top right corner. 1 when a game starts.
+// The title of an online screen with tabs (Players', Community's): the title, then the tabs between LB and RB, the one
+// shown lit; `counts` (or NULL) a number beside a tab (-1: none).
+static void online_tab_bar(float lx, float y, const char *title, const int *labels, const int *counts, int n, int cur)
+{
+    float tx = lx + UiTextWidth(UI_BOLD, 28, title) + 30;
+    char num[16];
+    int t2;
+    UiText(UI_BOLD, 28, lx, y + 38, UI_COL_TEXT, title, UI_LEFT);
+    UiRoundRect(tx, y + 26, 38, 24, 12, D3DCOLOR_ARGB(255, 60, 62, 76), D3DCOLOR_ARGB(255, 60, 62, 76));
+    UiText(UI_BOLD, 13, tx + 19, y + 38, UI_COL_TEXT2, "LB", UI_CENTER);
+    tx += 52;
+    for (t2 = 0; t2 < n; t2++)
+    {
+        const int on = t2 == cur;
+        const float lw2 = UiTextWidth(on ? UI_BOLD : UI_REGULAR, 18, Tr(labels[t2]));
+        float bw;
+        num[0] = 0;
+        if (counts && counts[t2] >= 0) _snprintf(num, sizeof(num), "%d", counts[t2]);
+        bw = lw2 + 36 + (num[0] ? UiTextWidth(UI_BOLD, 13, num) + 22 : 0);
+        if (on) { UiRoundRect(tx, y + 20, bw, 36, 18, SEL_HI(255), SEL_HI(220)); UiRoundRing(tx, y + 20, bw, 36, 18, 2.0f, D3DCOLOR_ARGB(255, 190, 170, 255)); }
+        else UiRoundRing(tx, y + 20, bw, 36, 18, 1.0f, D3DCOLOR_ARGB(40, 255, 255, 255));
+        UiText(on ? UI_BOLD : UI_REGULAR, 18, tx + 18, y + 38, on ? UI_COL_TEXT : UI_COL_TEXT2, Tr(labels[t2]), UI_LEFT);
+        if (num[0])
+        {
+            const float nx = tx + 18 + lw2 + 8, nw = UiTextWidth(UI_BOLD, 13, num) + 14;
+            UiRoundRect(nx, y + 29, nw, 18, 9, UiAlpha(ONLINE_GREEN, 0.24f), UiAlpha(ONLINE_GREEN, 0.24f));
+            UiText(UI_BOLD, 13, nx + nw * 0.5f, y + 38, ONLINE_GREEN, num, UI_CENTER);
+        }
+        tx += bw + 10;
+    }
+    UiRoundRect(tx, y + 26, 38, 24, 12, D3DCOLOR_ARGB(255, 60, 62, 76), D3DCOLOR_ARGB(255, 60, 62, 76));
+    UiText(UI_BOLD, 13, tx + 19, y + 38, UI_COL_TEXT2, "RB", UI_CENTER);
+}
+
+// My profile: on the left the player - the avatar big, the gamertag, the flag and country, online - and what can be
+// changed (the gamertag, the avatar: A); on the right the statistics (the time played, the games, the place in the
+// ranking) and each game's time with a bar.
+static void online_myprofile(IDirect3DDevice9 *dev)
+{
+    static UiAnim selAnim;
+    OnlineStats st;
+    UiInput in;
+    int sel = 0, top = 0, k, have;
+    online_busy(dev, Tr(T_ONLINE_PROFILE), T_ONLINE_CONNECTING);
+    have = OnlineStatsOf(OnlineMe()->tag, &st);
+    UiInputInit(&in);
+    for (;;)
+    {
+        const float w = UI_WIDTH - 2 * UI_SAFE_X, h = 520, x = UI_SAFE_X, y = 112, lx = x + 26, leftW = 380, rx = lx + leftW + 36, rw = x + w - 26 - rx;
+        const OnlineProfile *me = OnlineMe();
+        const int n = have ? (int)st.list.size() : 0, rows = 5;
+        WORD down = UiInputPoll(&in);
+        if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) { xb_audio_ui_sound(XB_SFX_BACK); return; }
+        if (down & (XINPUT_GAMEPAD_DPAD_UP | XINPUT_GAMEPAD_DPAD_DOWN)) { sel = !sel; xb_audio_ui_sound(XB_SFX_MOVE); }
+        if ((down & XINPUT_GAMEPAD_RIGHT_SHOULDER) && top + rows < n) { top++; xb_audio_ui_sound(XB_SFX_MOVE); }
+        if ((down & XINPUT_GAMEPAD_LEFT_SHOULDER) && top > 0) { top--; xb_audio_ui_sound(XB_SFX_MOVE); }
+        if (down & XINPUT_GAMEPAD_A)
+        {
+            xb_audio_ui_sound(XB_SFX_SELECT);
+            if (sel == 0)
+            {
+                // The gamertag.
+                char tag[ONLINE_TAG_MAX + 1];
+                _snprintf(tag, sizeof(tag) - 1, "%s", me->tag);
+                tag[sizeof(tag) - 1] = 0;
+                if (online_keyboard(dev, Tr(T_ONLINE_GAMERTAG), Tr(T_ONLINE_TAG_RULES), tag, ONLINE_TAG_MIN, ONLINE_TAG_MAX, KBD_NAME) && strcmp(tag, me->tag))
+                {
+                    online_busy(dev, Tr(T_ONLINE_PROFILE), T_ONLINE_CONNECTING);
+                    if (!OnlineRename(tag)) online_message(dev, Tr(T_ONLINE_GAMERTAG), online_error_text());
+                }
+            }
+            else
+            {
+                // The avatar.
+                char country[4] = "";
+                const int avatar = online_pick_avatar(dev, me->avatar, me->tag);
+                if (avatar >= 0)
+                {
+                    online_busy(dev, Tr(T_ONLINE_PROFILE), T_ONLINE_CONNECTING);
+                    _snprintf(country, sizeof(country) - 1, "%s", me->country);   // a copy: OnlineSetProfile writes the profile's own
+                    if (!OnlineSetProfile(country, avatar)) online_message(dev, Tr(T_ONLINE_PROFILE), online_error_text());
+                }
+            }
+            UiInputInit(&in);
+            continue;
+        }
+        dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
+        online_begin(dev, __FUNCTION__);
+        hub_frame("", NULL, x, y, w, h);
+        UiOnlineLogo(UI_WIDTH * 0.5f, y - 46, 60);
+        online_me_corner(x, y, w);
+        UiText(UI_BOLD, 28, lx, y + 38, UI_COL_TEXT, Tr(T_ONLINE_PROFILE), UI_LEFT);
+        UiRect(lx, y + 74, w - 52, 1, UI_COL_LINE);
+        {
+            // The player.
+            const int ci = online_country_index(me->country);
+            const float cx = lx + leftW * 0.5f, cy = y + 160;
+            float fw;
+            UiRoundRect(lx, y + 94, leftW, h - 114, 16, D3DCOLOR_ARGB(12, 255, 255, 255), D3DCOLOR_ARGB(12, 255, 255, 255));
+            UiRoundRing(lx, y + 94, leftW, h - 114, 16, 1.0f, D3DCOLOR_ARGB(26, 255, 255, 255));
+            UiCircle(cx, cy, 60, SEL_LO(70));
+            online_avatar(cx, cy, 52, me->avatar, me->tag);
+            UiRoundRing(cx - 56, cy - 56, 112, 112, 56, 2.5f, D3DCOLOR_ARGB(255, 190, 170, 255));
+            UiCircle(cx + 40, cy + 40, 10, D3DCOLOR_ARGB(255, 20, 20, 32));
+            UiCircle(cx + 40, cy + 40, 7, ONLINE_GREEN);
+            UiText(UI_BOLD, 28, cx, cy + 86, online_tag_colour(me->tag), me->tag, UI_CENTER);
+            fw = UiTextWidth(UI_REGULAR, 16, online_country_name(ci)) + (ci < FLAG_COUNTRIES ? 30 : 0);
+            if (ci < FLAG_COUNTRIES) online_flag(cx - fw * 0.5f, cy + 116, 15, ci);
+            UiText(UI_REGULAR, 16, cx + fw * 0.5f, cy + 116, UI_COL_TEXT2, online_country_name(ci), UI_RIGHT);
+            for (k = 0; k < 2; k++)
+            {
+                // What can be changed.
+                const float by = y + 330 + k * 66;
+                const int s1 = k == sel;
+                if (s1)
+                {
+                    UiRoundRect(lx + 16, by, leftW - 32, 54, 14, D3DCOLOR_ARGB(230, 70, 52, 130), D3DCOLOR_ARGB(230, 62, 46, 116));
+                    UiRoundRing(lx + 16, by, leftW - 32, 54, 14, 2.0f, D3DCOLOR_ARGB(255, 190, 170, 255));
+                }
+                else UiRoundRing(lx + 16, by, leftW - 32, 54, 14, 1.0f, D3DCOLOR_ARGB(34, 255, 255, 255));
+                menu_icon(k ? UI_ICON_PERSON : UI_ICON_SLIDERS, lx + 48, by + 27, k ? D3DCOLOR_ARGB(255, 180, 140, 255) : D3DCOLOR_ARGB(255, 90, 200, 255));
+                UiText(s1 ? UI_BOLD : UI_REGULAR, 19, lx + 76, by + 27, s1 ? UI_COL_TEXT : UI_COL_TEXT2, Tr(k ? T_ONLINE_CHANGE_AVATAR : T_ONLINE_CHANGE_TAG), UI_LEFT);
+            }
+        }
+        {
+            // The statistics: three tiles, then each game's time.
+            static const int tl[3] = { T_ONLINE_TOTAL, T_ONLINE_GAMES, T_ONLINE_POS };
+            const D3DCOLOR col[3] = { D3DCOLOR_ARGB(255, 120, 175, 255), ONLINE_GREEN, D3DCOLOR_ARGB(255, 255, 205, 70) };
+            const float tw = (rw - 28) / 3;
+            char value[3][48];
+            int most = 1;
+            UiText(UI_BOLD, 18, rx, y + 110, UI_COL_TEXT2, Tr(T_ONLINE_MY_STATS), UI_LEFT);
+            if (have)
+            {
+                online_time(st.minutes, value[0], sizeof(value[0]));
+                _snprintf(value[1], sizeof(value[1]), "%d", st.games);
+                _snprintf(value[2], sizeof(value[2]), st.rank > 0 ? "#%d" : "-", st.rank);
+            }
+            else for (k = 0; k < 3; k++) strcpy(value[k], "-");
+            for (k = 0; k < 3; k++)
+            {
+                const float tx = rx + k * (tw + 14), ty = y + 128;
+                UiRoundRect(tx, ty, tw, 84, 14, D3DCOLOR_ARGB(14, 255, 255, 255), D3DCOLOR_ARGB(14, 255, 255, 255));
+                UiRoundRing(tx, ty, tw, 84, 14, 1.0f, D3DCOLOR_ARGB(30, 255, 255, 255));
+                UiRoundRect(tx, ty, 5, 84, 2.5f, UiAlpha(col[k], 0.86f), UiAlpha(col[k], 0.86f));
+                UiText(UI_BOLD, 28, tx + 22, ty + 32, col[k], value[k], UI_LEFT);
+                UiText(UI_REGULAR, 15, tx + 22, ty + 62, UI_COL_TEXT2, Tr(tl[k]), UI_LEFT);
+            }
+            UiText(UI_BOLD, 17, rx, y + 240, UI_COL_TEXT2, Tr(T_ONLINE_MY_GAMES), UI_LEFT);
+            for (k = 0; k < n; k++) if (st.list[k].minutes > most) most = st.list[k].minutes;
+            if (!n) UiText(UI_REGULAR, 17, rx + rw * 0.5f, y + 330, UI_COL_TEXT3, Tr(T_ONLINE_EMPTY), UI_CENTER);
+            for (k = 0; k < rows && top + k < n; k++)
+            {
+                const float ry = y + 258 + k * 46, cy = ry + 20, bw = rw - 120;
+                char fit[120], t[48];
+                UiTextFit(UI_REGULAR, 17, rw - 130, st.list[top + k].game.c_str(), fit, sizeof(fit));
+                UiText(UI_REGULAR, 17, rx, cy - 8, UI_COL_TEXT, fit, UI_LEFT);
+                online_time(st.list[top + k].minutes, t, sizeof(t));
+                UiText(UI_BOLD, 15, rx + rw, cy - 8, UI_COL_TEXT2, t, UI_RIGHT);
+                UiRoundRect(rx, cy + 8, bw, 6, 3, D3DCOLOR_ARGB(30, 255, 255, 255), D3DCOLOR_ARGB(30, 255, 255, 255));
+                UiRoundRect(rx, cy + 8, bw * st.list[top + k].minutes / most, 6, 3, SEL_HI(255), SEL_LO(255));
+            }
+        }
+        UiScreenFooter(Tr(T_FOOT_ONLINE));
+        online_end();
+        UiPresent(dev);
+    }
+}
+
+// Community: one screen, three tabs (LB/RB) - the news (up and down go through them), the Telegram group (its QR
+// code to scan), donating (every way, with its QR code).
+static void online_community(IDirect3DDevice9 *dev, const Config *c)
+{
+    enum { CT_NEWS = 0, CT_TELEGRAM, CT_DONATE, CT_COUNT };
+    static const int labels[CT_COUNT] = { T_ONLINE_NEWS, T_ONLINE_TAB_TELEGRAM, T_DONATE_TAB };
+    static char wrapped[700];
+    std::vector<OnlineNews> news;
+    UiInput in;
+    int tab = CT_NEWS, top = 0, k, newsRead = 0;
+    UiInputInit(&in);
+    for (;;)
+    {
+        const float w = UI_WIDTH - 2 * UI_SAFE_X, h = 520, x = UI_SAFE_X, y = 112, lx = x + 26, lw = w - 52;
+        const int rows = 3, n = (int)news.size();
+        WORD down;
+        if (tab == CT_NEWS && !newsRead)
+        {
+            online_busy(dev, Tr(T_ONLINE_NEWS), T_ONLINE_CONNECTING);
+            if (!OnlineNewsGet(c->lang[0] ? c->lang : "en", &news)) news.clear();
+            newsRead = 1;
+            UiInputInit(&in);
+            continue;
+        }
+        down = UiInputPoll(&in);
+        if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) { xb_audio_ui_sound(XB_SFX_BACK); return; }
+        if (down & (XINPUT_GAMEPAD_LEFT_SHOULDER | XINPUT_GAMEPAD_RIGHT_SHOULDER))
+        {
+            tab = (tab + ((down & XINPUT_GAMEPAD_RIGHT_SHOULDER) ? 1 : CT_COUNT - 1)) % CT_COUNT;
+            xb_audio_ui_sound(XB_SFX_TAB);
+        }
+        if (tab == CT_NEWS && (down & XINPUT_GAMEPAD_DPAD_DOWN) && top + rows < n) { top++; xb_audio_ui_sound(XB_SFX_MOVE); }
+        if (tab == CT_NEWS && (down & XINPUT_GAMEPAD_DPAD_UP) && top > 0) { top--; xb_audio_ui_sound(XB_SFX_MOVE); }
+        dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
+        online_begin(dev, __FUNCTION__);
+        hub_frame("", NULL, x, y, w, h);
+        UiOnlineLogo(UI_WIDTH * 0.5f, y - 46, 60);
+        online_me_corner(x, y, w);
+        online_tab_bar(lx, y, Tr(T_ONLINE_M_COMMUNITY), labels, NULL, CT_COUNT, tab);
+        UiRect(lx, y + 74, lw, 1, UI_COL_LINE);
+        if (tab == CT_NEWS)
+        {
+            // Each one: its title, its date, its text; a bar on the right says where in them it is.
+            if (!n) UiText(UI_REGULAR, 19, lx + lw * 0.5f, y + h * 0.5f, UI_COL_TEXT3, Tr(T_ONLINE_EMPTY), UI_CENTER);
+            for (k = 0; k < rows && top + k < n; k++)
+            {
+                const OnlineNews *it = &news[top + k];
+                const float iy = y + 90 + k * 138;
+                char fit[200];
+                UiRoundRect(lx, iy, lw - 20, 126, 14, D3DCOLOR_ARGB(12, 255, 255, 255), D3DCOLOR_ARGB(12, 255, 255, 255));
+                UiRoundRect(lx, iy + 14, 4, 98, 2, UiAlpha(UI_COL_ACCENT_HI, k == 0 && top == 0 ? 1.0f : 0.4f), UiAlpha(UI_COL_ACCENT_HI, k == 0 && top == 0 ? 1.0f : 0.4f));
+                UiText(UI_REGULAR, 14, lx + lw - 44, iy + 24, UI_COL_TEXT3, it->date.c_str(), UI_RIGHT);
+                UiTextFit(UI_BOLD, 20, lw - 220, it->title.c_str(), fit, sizeof(fit));
+                UiText(UI_BOLD, 20, lx + 22, iy + 24, UI_COL_ACCENT_HI, fit, UI_LEFT);
+                UiTextWrap(UI_REGULAR, 16, lw - 70, 3, it->text.c_str(), wrapped, sizeof(wrapped));
+                UiText(UI_REGULAR, 16, lx + 22, iy + 56, UI_COL_TEXT2, wrapped, UI_LEFT);
+            }
+            if (n > rows)
+            {
+                const float trackY = y + 92, trackH = rows * 138 - 14, barH = trackH * rows / n;
+                UiRect(lx + lw - 6, trackY, 3, trackH, UiAlpha(UI_COL_TEXT3, 0.3f));
+                UiRect(lx + lw - 6, trackY + (trackH - barH) * top / (n - rows), 3, barH, UI_COL_ACCENT_HI);
+            }
+        }
+        else if (tab == CT_TELEGRAM)
+        {
+            // The words on the left, the QR code on the right.
+            const float mod = 9, qs = mod * 33, qx = lx + lw - qs - 20, qy = y + 100;
+            int r, cc;
+            menu_icon(UI_ICON_PLANE, lx + 30, y + 118, D3DCOLOR_ARGB(255, 42, 171, 238));
+            UiText(UI_BOLD, 22, lx + 60, y + 118, UI_COL_TEXT, Tr(T_ONLINE_TELEGRAM), UI_LEFT);
+            paragraph(UI_REGULAR, 18, lx + 20, y + 150, qx - 60 - lx, 12, UI_COL_TEXT2, Tr(T_ONLINE_TELEGRAM_TEXT));
+            UiRoundRect(qx, qy, qs, qs, 10, 0xFFFFFFFF, 0xFFFFFFFF);
+            for (r = 0; r < 29; r++)
+                for (cc = 0; s_telegramQr[r][cc]; cc++)
+                    if (s_telegramQr[r][cc] == '1') UiRect(qx + (cc + 2) * mod, qy + (r + 2) * mod, mod, mod, D3DCOLOR_ARGB(255, 0, 0, 0));
+            UiText(UI_BOLD, 17, qx + qs * 0.5f, qy + qs + 24, UI_COL_ACCENT_HI, TELEGRAM_URL, UI_CENTER);
+        }
+        else
+        {
+            // Why to give, then every way (PayPal, the crypto wallets) with its QR code.
+            float ty;
+            menu_icon(UI_ICON_HEART, lx + 30, y + 118, D3DCOLOR_ARGB(255, 255, 92, 130));
+            UiText(UI_BOLD, 22, lx + 60, y + 118, UI_COL_TEXT, Tr(T_DONATE_TITLE), UI_LEFT);
+            ty = y + 144 + paragraph(UI_REGULAR, 17, lx + 20, y + 144, lw - 40, 4, UI_COL_TEXT2, Tr(T_ONLINE_DONATE_TEXT)) + 18;
+            donate_cards(lx + 20, ty, lw - 40);
+        }
+        {
+            char foot[120];
+            _snprintf(foot, sizeof(foot) - 1, "LB/RB:%s|B:%s", Tr(T_ONLINE_F_TAB), Tr(T_ONLINE_F_BACK));
+            foot[sizeof(foot) - 1] = 0;
+            UiScreenFooter(foot);
+        }
+        online_end();
+        UiPresent(dev);
+    }
+}
+
+// Whether a room's game (its box art's key: the game's code) is one of this console's: 1 yes, 0 no, -1 not
+// known (the list's headers not all read yet - details_prefetch - or a hack's key, which the headers kept
+// do not tell). By its code: another revision of the game counts too (the room then says it cannot be played).
+static int online_have_game(const char *art)
+{
+    std::map<std::string, RomInfo>::const_iterator it;
+    int r;
+    if (!s_detailsEvent || !art[0] || strlen(art) != 4) return -1;
+    EnterCriticalSection(&s_detailsLock);
+    r = s_romsTotal && (int)s_detailsMemo.size() >= s_romsTotal ? 0 : -1;
+    for (it = s_detailsMemo.begin(); it != s_detailsMemo.end(); ++it)
+        if (it->second.ok && !_stricmp(it->second.code, art)) { r = 1; break; }
+    LeaveCriticalSection(&s_detailsLock);
+    return r;
+}
+
 static int online_hub_run(IDirect3DDevice9 *dev, Config *c);
 static int online_hub(IDirect3DDevice9 *dev, Config *c)
 {
     int r;
     if (!OnlineHasServer()) { online_message(dev, Tr(T_ONLINE), Tr(T_ONLINE_NOT_SET)); return 0; }
     {
-        // Online play only with the latest LAIKA (asked of GitHub; a yes kept half an hour). An older one is told so,
-        // offered the update, and goes back where it came from (the ROM list, Settings). GitHub not answering lets
-        // it in.
-        static DWORD s_latestAt;
-        static int s_latest;
+        // Online play only with the latest LAIKA. An older one is told so, offered the update, and goes back where it
+        // came from (the ROM list, Settings).
+        // (The newer release is the one the server told in its pings, on the online thread: nothing is asked here, so
+        // the tunnel opens at once - asking GitHub here showed a "checking" window first.)
+        const char *newer = OnlineNewerRelease();
         char version[32] = "", text[200];
-        if (!s_latest || GetTickCount() - s_latestAt > 30 * 60000)
+        strncpy(version, newer ? newer : "", sizeof(version) - 1);
         {
-            int r;
-            online_busy(dev, Tr(T_ONLINE), T_ONLINE_CHECK_VER);
-            r = UpdateCheckNow(H64_VERSION_STRING, version, sizeof(version));
-            if (r > 0)
+            if (version[0])
             {
                 H64_INFO("[online] LAIKA 64 %s is out: online play refused to %s", version, H64_VERSION_STRING);
                 _snprintf(text, sizeof(text) - 1, Tr(T_ONLINE_NEED_UPDATE), version, H64_VERSION_STRING);
@@ -12340,8 +14958,6 @@ static int online_hub(IDirect3DDevice9 *dev, Config *c)
                 }
                 return 0;
             }
-            s_latest = r == 0;   // asked again next time when GitHub did not answer
-            s_latestAt = GetTickCount();
         }
     }
     online_intro(dev);
@@ -12353,74 +14969,132 @@ static int online_hub(IDirect3DDevice9 *dev, Config *c)
     return r;
 }
 
+#define HUB_PANEL_S 0.28f      // the hub's right side changing kind: seconds
+#define HUB_PANEL_MOVE 36.0f   // ... and how far each one moves
 static int online_hub_run(IDirect3DDevice9 *dev, Config *c)
 {
     static UiAnim selAnim;
-    enum { OH_PLAY = 0, OH_MESSAGES, OH_PROFILE, OH_FRIENDS, OH_USERS, OH_STATS, OH_RANK, OH_NEWS, OH_TELEGRAM, OH_DONATE, OH_COUNT };
-    static const int labels[OH_COUNT] = { T_ONLINE_PLAY, T_ONLINE_MESSAGES, T_ONLINE_PROFILE, T_ONLINE_FRIENDS, T_ONLINE_USERS, T_ONLINE_STATS,
-                                          T_ONLINE_RANK, T_ONLINE_NEWS, T_ONLINE_TELEGRAM, T_DONATE_TAB };
-    static const unsigned char icons[OH_COUNT] = { UI_ICON_PLAY, UI_ICON_CHAT, UI_ICON_PERSON, UI_ICON_FRIENDS, UI_ICON_LIST, UI_ICON_CHART,
-                                                   UI_ICON_GLOBE, UI_ICON_INFO, UI_ICON_CLOCK, UI_ICON_SUN };
+    // Five options (ten before: friends, players and the ranking are "Players"; the statistics are in the
+    // profile; the news, Telegram and donating are "Community"), each with a line saying what is in it.
+    enum { OH_PLAY = 0, OH_MESSAGES, OH_PLAYERS, OH_PROFILE, OH_COMMUNITY, OH_COUNT };
+    static const int labels[OH_COUNT] = { T_ONLINE_M_PLAY, T_ONLINE_MESSAGES, T_ONLINE_USERS, T_ONLINE_PROFILE, T_ONLINE_M_COMMUNITY };
+    static const int subs[OH_COUNT] = { T_ONLINE_M_PLAY_SUB, T_ONLINE_M_MSG_SUB, T_ONLINE_M_PLAYERS_SUB, T_ONLINE_M_PROFILE_SUB, T_ONLINE_M_COMMUNITY_SUB };
+    static const unsigned char icons[OH_COUNT] = { UI_ICON_PLAY, UI_ICON_CHAT, UI_ICON_FRIENDS, UI_ICON_PERSON, UI_ICON_HEART };
+    static const D3DCOLOR iconCol[OH_COUNT] = { D3DCOLOR_ARGB(255, 80, 210, 120), D3DCOLOR_ARGB(255, 70, 160, 255), D3DCOLOR_ARGB(255, 40, 200, 190),
+                                                D3DCOLOR_ARGB(255, 180, 140, 255), D3DCOLOR_ARGB(255, 255, 92, 130) };
     std::vector<OnlineChatLine> chat, fresh;
+    std::vector<OnlineRoomInfo> rooms;
+    std::vector<OnlineGameInfo> games;
+    std::vector<OnlineUser> users;
+    int online = -1;   // players online (the lobby's list), -1 not known
     UiInput in;
     DWORD readAt = 0;
     int sel = 0, k, last = 0;
+    // The right side's two kinds (Play's panel, the others' chat): changing, the one before goes out up or down and
+    // fades while the new one comes in from the other side (HUB_PANEL_S).
+    int panel = 0, panelWas = -1, panelDir = 1;
+    float panelAt = -10;
     if (!OnlineRegistered() && !online_setup(dev)) return 0;
     online_answer_requests(dev);   // friendships asked of this player: accepted or not now
     UiInputInit(&in);
     for (;;)
     {
-        const float w = UI_WIDTH - 2 * UI_SAFE_X, h = 520, x = UI_SAFE_X, y = 112, rowH = 47, pad = 24, listW = 420;
+        const float w = UI_WIDTH - 2 * UI_SAFE_X, h = 520, x = UI_SAFE_X, y = 112, rowH = 92, pad = 24, listW = 420;
         const float chatX = x + listW + 44, chatW = x + w - 24 - chatX;
         const int shown = 13;
         const OnlineProfile *me = OnlineMe();
         WORD down = UiInputPoll(&in);
+        int coverLoads = 1;   // rooms' box art read this frame at most (room_cover)
         float sy;
-        if ((int)(GetTickCount() - readAt) >= 0)
+        (void)me;
+        // The rooms, the players online and the general chat's new messages, read by the online thread
+        // (OnlineLobbyWatch: read here, each read held the screen - a stutter every 8 s); again from where
+        // it was after another screen.
+        if (readAt == 0) { OnlineLobbyWatch(1, last); readAt = 1; }
+        fresh.clear();
+        if (OnlineLobbyTake(&rooms, &games, &users, &fresh))
         {
-            // The general chat: the new messages (the last ones the first time).
-            if (OnlineChatGet(last, &fresh))
-                for (k = 0; k < (int)fresh.size(); k++) { chat.push_back(fresh[k]); last = fresh[k].id; }
-            if ((int)chat.size() > shown * 3) chat.erase(chat.begin(), chat.end() - shown);
-            readAt = GetTickCount() + ONLINE_ROOMS_EVERY_MS;
+            for (k = 0; k < (int)fresh.size(); k++) { chat.push_back(fresh[k]); last = fresh[k].id; }
+            online = (int)users.size();
+            if ((int)chat.size() > shown * 4) chat.erase(chat.begin(), chat.end() - shown * 3);
         }
-        if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) { xb_audio_ui_sound(XB_SFX_BACK); return 0; }
+        if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) { xb_audio_ui_sound(XB_SFX_BACK); OnlineLobbyWatch(0, 0); return 0; }
         if (down & (XINPUT_GAMEPAD_DPAD_UP | XINPUT_GAMEPAD_DPAD_DOWN))
         {
             sel = (sel + ((down & XINPUT_GAMEPAD_DPAD_DOWN) ? 1 : OH_COUNT - 1)) % OH_COUNT;
             xb_audio_ui_sound(XB_SFX_MOVE);
+            if ((sel == OH_PLAY ? 0 : 1) != panel)
+            {
+                panelWas = panel;
+                panel = sel == OH_PLAY ? 0 : 1;
+                panelDir = (down & XINPUT_GAMEPAD_DPAD_DOWN) ? 1 : -1;
+                panelAt = UiTime();
+            }
+        }
+        if (sel == OH_PLAY && (down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_X | XINPUT_GAMEPAD_Y)))
+        {
+            // Play: A the lobby (every room, the chat, the players), X a room of one's own, Y the quick match.
+            std::string file;
+            xb_audio_ui_sound(XB_SFX_SELECT);
+            OnlineLobbyWatch(0, 0);   // (the screens it opens read their own; this one's again after)
+            if (down & XINPUT_GAMEPAD_A) { if (online_play(dev)) return 1; }
+            else if (down & XINPUT_GAMEPAD_X) { if (online_create(dev, &file) && online_lobby(dev, file)) return 1; }
+            else
+            {
+                // The first room open to all with a place left whose game is in the list (else one whose game is
+                // not known to be missing); none: a room of one's own, if wanted.
+                int pick = -1;
+                for (k = 0; pick < 0 && k < (int)rooms.size(); k++)
+                    if (!rooms[k].locked && rooms[k].players < rooms[k].max && online_have_game(rooms[k].art) == 1) pick = k;
+                for (k = 0; pick < 0 && k < (int)rooms.size(); k++)
+                    if (!rooms[k].locked && rooms[k].players < rooms[k].max && online_have_game(rooms[k].art) < 0) pick = k;
+                if (pick >= 0)
+                {
+                    online_busy(dev, Tr(T_ONLINE_QUICK), T_ONLINE_CONNECTING);
+                    if (!OnlineRoomJoin(rooms[pick].code, "")) online_message(dev, Tr(T_ONLINE_QUICK), online_error_text());
+                    else if (online_lobby(dev, std::string())) return 1;
+                }
+                else
+                {
+                    const char *ql[2];
+                    ql[0] = Tr(T_ONLINE_CREATE);
+                    ql[1] = Tr(T_ONLINE_QUICK_BACK);
+                    if (ChoiceScreen(dev, Tr(T_ONLINE_QUICK), Tr(T_ONLINE_QUICK_NONE), ql, 2, 0, Tr(T_FOOT_ONLINE), 1) == 0 &&
+                        online_create(dev, &file) && online_lobby(dev, file))
+                        return 1;
+                }
+            }
+            UiInputInit(&in);
+            readAt = 0;
+            continue;
         }
         if (down & XINPUT_GAMEPAD_A)
         {
             xb_audio_ui_sound(XB_SFX_SELECT);
-            switch (sel)
-            {
-            case OH_PLAY: if (online_play(dev)) return 1; break;
-            case OH_MESSAGES: online_messages(dev); break;
-            case OH_PROFILE: online_profile(dev); break;
-            case OH_FRIENDS: online_list(dev, ONLINE_LIST_FRIENDS); break;
-            case OH_USERS: online_list(dev, ONLINE_LIST_USERS); break;
-            case OH_STATS: online_stats(dev, me->tag); break;
-            case OH_RANK: online_list(dev, ONLINE_LIST_RANK); break;
-            case OH_NEWS: online_news(dev, c); break;
-            case OH_TELEGRAM: online_telegram(dev); break;
-            case OH_DONATE: online_donate(dev); break;
-            }
+            OnlineLobbyWatch(0, 0);
+            if (sel == OH_MESSAGES) { if (online_messages(dev)) return 1; }
+            else if (sel == OH_PROFILE) online_myprofile(dev);
+            else if (sel == OH_PLAYERS) { if (online_players(dev)) return 1; }   // friends, online, ranking: tabs
+            else online_community(dev, c);   // the news, the Telegram group, donating: tabs
             UiInputInit(&in);
-            readAt = 0;   // the chat again: it may have moved on meanwhile
+            readAt = 0;   // the lists again: they may have moved on meanwhile
             continue;
         }
         dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
-        UiBegin(dev);
-        hub_frame(Tr(T_ONLINE), NULL, x, y, w, h);
+        online_begin(dev, __FUNCTION__);
+        hub_frame("", NULL, x, y, w, h);
+        UiOnlineLogo(UI_WIDTH * 0.5f, y - 46, 60);   // the title: the LAIKA 64 ONLINE logo, centred (as Play online's)
         sy = anim_step(&selAnim, y + pad + sel * rowH, 0);
-        selection_bar(x + 10, sy + 1, listW, rowH - 2);
+        selection_bar(x + 10, sy, listW, 76);
         for (k = 0; k < OH_COUNT; k++)
         {
             const int s1 = k == sel;
-            const float cy = y + pad + k * rowH + rowH * 0.5f;
-            menu_icon(icons[k], x + 46, cy, s1 ? UI_COL_ACCENT_HI : UI_COL_TEXT2);
-            UiText(s1 ? UI_BOLD : UI_REGULAR, 20, x + 80, cy, s1 ? UI_COL_TEXT : UI_COL_TEXT2, Tr(labels[k]), UI_LEFT);
+            const float cy = y + pad + k * rowH + 38;
+            char fit[120];
+            menu_icon(icons[k], x + 46, cy, iconCol[k]);
+            UiText(s1 ? UI_BOLD : UI_REGULAR, 22, x + 80, cy - 11, s1 ? UI_COL_TEXT : UI_COL_TEXT2, Tr(labels[k]), UI_LEFT);
+            UiTextFit(UI_REGULAR, 15, listW - 180, Tr(subs[k]), fit, sizeof(fit));
+            UiText(UI_REGULAR, 15, x + 80, cy + 15, s1 ? UiAlpha(UI_COL_TEXT, 0.85f) : UI_COL_TEXT3, fit, UI_LEFT);
             if (k == OH_MESSAGES && OnlineUnread(""))
             {
                 char t[16];
@@ -12428,15 +15102,140 @@ static int online_hub_run(IDirect3DDevice9 *dev, Config *c)
                 UiCircle(x + listW - 20, cy, 13, UI_COL_ACCENT);
                 UiText(UI_BOLD, 15, x + listW - 20, cy, D3DCOLOR_ARGB(255, 255, 255, 255), t, UI_CENTER);
             }
+            if (k == OH_PLAYERS)
+            {
+                // How many friends are online: a teal tag.
+                int f = 0, j;
+                for (j = 0; j < (int)users.size(); j++) f += users[j].isFriend != 0;
+                if (f)
+                {
+                    char t[48];
+                    float tw;
+                    _snprintf(t, sizeof(t) - 1, Tr(T_ONLINE_FRIENDS_ON), f);
+                    t[sizeof(t) - 1] = 0;
+                    tw = UiTextWidth(UI_BOLD, 13, t) + 18;
+                    UiRoundRect(x + listW - 6 - tw, cy - 11, tw, 22, 11, D3DCOLOR_ARGB(50, 40, 200, 190), D3DCOLOR_ARGB(50, 40, 200, 190));
+                    UiRoundRing(x + listW - 6 - tw, cy - 11, tw, 22, 11, 1.0f, D3DCOLOR_ARGB(150, 40, 200, 190));
+                    UiText(UI_BOLD, 13, x + listW - 6 - tw * 0.5f, cy, D3DCOLOR_ARGB(255, 40, 200, 190), t, UI_CENTER);
+                }
+            }
         }
-        // The general chat, to read (the newest at the bottom).
         UiRect(chatX - 20, y + 24, 1, h - 48, UI_COL_LINE);
-        UiText(UI_BOLD, 19, chatX, y + 40, UI_COL_TEXT2, Tr(T_ONLINE_GENERAL), UI_LEFT);
-        online_last_time(chatX + chatW, y + 40, chat);
         {
-            const int first = (int)chat.size() > shown ? (int)chat.size() - shown : 0;
-            for (k = first; k < (int)chat.size(); k++) online_chat_line(chatX, y + 80 + (k - first) * 32, chatW, &chat[k]);
+        const float pt = (UiTime() - panelAt) / HUB_PANEL_S, pe = ease_out(pt < 0 ? 0 : pt > 1 ? 1 : pt);
+        int pass;
+        for (pass = 0; pass < 2; pass++)
+        {
+        const int kind = pass ? panel : panelWas;
+        if (!pass && (panelWas < 0 || pt >= 1)) continue;   // nothing going out
+        if (pt < 1) UiSetShift(0, pass ? panelDir * HUB_PANEL_MOVE * (1 - pe) : -panelDir * HUB_PANEL_MOVE * pe, pass ? pe : 1 - pe);
+        if (kind == 0)
+        {
+            // Play: every room (A, the lobby) big, a room of one's own (X) and the quick match (Y) under it; the rooms
+            // open now (two at most: their game's box, whether it is in this console's list, the connection in a word,
+            // the places; none: a line saying so), then the general chat's last messages (written in the lobby).
+            const float px = chatX, pw = chatW, bw = (pw - 14) * 0.5f;
+            const int myMs = OnlineMyMs(), shownRooms = rooms.size() < 2 ? (int)rooms.size() : 2;
+            float sepY;
+            char fit[160], t[48];
+            UiShadow(px - 2, y + 26, pw + 4, 84, 18, 14, D3DCOLOR_ARGB(70, 80, 210, 120));
+            UiRoundRect(px, y + 28, pw, 80, 16, D3DCOLOR_ARGB(200, 40, 120, 70), D3DCOLOR_ARGB(200, 34, 104, 62));
+            UiRoundRing(px, y + 28, pw, 80, 16, 2.0f, D3DCOLOR_ARGB(255, 120, 235, 160));
+            UiCircle(px + 40, y + 68, 18, D3DCOLOR_ARGB(255, 70, 180, 60));
+            UiText(UI_BOLD, 20, px + 40, y + 68, UI_COL_TEXT, "A", UI_CENTER);
+            UiText(UI_BOLD, 26, px + 76, y + 56, UI_COL_TEXT, Tr(T_ONLINE_ALL_ROOMS), UI_LEFT);
+            UiTextFit(UI_REGULAR, 15, pw - 170, Tr(T_ONLINE_ALL_ROOMS_BIG), fit, sizeof(fit));
+            UiText(UI_REGULAR, 15, px + 76, y + 85, D3DCOLOR_ARGB(255, 210, 235, 218), fit, UI_LEFT);
+            for (k = 0; k < 3; k++)
+            {
+                // A list: three lines with their dots.
+                const float ly = y + 54 + k * 14;
+                UiCircle(px + pw - 75, ly, 3, D3DCOLOR_ARGB(255, 200, 245, 215));
+                UiRoundRect(px + pw - 64, ly - 2, 30, 4, 2, D3DCOLOR_ARGB(255, 200, 245, 215), D3DCOLOR_ARGB(255, 200, 245, 215));
+            }
+            for (k = 0; k < 2; k++)
+            {
+                const float bx0 = px + k * (bw + 14);
+                UiRoundRect(bx0, y + 122, bw, 60, 14, D3DCOLOR_ARGB(14, 255, 255, 255), D3DCOLOR_ARGB(14, 255, 255, 255));
+                UiRoundRing(bx0, y + 122, bw, 60, 14, 1.0f, D3DCOLOR_ARGB(40, 255, 255, 255));
+                UiCircle(bx0 + 29, y + 152, 13, k ? D3DCOLOR_ARGB(255, 225, 170, 30) : D3DCOLOR_ARGB(255, 40, 110, 220));
+                UiText(UI_BOLD, 15, bx0 + 29, y + 152, UI_COL_TEXT, k ? "Y" : "X", UI_CENTER);
+                UiTextFit(UI_BOLD, 18, bw - 100, Tr(k ? T_ONLINE_QUICK : T_ONLINE_CREATE), fit, sizeof(fit));
+                UiText(UI_BOLD, 18, bx0 + 56, y + 142, UI_COL_TEXT, fit, UI_LEFT);
+                UiTextFit(UI_REGULAR, 14, bw - 100, Tr(k ? T_ONLINE_QUICK_SHORT : T_ONLINE_CREATE_SUB), fit, sizeof(fit));
+                UiText(UI_REGULAR, 14, bx0 + 56, y + 164, UI_COL_TEXT3, fit, UI_LEFT);
+                if (k)
+                {
+                    // The quick match's bolt.
+                    const float bx = bx0 + bw - 28, by = y + 152;
+                    const float up[6] = { bx + 3, by - 15, bx - 8, by + 2, bx + 1, by + 2 }, dn[6] = { bx - 4, by + 15, bx + 8, by - 3, bx - 1, by - 3 };
+                    fill_convex(up, 3, D3DCOLOR_ARGB(255, 255, 230, 120));
+                    fill_convex(dn, 3, D3DCOLOR_ARGB(255, 255, 230, 120));
+                }
+            }
+            UiText(UI_BOLD, 17, px, y + 210, UI_COL_TEXT2, Tr(T_ONLINE_T_ROOMS), UI_LEFT);
+            online_count_text(px + pw, y + 210, online);
+            if (!shownRooms)
+            {
+                UiRoundRect(px, y + 226, pw, 40, 12, D3DCOLOR_ARGB(10, 255, 255, 255), D3DCOLOR_ARGB(10, 255, 255, 255));
+                UiRoundRing(px, y + 226, pw, 40, 12, 1.0f, D3DCOLOR_ARGB(26, 255, 255, 255));
+                UiText(UI_REGULAR, 15, px + pw * 0.5f, y + 246, UI_COL_TEXT3, Tr(T_ONLINE_NO_ROOMS_X), UI_CENTER);
+                sepY = y + 284;
+            }
+            else sepY = y + 226 + shownRooms * 62 + 10;
+            for (k = 0; k < shownRooms; k++)
+            {
+                const OnlineRoomInfo *rm = &rooms[k];
+                const float ry = y + 226 + k * 62, cy = ry + 27;
+                const int ms = rm->hostMs && myMs ? rm->hostMs + myMs : 0, have = online_have_game(rm->art), full = rm->players >= rm->max;
+                int cw = 0, chh = 0;
+                IDirect3DTexture9 *cover = room_cover(dev, rm->art, &coverLoads, &cw, &chh);
+                float nw;
+                UiRoundRect(px, ry, pw, 54, 12, D3DCOLOR_ARGB(12, 255, 255, 255), D3DCOLOR_ARGB(12, 255, 255, 255));
+                if (cover && chh > 0)
+                {
+                    const float ch = 40, cwv = ch * cw / chh;
+                    UiImage(cover, px + 38 - cwv * 0.5f, cy - ch * 0.5f, cwv, ch, 3, D3DCOLOR_ARGB(255, 255, 255, 255));
+                }
+                UiTextFit(UI_BOLD, 17, 236 - (rm->locked ? 24 : 0), rm->name, fit, sizeof(fit));
+                nw = UiText(UI_BOLD, 17, px + 78, cy - 10, UI_COL_TEXT, fit, UI_LEFT);
+                if (rm->locked) online_padlock(px + 78 + nw + 14, cy - 11, 15, D3DCOLOR_ARGB(255, 240, 200, 70));
+                UiTextFit(UI_REGULAR, 14, 236, rm->game, fit, sizeof(fit));
+                UiText(UI_REGULAR, 14, px + 78, cy + 11, UI_COL_ACCENT_HI, fit, UI_LEFT);
+                if (have >= 0)
+                {
+                    // "You have it" (a tick) or not (a cross).
+                    const char *txt = Tr(have ? T_ONLINE_HAVE : T_ONLINE_HAVE_NOT);
+                    const D3DCOLOR col = have ? ONLINE_GREEN : D3DCOLOR_ARGB(255, 150, 152, 165);
+                    const float tw = UiTextWidth(UI_BOLD, 13, txt) + 32, tx = px + 326;
+                    UiRoundRect(tx, cy - 11, tw, 22, 11, UiAlpha(col, 0.16f), UiAlpha(col, 0.16f));
+                    UiRoundRing(tx, cy - 11, tw, 22, 11, 1.0f, UiAlpha(col, 0.5f));
+                    if (have) { UiLine(tx + 9, cy, tx + 13, cy + 4, 2.0f, col); UiLine(tx + 13, cy + 4, tx + 20, cy - 4, 2.0f, col); }
+                    else { UiLine(tx + 10, cy - 4, tx + 18, cy + 4, 2.0f, col); UiLine(tx + 18, cy - 4, tx + 10, cy + 4, 2.0f, col); }
+                    UiText(UI_BOLD, 13, tx + 25, cy, col, txt, UI_LEFT);
+                }
+                online_ping_bars(px + 476, cy, 16, ms);
+                if (ms) UiText(UI_BOLD, 15, px + 502, cy, online_ping_colour(ms), Tr(ms < 90 ? T_ONLINE_LINK_GOOD : ms < 160 ? T_ONLINE_LINK_OK : T_ONLINE_LINK_BAD), UI_LEFT);
+                _snprintf(t, sizeof(t), "%d/%d", rm->players, rm->max);
+                UiText(UI_BOLD, 18, px + pw - 16, cy, full ? UI_COL_TEXT3 : ONLINE_GREEN, t, UI_RIGHT);
+            }
+            // The general chat's last messages, to read (written in the lobby: A).
+            UiRect(px, sepY, pw, 1, UI_COL_LINE);
+            UiText(UI_BOLD, 17, px, sepY + 22, UI_COL_TEXT2, Tr(T_ONLINE_GENERAL), UI_LEFT);
+            UiText(UI_REGULAR, 14, px + pw, sepY + 22, UI_COL_TEXT3, Tr(T_ONLINE_CHAT_PREVIEW), UI_RIGHT);
+            online_chat_view(px, sepY + 40, y + h - 24, pw, chat);
+            if (chat.empty()) UiText(UI_REGULAR, 16, px, sepY + 54, UI_COL_TEXT3, Tr(T_ONLINE_CHAT_EMPTY), UI_LEFT);
+        }
+        else
+        {
+            // The other options: the general chat, to read (the newest at the bottom).
+            UiText(UI_BOLD, 19, chatX, y + 40, UI_COL_TEXT2, Tr(T_ONLINE_GENERAL), UI_LEFT);
+            online_count_text(chatX + chatW, y + 40, online);
+            online_chat_view(chatX, y + 66, y + h - 24, chatW, chat);
             if (chat.empty()) UiText(UI_REGULAR, 17, chatX, y + 80, UI_COL_TEXT3, Tr(T_ONLINE_CHAT_EMPTY), UI_LEFT);
+        }
+        }
+        UiSetShift(0, 0, 1);
         }
         // The player's profile in the top right corner: avatar, gamertag, flag and country, online.
         {
@@ -12450,9 +15249,8 @@ static int online_hub_run(IDirect3DDevice9 *dev, Config *c)
             online_flag(tx - cw - fw, ay + 13, 15, ci);
         }
         UiScreenFooter(Tr(T_FOOT_ONLINE));
-        UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
+        online_end();
+        UiPresent(dev);
     }
 }
 
@@ -12659,8 +15457,7 @@ static void settings_loop(IDirect3DDevice9 *dev, Config *c, const char *settings
         browser_effect();   // the ROM list's, so a new choice shows at once
         UiMenuDraw(&m);
         UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
+        UiPresent(dev);
     }
 }
 
@@ -12673,6 +15470,7 @@ static void settings_loop(IDirect3DDevice9 *dev, Config *c, const char *settings
 // again while the pages were turned (slow with many ROMs). 400x232 textures: ~47 MB
 // at most, in the ROM list only (freed when a game starts).
 #define ART_VIEWS 128
+#define ART_VIEWS_RGBA 32   // of them while the pictures are the 3D boxes' or the cartridges' (views_take)
 struct ArtView
 {
     int used;
@@ -12680,6 +15478,7 @@ struct ArtView
     int hasInfo;
     H64GameInfo info;
     IDirect3DTexture9 *cover, *glow;
+    IDirect3DTexture9 *mask;   // ScreenScraper's cartridge's (ART_KIND_CART) selection glow (ArtOutline)
     int coverW, coverH;
     int kind, kinds;    // the picture's ART_KIND_* asked for, and the ones there are of the game
     int shownKind;      // the one it shows (the box when that one is not there): only a box is drawn in 3D
@@ -12699,6 +15498,7 @@ static void view_free(IDirect3DDevice9 *dev, ArtView *v)
     if (v->cover) UiImageRelease(dev, v->cover);
     if (v->glow) UiImageRelease(dev, v->glow);
     if (v->prev) UiImageRelease(dev, v->prev);
+    if (v->mask) UiImageRelease(dev, v->mask);
     memset(v, 0, sizeof(*v));
 }
 
@@ -12717,6 +15517,20 @@ static struct { IDirect3DTexture9 *tex; int w, h; float since; char path[256]; }
 // The last picture of a video that stopped (another game selected), fading out behind the views
 // (Background videos) - until the next video's first picture comes.
 static struct { IDirect3DTexture9 *tex; int w, h; float at, from; } s_pvLast;
+
+static int art_net_possible(const Config *c);   // below
+static int s_pvAudioOnly;   // the video plays for its sound, never shown: Config::gameMusic (the videos off), or the cartridges view
+static int s_pvMusicMode;   // Config::gameMusic with the videos off (preview_apply)
+// The preview's thread as the settings say: videos (their sound as Sound says; none for background videos without
+// it), or the game's music alone (the video playing unseen for its sound).
+static void preview_apply(const Config *c)
+{
+    const int music = c->gameMusic && !c->previewVideo;
+    s_pvMusicMode = music;
+    s_pvAudioOnly = music;
+    PreviewSettings(c->previewVideo || music, music ? 1 : c->videoBackdrop == 2 && !c->gameBackdrop ? 0 : c->previewSound,
+                    c->artDownload && art_net_possible(c));
+}
 
 static float preview_alpha(const char *path);
 static void preview_frame(IDirect3DDevice9 *dev, const char *path)
@@ -12740,7 +15554,7 @@ static void preview_frame(IDirect3DDevice9 *dev, const char *path)
 // How far the video of `path` has come in (0: none, 1: whole).
 static float preview_alpha(const char *path)
 {
-    if (!s_pv.tex || !path || !path[0] || _stricmp(path, s_pv.path)) return 0.0f;
+    if (s_pvAudioOnly || !s_pv.tex || !path || !path[0] || _stricmp(path, s_pv.path)) return 0.0f;
     return smooth01((UiTime() - s_pv.since) / 0.35f);
 }
 
@@ -12784,6 +15598,18 @@ static void view_cover_still(const ArtView *v, float x, float y, float w, float 
     cover_draw(v->cover, x, y, w, h, r, color, v->shownKind == ART_KIND_BOX);
 }
 
+// A cover's reflection on the floor (UiImageMirror's frac, top and bottom colours) following what is
+// shown over it: the two pictures cross-fading as view_cover_still does, and nothing under the game's
+// video while it plays (the pictures still taking turns beneath it showed in the reflection).
+static void view_mirror(const ArtView *v, float x, float y, float w, float h, float r, float frac, D3DCOLOR top, D3DCOLOR bottom)
+{
+    const float keep = 1.0f - preview_spot(v->path), e = view_swap(v);
+    if (keep <= 0) return;
+    if (e < 1.0f && v->prev)
+        UiImageMirror(v->prev, x, y, w, h, r, frac, UiAlpha(top, keep * (1.0f - e * e)), UiAlpha(bottom, keep * (1.0f - e * e)));
+    UiImageMirror(v->cover, x, y, w, h, r, frac, UiAlpha(top, keep * (e < 1.0f ? e : 1.0f)), UiAlpha(bottom, keep * (e < 1.0f ? e : 1.0f)));
+}
+
 static ArtView *view_find(const char *path)
 {
     int i;
@@ -12799,6 +15625,10 @@ static ArtView *view_find(const char *path)
 static void cine_take(IDirect3DDevice9 *dev);    // the selected game's bigger pictures (below)
 static void cine_clear(IDirect3DDevice9 *dev);
 static void game_backdrop(const std::string &file, int flags);
+
+// The LAIKA 64 logo at the top of the browser's views, centred (the list centres it over its panel),
+// 10 pixels higher than the corner's was: room over a covers grid's middle tile when it is selected.
+static void browser_brand(void) { UiBrand((UI_WIDTH - UiBrandWidth(BRAND_SIZE)) * 0.5f, 62, BRAND_SIZE); }
 
 // Turns the worker's results into textures.
 static void views_take(IDirect3DDevice9 *dev)
@@ -12827,7 +15657,10 @@ static void views_take(IDirect3DDevice9 *dev)
         }
         if (r.kind != ArtKindFor(r.path))
         {
-            // Read for the kind of picture shown before (Interface > Game images, the right stick): it is sent again.
+            // Read for the kind of picture shown before (Interface > Game images, the right stick, another view):
+            // asked for again. (One being read as the kind changed came after ArtForgetAll, marked as sent: the
+            // selection - read first - stayed empty in the cartridges view.)
+            ArtForget(r.path);
             ArtResultFree(&r);
             continue;
         }
@@ -12852,8 +15685,11 @@ static void views_take(IDirect3DDevice9 *dev)
         }
         else
         {
+            // The 3D boxes' and cartridges' pictures keep their alpha (RGBA, not DXT1: 7 times the
+            // memory, with the cartridge's glow): fewer of them kept, the least recently drawn going.
+            const int keep = ART_KIND_VIEW_ONLY(ArtGetKind()) ? ART_VIEWS_RGBA : ART_VIEWS;
             int i, best = 0;
-            for (i = 0; i < ART_VIEWS; i++)
+            for (i = 0; i < keep; i++)
             {
                 if (!s_views[i].used) { best = i; break; }
                 if (s_views[i].lastUse < s_views[best].lastUse) best = i;
@@ -12876,8 +15712,10 @@ static void views_take(IDirect3DDevice9 *dev)
         {
             // Compressed (the cover cache's): a straight copy, its padding cut off when drawn.
             v->cover = r.dxt ? UiImageCreateDxt1(dev, r.dxt, r.dxtW, r.dxtH) : UiImageCreate(dev, r.cover, r.coverW, r.coverH);
+            if (!v->cover) H64_INFO("[ui] %s: its picture (%dx%d) not made", r.key, r.coverW, r.coverH);
             v->coverW = r.coverW;
             v->coverH = r.coverH;
+            if (r.outline && r.shownKind == ART_KIND_CART) v->mask = UiImageCreate(dev, r.outline, r.outlineW, r.outlineH);   // its glow
         }
         if (r.glow) v->glow = UiImageCreate(dev, r.glow, ART_GLOW_W, ART_GLOW_H);
         v->coverAt = coverAt;
@@ -13338,7 +16176,6 @@ static void card_draw(const char *shown, const RomInfo *ri, const ArtView *v, in
     float now = UiTime(), a = 0.3f + 0.7f * smooth01((now - selAt) / 0.2f), slide = (1.0f - smooth01((now - selAt) / 0.2f)) * 10.0f;
     float ca = 0, ty, va = v ? preview_spot(v->path) : 0.0f;
     char buf[1024];
-    const int vw = s_pv.w, vh = s_pv.h;
     (void)busy;
 
     UiPanel(x, y, w, h, 22);
@@ -13372,9 +16209,8 @@ static void card_draw(const char *shown, const RomInfo *ri, const ArtView *v, in
     }
     if (va > 0)
     {
-        // The video exactly where the picture is (its shape, cut to it), else at its own proportions;
-        // whose it is in a corner (CC BY-NC-SA).
-        float sw = v && v->cover ? (float)v->coverW : (float)vw, sh = v && v->cover ? (float)v->coverH : (float)vh;
+        // The video in a 16:9 box in the picture's room; whose it is in a corner (CC BY-NC-SA).
+        float sw = 16.0f, sh = 9.0f;   // 16:9 always (it took the shape of the picture under it, which changed as they took turns)
         float k = iw / sw, pw, ph, px, pyv;
         if (sh * k > CARD_PIC_H) k = CARD_PIC_H / sh;
         pw = sw * k;
@@ -14456,8 +17292,7 @@ static void saver_run(IDirect3DDevice9 *dev, const Config *c)
         saver_draw(mode, t);
         if (t < 1.0f) UiRect(0, 0, UI_WIDTH, UI_HEIGHT, D3DCOLOR_ARGB((int)(255 * (1.0f - t)), 0, 0, 0));   // fades in
         UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
+        UiPresent(dev);
     }
     xb_audio_ui_sound(XB_SFX_OPEN);
     H64_INFO("[menu] screen saver ended");
@@ -14483,7 +17318,7 @@ static void browser_draw(const std::vector<RomEntry> &roms, int sel, int top, in
         // A tab with no game in it (no favourites yet, an empty category).
         float cy = listY + listH * 0.5f;
         UiText(UI_BOLD, 24, listX + listW * 0.5f, cy - 20, UI_COL_TEXT, Tr(T_CAT_EMPTY), UI_CENTER);
-        UiText(UI_REGULAR, 19, listX + listW * 0.5f, cy + 20, UI_COL_TEXT2, Tr(s_tab == 1 ? T_FAV_HINT : tab_is_hd(s_tab) ? T_CAT_HD_HINT : T_CAT_HINT), UI_CENTER);
+        UiText(UI_REGULAR, 19, listX + listW * 0.5f, cy + 20, UI_COL_TEXT2, Tr(s_tab == 1 ? T_FAV_HINT : tab_is_hd(s_tab) ? T_CAT_HD_HINT : tab_is_top(s_tab) ? T_CAT_TOP_HINT : T_CAT_HINT), UI_CENTER);
     }
     else if (!n)
     {
@@ -14583,23 +17418,12 @@ static void browser_draw_covers(const std::vector<RomEntry> &roms, int sel, int 
 {
     const int perPage = grid_per_page(g);
     int n = (int)roms.size(), i;
-    char buf[160];
     UiBackdrop();
     browser_effect();
     if (!roms.empty()) game_backdrop(roms[sel].file, 0);   // Interface > Background images
-    UiBrand(UI_SAFE_X, 72, BRAND_SIZE);   // the logo alone (the version is on the About page)
+    browser_brand();   // the logo alone (the version is on the About page)
     // n == 0 never reaches here - the caller (RomBrowser) falls back to browser_draw
     // for that (one tested "no ROMs" screen instead of two).
-    sprintf(buf, "%d / %d", sel + 1, n);
-    UiText(UI_REGULAR, 19, UI_WIDTH - UI_SAFE_X, 64, UI_COL_TEXT2, buf, UI_RIGHT);
-    if (n > perPage)
-    {
-        // The slot the old "game:\roms\" text used to sit in - free since that was removed.
-        int pages = (n + perPage - 1) / perPage;
-        _snprintf(buf, sizeof(buf) - 1, Tr(T_PAGE_N), page + 1, pages);
-        buf[sizeof(buf) - 1] = 0;
-        UiText(UI_REGULAR, 15, UI_WIDTH - UI_SAFE_X, 88, UI_COL_TEXT3, buf, UI_RIGHT);
-    }
     {
         // Smooth movement: the selection's ring glides from tile to tile, and a
         // page change slides the page leaving by GRID_SLIDE and fades it out
@@ -14657,7 +17481,7 @@ static void browser_draw_covers(const std::vector<RomEntry> &roms, int sel, int 
 #define CAR_H (CAR_W * 232.0f / 400.0f)
 #define CAR_FLOOR 418.0f                   // the covers stand on this line
 #define CAR_GAP 6.0f                       // between a cover and its reflection
-#define CAR_SPREAD 4                       // covers shown on each side
+#define CAR_SPREAD 3                       // covers shown on each side: 7 in all
 
 static void browser_draw_spotlight(const std::vector<RomEntry> &roms, int sel);   // below
 
@@ -14666,13 +17490,10 @@ static void browser_draw_carousel(const std::vector<RomEntry> &roms, int sel)
     static UiAnim pos;
     int n = (int)roms.size(), order[2 * CAR_SPREAD + 3], cnt = 0, i, j;
     float p, a = selection_pulse();
-    char buf[160];
     UiBackdrop();
     browser_effect();
     if (!roms.empty()) game_backdrop(roms[sel].file, 0);   // Interface > Background images
-    UiBrand(UI_SAFE_X, 72, BRAND_SIZE);
-    sprintf(buf, "%d / %d", sel + 1, n);
-    UiText(UI_REGULAR, 19, UI_WIDTH - UI_SAFE_X, 64, UI_COL_TEXT2, buf, UI_RIGHT);
+    browser_brand();
     // The row glides; only a long jump (round the end of the list) cuts straight there.
     p = anim_step_rate(&pos, (float)sel, !pos.live || fabsf(pos.value - sel) > 3 * CAR_SPREAD, 6.0f, 0.002f);   // as the grid's pages
     {
@@ -14717,9 +17538,11 @@ static void browser_draw_carousel(const std::vector<RomEntry> &roms, int sel)
     {
         int idx = order[i];
         float d = idx - p, ad = fabsf(d), near1 = ad < 1 ? ad : 1;
-        float s = ad < 1 ? 1.0f - 0.4f * ad : 0.6f - 0.08f * (ad - 1);
-        float off = ad < 1 ? ad * 330.0f : 330.0f + (ad - 1) * 190.0f;
-        float alpha = ad < 1 ? 1.0f - 0.25f * ad : 0.75f - 0.22f * (ad - 1);
+        // The middle one big, the three on each side 55, 46 and 37 % of it, a little over each other,
+        // the last one still whole on the screen.
+        float s = ad < 1 ? 1.0f - 0.45f * ad : 0.55f - 0.09f * (ad - 1);
+        float off = ad < 1 ? ad * 330.0f : ad < 2 ? 330.0f + (ad - 1) * 125.0f : 455.0f + (ad - 2) * 100.0f;
+        float alpha = ad < 1 ? 1.0f - 0.05f * ad : 0.95f - 0.08f * (ad - 1);
         float w = CAR_W * s, h = CAR_H * s, x = UI_WIDTH * 0.5f + (d < 0 ? -off : off) - w * 0.5f, y = CAR_FLOOR - h;
         int tint = (int)(255 * (1.0f - 0.45f * near1));
         const ArtView *v = view_find(roms[idx].file.c_str());
@@ -14737,8 +17560,8 @@ static void browser_draw_carousel(const std::vector<RomEntry> &roms, int sel)
         if (v && v->cover)
         {
             view_cover(v, x, y, w, h, 12, D3DCOLOR_ARGB((int)(255 * alpha), tint, tint, tint));
-            UiImageMirror(v->cover, x, CAR_FLOOR + CAR_GAP, w, h, 12, 0.5f,
-                          D3DCOLOR_ARGB((int)(110 * alpha), tint, tint, tint), D3DCOLOR_ARGB(0, tint, tint, tint));
+            view_mirror(v, x, CAR_FLOOR + CAR_GAP, w, h, 12, 0.5f,
+                        D3DCOLOR_ARGB((int)(110 * alpha), tint, tint, tint), D3DCOLOR_ARGB(0, tint, tint, tint));
         }
         else
         {
@@ -14778,9 +17601,7 @@ static void browser_draw_spotlight(const std::vector<RomEntry> &roms, int sel)
     UiBackdrop();
     browser_effect();
     if (!roms.empty()) game_backdrop(roms[sel].file, 0);   // Interface > Background images
-    UiBrand(UI_SAFE_X, 72, BRAND_SIZE);
-    sprintf(buf, "%d / %d", sel + 1, n);
-    UiText(UI_REGULAR, 19, UI_WIDTH - UI_SAFE_X, 64, UI_COL_TEXT2, buf, UI_RIGHT);
+    browser_brand();
     if (!n) { browser_footer(0); return; }
     if (sel != lastSel) { lastSel = sel; changedAt = UiTime(); }
     fade = smooth01((UiTime() - changedAt) / 0.25f);   // the big part fades in as the selection changes
@@ -14830,11 +17651,11 @@ static void browser_draw_spotlight(const std::vector<RomEntry> &roms, int sel)
 // each one's box art as its label; the selection lifted up out of the row,
 // its name and facts under the shelf. The row glides as the carousel's does.
 // Drawn, not a picture, in the N64 cartridge's shape (cartridge()).
-#define CART_W 300.0f        // the middle cartridge
-#define CART_H 201.6f        // the shape's 320 x 215 (cartucho.webp)
-#define CART_SHELF 470.0f    // they stand on this line
-#define CART_SPREAD 4        // shown on each side
-#define CART_LIFT 46.0f      // how far the selection comes up
+#define CART_W 380.0f        // the middle cartridge
+#define CART_H 255.3f        // the shape's 320 x 215 (cartucho.webp)
+#define CART_SHELF 505.0f    // they stand on this line
+#define CART_SPREAD 3        // shown on each side: 7 in all
+#define CART_LIFT 8.0f       // how far the selection comes up
 
 // One cartridge at (x, y, w, h): `light` darkens the ones farther from the middle.
 // The shell is the picture of an N64 cartridge (xb_cart_shell.h, 320 x 215); the
@@ -14845,28 +17666,51 @@ static int s_cartShellTried;
 
 static void cart_shell_load(void)
 {
-    int iw, ih, i;
+    int iw, ih;
     unsigned char *px;
     if (s_cartShellTried) return;
     s_cartShellTried = 1;
     px = UiDecodeImage(s_cartShellPng, (long)sizeof(s_cartShellPng), 320, 215, &iw, &ih);
     if (!px) return;
     s_cartShell = UiImageCreate(UiDevice(), px, iw, ih);
-    for (i = 0; i < iw * ih; i++) px[i * 4] = px[i * 4 + 1] = px[i * 4 + 2] = 255;   // white, its own alpha kept
-    s_cartMask = UiImageCreate(UiDevice(), px, iw, ih);
+    {
+        int ow, oh;
+        u8 *glow = ArtOutline(px, iw, ih, &ow, &oh);   // its selection glow
+        if (glow) { s_cartMask = UiImageCreate(UiDevice(), glow, ow, oh); free(glow); }
+    }
     free(px);
 }
 
-// The selection around a cartridge: its own outline, grown, in the selection's colours -
-// the glow fading out from it and the ring on its edge, the shape of the shell exactly.
-static void cart_select(float x, float y, float w, float h, float a)
+// Where a game's own cartridge (ScreenScraper's, ART_KIND_CART) is drawn in a cartridge's room: its
+// proportions, centred, standing on the room's bottom. 0 when the game shows the shell instead.
+static int cart_real_rect(const ArtView *v, float *x, float *y, float *w, float *h)
 {
-    int g;
+    float k;
+    if (!v || !v->cover || v->shownKind != ART_KIND_CART || v->coverW <= 0 || v->coverH <= 0) return 0;
+    k = v->coverW * *h / (v->coverH * *w);
+    if (k < 1.0f) { *x += *w * (1.0f - k) * 0.5f; *w *= k; }
+    else { *y += *h - *h / k; *h /= k; }
+    return 1;
+}
+
+// The selection's glow round a cartridge, the same width all round its outline: `mask`, the game's own
+// cartridge's (its picture texW x texH), or NULL: the shell's - ArtOutline's, made once, ART_OUTLINE_PAD
+// of the picture's pixels round it (one picture drawn: its outline shifted every way, 88 times a frame,
+// made the view slow). The cartridge drawn over it hides what falls inside.
+static void cart_select(float x, float y, float w, float h, float a, IDirect3DTexture9 *mask, int texW, int texH)
+{
+    float px, py;
     cart_shell_load();
-    if (!s_cartMask) { selection_glow(x - 6, y - 6, w + 12, h + 12, 20, a); UiRoundRing(x - 5, y - 5, w + 10, h + 10, 20, 3.0f, SEL_RING(a)); return; }
-    for (g = 16; g >= 6; g -= 2)
-        UiImage(s_cartMask, x - g, y - g * 0.67f, w + 2 * g, h + 1.34f * g, 0, SEL_GLOW(a * (0.35f - g * 0.018f)));
-    UiImage(s_cartMask, x - 4, y - 3, w + 8, h + 6, 0, SEL_RING(a));
+    if (!mask) { mask = s_cartMask; texW = 320; texH = 215; }
+    if (!mask || texW <= 0 || texH <= 0)
+    {
+        selection_glow(x - 6, y - 6, w + 12, h + 12, 20, a);
+        UiRoundRing(x - 5, y - 5, w + 10, h + 10, 20, 3.0f, SEL_RING(a));
+        return;
+    }
+    px = ART_OUTLINE_PAD * w / texW;
+    py = ART_OUTLINE_PAD * h / texH;
+    UiImage(mask, x - px, y - py, w + 2 * px, h + 2 * py, 0, SEL_RING(a));
 }
 
 static void cartridge(float x, float y, float w, float h, const ArtView *v, float alpha, float light, int selected)
@@ -14874,7 +17718,20 @@ static void cartridge(float x, float y, float w, float h, const ArtView *v, floa
     const float sx = w / 320.0f, sy = h / 215.0f;
     const float rx = x + 86 * sx, ry = y + 18 * sy, rw = 148 * sx, rh = 172 * sy;   // inside the recess
     const int A = (int)(255 * alpha), L = (int)(255 * light);
-    UiShadow(x + 8 * sx, y + 14 * sy, w - 16 * sx, h - 6 * sy, 14 * sx, 24 * sx, D3DCOLOR_ARGB(A * 120 / 255, 0, 0, 0));
+    {
+        // The game's own cartridge (ScreenScraper's picture, its alpha round it), its proportions in the
+        // shape's room, standing on the same line, its shadow under it alone (the shell's, taller, showed
+        // above it); the shell with the box art as its label otherwise.
+        // Its shadow where it stands only (a soft one all round showed as a halo over the cartridges).
+        float cx = x, cy = y, cw = w, ch = h;
+        if (cart_real_rect(v, &cx, &cy, &cw, &ch))
+        {
+            UiShadow(cx + cw * 0.06f, cy + ch - 7, cw * 0.88f, 14, 7, 10, D3DCOLOR_ARGB(A * 150 / 255, 0, 0, 0));
+            UiImage(v->cover, cx, cy, cw, ch, 0, D3DCOLOR_ARGB(A, L, L, L));
+            return;
+        }
+    }
+    UiShadow(x + w * 0.06f, y + h - 7, w * 0.88f, 14, 7, 10, D3DCOLOR_ARGB(A * 150 / 255, 0, 0, 0));
     cart_shell_load();
     if (s_cartShell) UiImage(s_cartShell, x, y, w, h, 0, D3DCOLOR_ARGB(A, L, L, L));
     else UiRoundRect(x, y, w, h, 14 * sx, D3DCOLOR_ARGB(A, (int)(140 * light), (int)(141 * light), (int)(147 * light)),
@@ -14887,12 +17744,7 @@ static void cartridge(float x, float y, float w, float h, const ArtView *v, floa
         if (v->shownKind == ART_KIND_BOX) UiImagePart(v->cover, rx, ry, rw, rh, 0.0f, 0.0f, 0.815f, 1.0f, D3DCOLOR_ARGB(A, L, L, L));
         else UiImage(v->cover, rx, ry, rw, rh, 6 * sx, D3DCOLOR_ARGB(A, L, L, L));
     }
-    if (v && preview_spot(v->path) > 0)
-    {
-        // The selected game's video over the label, filling it (cut to its shape).
-        const float va = preview_spot(v->path);
-        preview_draw(rx, ry, rw, rh, v->shownKind == ART_KIND_BOX ? 0.0f : 6 * sx, va * alpha * light);
-    }
+    // (No video over the label: the cartridges view shows the cartridges alone - RomBrowser.)
 }
 
 static void browser_draw_cartridges(const std::vector<RomEntry> &roms, int sel)
@@ -14904,9 +17756,7 @@ static void browser_draw_cartridges(const std::vector<RomEntry> &roms, int sel)
     UiBackdrop();
     browser_effect();
     if (!roms.empty()) game_backdrop(roms[sel].file, 0);   // Interface > Background images
-    UiBrand(UI_SAFE_X, 72, BRAND_SIZE);
-    sprintf(buf, "%d / %d", sel + 1, n);
-    UiText(UI_REGULAR, 19, UI_WIDTH - UI_SAFE_X, 64, UI_COL_TEXT2, buf, UI_RIGHT);
+    browser_brand();
     if (!n) { browser_footer(0); return; }
     p = anim_step_rate(&pos, (float)sel, !pos.live || fabsf(pos.value - sel) > 3 * CART_SPREAD, 7.0f, 0.002f);
     // The shelf: a lit edge, its shadow below.
@@ -14927,19 +17777,24 @@ static void browser_draw_cartridges(const std::vector<RomEntry> &roms, int sel)
     {
         int idx = order[i];
         float d = idx - p, ad = fabsf(d), near1 = ad < 1 ? ad : 1;
-        float s = ad < 1 ? 1.0f - 0.3f * ad : 0.7f - 0.06f * (ad - 1);
-        float off = ad < 1 ? ad * 270.0f : 270.0f + (ad - 1) * 205.0f;
-        float alpha = ad < 1 ? 1.0f - 0.15f * ad : 0.85f - 0.2f * (ad - 1);
+        // The middle one big, the three on each side 55, 46 and 37 % of it, a little over each other.
+        float s = ad < 1 ? 1.0f - 0.45f * ad : 0.55f - 0.09f * (ad - 1);
+        float off = ad < 1 ? ad * 290.0f : ad < 2 ? 290.0f + (ad - 1) * 150.0f : 440.0f + (ad - 2) * 125.0f;
+        float alpha = ad < 1 ? 1.0f - 0.05f * ad : 0.95f - 0.08f * (ad - 1);
         float light = 1.0f - 0.35f * near1;
         float w = CART_W * s, h = CART_H * s, x = UI_WIDTH * 0.5f + (d < 0 ? -off : off) - w * 0.5f;
         float y = CART_SHELF - h - CART_LIFT * (1.0f - near1);
         if (alpha <= 0.02f || x > UI_WIDTH || x + w < 0) continue;
+        const ArtView *cv = view_find(roms[idx].file.c_str());
         if (ad < 0.5f)
         {
-            float ga = a * (1.0f - 2.0f * ad);
-            cart_select(x, y, w, h, ga);
+            // The glow round the cartridge drawn: the game's own (its proportions) or the shell.
+            float ga = a * (1.0f - 2.0f * ad), gx = x, gy = y, gw = w, gh = h;
+            int real = cart_real_rect(cv, &gx, &gy, &gw, &gh);
+            if (real && !cv->mask) UiShadow(gx, gy, gw, gh, 10, 16, SEL_RING(ga * 0.4f));   // (its glow not made: no memory)
+            else cart_select(gx, gy, gw, gh, ga, real ? cv->mask : NULL, real ? cv->coverW : 0, real ? cv->coverH : 0);
         }
-        cartridge(x, y, w, h, view_find(roms[idx].file.c_str()), alpha, light, idx == sel);
+        cartridge(x, y, w, h, cv, alpha, light, idx == sel);
         if (fav_is(roms[idx].file))
         {
             // A favourite: its badge on the left wing.
@@ -14953,15 +17808,139 @@ static void browser_draw_cartridges(const std::vector<RomEntry> &roms, int sel)
         const H64GameInfo *gi = v && v->hasInfo && v->info.found ? &v->info : NULL;
         char fit[160];
         UiTextFit(UI_BOLD, 34, UI_WIDTH - 2 * UI_SAFE_X - 60, gi && gi->title[0] ? gi->title : roms[sel].shown.c_str(), fit, sizeof(fit));
-        UiTextShadowed(UI_BOLD, 34, UI_WIDTH * 0.5f, CART_SHELF + 58, UI_COL_TEXT, fit, UI_CENTER);
+        UiTextShadowed(UI_BOLD, 34, UI_WIDTH * 0.5f, CART_SHELF + 50, UI_COL_TEXT, fit, UI_CENTER);
         if (gi)
         {
             _snprintf(buf, sizeof(buf) - 1, "%s%s%s%s%s", gi->year, gi->year[0] && gi->genre[0] ? "  -  " : "", gi->genre,
                       (gi->year[0] || gi->genre[0]) && gi->developer[0] ? "  -  " : "", gi->developer);
             buf[sizeof(buf) - 1] = 0;
             UiTextFit(UI_REGULAR, 19, UI_WIDTH - 2 * UI_SAFE_X, buf, fit, sizeof(fit));
-            UiText(UI_REGULAR, 19, UI_WIDTH * 0.5f, CART_SHELF + 100, UI_COL_TEXT2, fit, UI_CENTER);
-            score_stars(UI_WIDTH * 0.5f - 5 * 18 * 1.15f * 0.5f, CART_SHELF + 134, 18, gi->score, 1.0f);
+            UiText(UI_REGULAR, 19, UI_WIDTH * 0.5f, CART_SHELF + 86, UI_COL_TEXT2, fit, UI_CENTER);
+            score_stars(UI_WIDTH * 0.5f - 5 * 18 * 1.15f * 0.5f, CART_SHELF + 114, 18, gi->score, 1.0f);
+        }
+    }
+    browser_footer(0);
+}
+
+// ---- 3D boxes: the games' boxes standing on a floor, moving left and right: ScreenScraper's 3D box
+// (ART_KIND_BOX3D, drawn as it is with its alpha), else one made from the box art (box_from_cover),
+// else the name on a dark plate; each with its reflection on the floor.
+#define BOX3D_W 400.0f        // the middle box at most this wide ...
+#define BOX3D_H 300.0f        // ... and this tall, its own proportions
+#define BOX3D_FLOOR 460.0f    // they stand on this line
+#define BOX3D_GAP 4.0f        // between a box and its reflection
+#define BOX3D_SPREAD 4        // shown on each side
+#define BOX3D_LIFT 24.0f      // how far the selection comes up
+
+// A game's box in w x h at most, its picture's own proportions (the room itself without one).
+static void box_fit(const ArtView *v, float maxW, float maxH, float *w, float *h)
+{
+    *w = maxW;
+    *h = maxH;
+    if (v && v->cover && v->coverW > 0 && v->coverH > 0)
+    {
+        float k = v->coverW * maxH / (v->coverH * maxW);
+        if (k < 1.0f) *w *= k; else *h /= k;
+    }
+}
+
+// A game's box at (x, y, w, h) with its reflection `gap` under its own bottom (lifted, it is lifted
+// too): ScreenScraper's 3D box as it is, else one made from the box art (another picture, without box
+// art: flat), else its name on a plate (`plateA`: that plate's share of `alpha`). `glow`: the
+// selection's glow round it (0: none). The 3D boxes and single game views.
+static void box_draw(const ArtView *v, const char *shown, float x, float y, float w, float h, float gap, float alpha, int tint, float plateA,
+                     float glow)
+{
+    const int A = (int)(255 * alpha);
+    if (v && v->cover && v->shownKind == ART_KIND_BOX)
+    {
+        // The box made from its box art: each face's reflection on its own bottom edge, the glow the
+        // same width all round its outline, outside it only.
+        box_reflection(v->cover, x, y, w, h, gap, D3DCOLOR_ARGB(A * 80 / 255, tint, tint, tint));
+        if (glow > 0) box_glow(x, y, w, h, 18, SEL_GLOW(glow * 0.55f));
+        box_from_cover(v->cover, x, y, w, h, D3DCOLOR_ARGB(A, tint, tint, tint));
+        return;
+    }
+    if (glow > 0) UiShadow(x + w * 0.1f, y + h - 8, w * 0.8f, 16, 8, 18, SEL_RING(glow * 0.5f));   // (its outline unknown: on the floor)
+    if (v && v->cover && v->shownKind == ART_KIND_BOX3D)
+    {
+        UiImage(v->cover, x, y, w, h, 0, D3DCOLOR_ARGB(A, tint, tint, tint));
+        UiImageMirror(v->cover, x, y + h + gap, w, h, 0, 0.4f, D3DCOLOR_ARGB(A * 90 / 255, tint, tint, tint), D3DCOLOR_ARGB(0, tint, tint, tint));
+    }
+    else if (v && v->cover)
+    {
+        // Another picture (no box art): flat.
+        UiImage(v->cover, x, y, w, h, 10, D3DCOLOR_ARGB(A, tint, tint, tint));
+        UiImageMirror(v->cover, x, y + h + gap, w, h, 0, 0.4f, D3DCOLOR_ARGB(A * 70 / 255, tint, tint, tint), D3DCOLOR_ARGB(0, tint, tint, tint));
+    }
+    else
+        stage_placeholder(x, y, w, h, shown, alpha * plateA);
+}
+
+static void browser_draw_box3d(const std::vector<RomEntry> &roms, int sel)
+{
+    static UiAnim pos;
+    int n = (int)roms.size(), order[2 * BOX3D_SPREAD + 3], cnt = 0, i, j;
+    float p, a = selection_pulse();
+    char buf[200];
+    UiBackdrop();
+    browser_effect();
+    if (!roms.empty()) game_backdrop(roms[sel].file, 0);   // Interface > Background images
+    browser_brand();
+    if (!n) { browser_footer(0); return; }
+    p = anim_step_rate(&pos, (float)sel, !pos.live || fabsf(pos.value - sel) > 3 * BOX3D_SPREAD, 7.0f, 0.002f);
+    // The floor: a faint line, darker under it.
+    UiRect(0, BOX3D_FLOOR, UI_WIDTH, 1, D3DCOLOR_ARGB(40, 255, 255, 255));
+    UiRoundRect(0, BOX3D_FLOOR + 1, UI_WIDTH, 90, 0, D3DCOLOR_ARGB(90, 0, 0, 0), D3DCOLOR_ARGB(0, 0, 0, 0));
+    for (i = (int)floorf(p) - BOX3D_SPREAD; i <= (int)ceilf(p) + BOX3D_SPREAD && cnt < (int)(sizeof(order) / sizeof(order[0])); i++)
+        if (i >= 0 && i < n) order[cnt++] = i;
+    // The farthest first, so the middle one is drawn on top.
+    for (i = 1; i < cnt; i++)
+        for (j = i; j > 0 && fabsf(order[j] - p) > fabsf(order[j - 1] - p); j--)
+        {
+            int t = order[j];
+            order[j] = order[j - 1];
+            order[j - 1] = t;
+        }
+    for (i = 0; i < cnt; i++)
+    {
+        int idx = order[i];
+        const ArtView *v = view_find(roms[idx].file.c_str());
+        float d = idx - p, ad = fabsf(d), near1 = ad < 1 ? ad : 1;
+        float s = ad < 1 ? 1.0f - 0.32f * ad : 0.68f - 0.07f * (ad - 1);
+        float off = ad < 1 ? ad * 310.0f : 310.0f + (ad - 1) * 200.0f;
+        float alpha = ad < 1 ? 1.0f - 0.2f * ad : 0.8f - 0.2f * (ad - 1);
+        int tint = (int)(255 * (1.0f - 0.4f * near1));
+        float x, y, w, h, cx = UI_WIDTH * 0.5f + (d < 0 ? -off : off);
+        box_fit(v, BOX3D_W * s, BOX3D_H * s, &w, &h);
+        x = cx - w * 0.5f;
+        y = BOX3D_FLOOR - h - BOX3D_LIFT * (1.0f - near1);
+        if (alpha <= 0.02f || x > UI_WIDTH || x + w < 0) continue;
+        // The selection's glow, fading as it slides away.
+        box_draw(v, roms[idx].shown.c_str(), x, y, w, h, BOX3D_GAP, alpha, tint, 0.55f + 0.45f * (1.0f - near1),
+                 ad < 0.5f ? a * (1.0f - 2.0f * ad) : 0.0f);
+        if (fav_is(roms[idx].file))
+        {
+            // A favourite: its badge at the top left corner.
+            UiCircle(x + 22 * s, y + 22 * s, 13, UiAlpha(D3DCOLOR_ARGB(200, 16, 18, 26), alpha));
+            fav_star(x + 22 * s, y + 22 * s, 15, alpha);
+        }
+    }
+    {
+        // Its name under the floor, and the year, genre and developer.
+        const ArtView *v = view_find(roms[sel].file.c_str());
+        const H64GameInfo *gi = v && v->hasInfo && v->info.found ? &v->info : NULL;
+        char fit[160];
+        UiTextFit(UI_BOLD, 34, UI_WIDTH - 2 * UI_SAFE_X - 60, gi && gi->title[0] ? gi->title : roms[sel].shown.c_str(), fit, sizeof(fit));
+        UiTextShadowed(UI_BOLD, 34, UI_WIDTH * 0.5f, BOX3D_FLOOR + 74, UI_COL_TEXT, fit, UI_CENTER);
+        if (gi)
+        {
+            _snprintf(buf, sizeof(buf) - 1, "%s%s%s%s%s", gi->year, gi->year[0] && gi->genre[0] ? "  -  " : "", gi->genre,
+                      (gi->year[0] || gi->genre[0]) && gi->developer[0] ? "  -  " : "", gi->developer);
+            buf[sizeof(buf) - 1] = 0;
+            UiTextFit(UI_REGULAR, 19, UI_WIDTH - 2 * UI_SAFE_X, buf, fit, sizeof(fit));
+            UiText(UI_REGULAR, 19, UI_WIDTH * 0.5f, BOX3D_FLOOR + 114, UI_COL_TEXT2, fit, UI_CENTER);
+            score_stars(UI_WIDTH * 0.5f - 5 * 18 * 1.15f * 0.5f, BOX3D_FLOOR + 146, 18, gi->score, 1.0f);
         }
     }
     browser_footer(0);
@@ -15125,36 +18104,40 @@ static int game_pics(const std::string &file, int flags)
 // Background images: the selected game's picture from the game over the whole
 // screen (cut to its shape, zooming in by 6 % over 14 s), fading in, dimmed so
 // the view on top reads well. Every view draws it after its background.
+// The game's video over the whole screen, dimmed as the picture would be, coming in slowly; the one
+// before fading out when another game is chosen. Its strength (0: none drawn).
+static float backdrop_video(const std::string &file)
+{
+    IDirect3DTexture9 *tex = NULL;
+    float va = 0, tw = 0, th = 0;
+    if (preview_alpha(file.c_str()) > 0)
+    {
+        tex = s_pv.tex;
+        tw = (float)s_pv.w;
+        th = (float)s_pv.h;
+        va = smooth01((UiTime() - s_pv.since) / 0.8f);
+    }
+    else if (s_pvLast.tex)
+    {
+        va = s_pvLast.from * (1.0f - smooth01((UiTime() - s_pvLast.at) / 0.6f));
+        if (va > 0) { tex = s_pvLast.tex; tw = (float)s_pvLast.w; th = (float)s_pvLast.h; }
+        else s_pvLast.tex = NULL;
+    }
+    if (!tex) return 0;
+    UiImageFill(tex, 0, 0, UI_WIDTH, UI_HEIGHT, 0, tw, th, UiAlpha(D3DCOLOR_ARGB(255, 255, 255, 255), va));
+    UiRect(0, 0, UI_WIDTH, UI_HEIGHT, D3DCOLOR_ARGB((int)(110 * va), 8, 9, 14));
+    UiRoundRect(0, 0, UI_WIDTH, 150, 0, D3DCOLOR_ARGB((int)(120 * va), 0, 0, 0), D3DCOLOR_ARGB(0, 0, 0, 0));
+    UiRoundRect(0, 330, UI_WIDTH, UI_HEIGHT - 330, 0, D3DCOLOR_ARGB(0, 8, 9, 14), D3DCOLOR_ARGB((int)(200 * va), 8, 9, 14));
+    return va;
+}
+
 static void game_backdrop(const std::string &file, int flags)
 {
     float f, sa, ua, u0 = 0, u1 = 1, v0 = 0, v1 = 1, age, z, cu, cv, hu, hv;
     if (s_videoBg || (flags & GPIC_LOGO))
     {
-        // Background videos (and the cinema view): the game's video over the whole screen, dimmed as the
-        // picture would be, coming in slowly; the one before fading out when another game is chosen.
-        IDirect3DTexture9 *tex = NULL;
-        float va = 0, tw = 0, th = 0;
-        if (preview_alpha(file.c_str()) > 0)
-        {
-            tex = s_pv.tex;
-            tw = (float)s_pv.w;
-            th = (float)s_pv.h;
-            va = smooth01((UiTime() - s_pv.since) / 0.8f);
-        }
-        else if (s_pvLast.tex)
-        {
-            va = s_pvLast.from * (1.0f - smooth01((UiTime() - s_pvLast.at) / 0.6f));
-            if (va > 0) { tex = s_pvLast.tex; tw = (float)s_pvLast.w; th = (float)s_pvLast.h; }
-            else s_pvLast.tex = NULL;
-        }
-        if (tex)
-        {
-            UiImageFill(tex, 0, 0, UI_WIDTH, UI_HEIGHT, 0, tw, th, UiAlpha(D3DCOLOR_ARGB(255, 255, 255, 255), va));
-            UiRect(0, 0, UI_WIDTH, UI_HEIGHT, D3DCOLOR_ARGB((int)(110 * va), 8, 9, 14));
-            UiRoundRect(0, 0, UI_WIDTH, 150, 0, D3DCOLOR_ARGB((int)(120 * va), 0, 0, 0), D3DCOLOR_ARGB(0, 0, 0, 0));
-            UiRoundRect(0, 330, UI_WIDTH, UI_HEIGHT - 330, 0, D3DCOLOR_ARGB(0, 8, 9, 14), D3DCOLOR_ARGB((int)(200 * va), 8, 9, 14));
-            return;
-        }
+        // Background videos (and the cinema view): the game's video behind it all.
+        if (backdrop_video(file) > 0) return;
         if (s_videoBg) return;   // no picture behind either (Background images is off with it)
     }
     if (!game_pics(file, flags) || !s_gameBg || !s_cine.snap) return;
@@ -15187,14 +18170,12 @@ static void browser_draw_cinema(const std::vector<RomEntry> &roms, int sel)
     UiBackdrop();
     browser_effect();
     if (n) game_backdrop(roms[sel].file, GPIC_LOGO);
-    UiBrand(UI_SAFE_X, 72, BRAND_SIZE);
+    browser_brand();
     if (!n) { browser_footer(0); return; }
     if (sel != lastSel) { lastSel = sel; changedAt = now; }
     fade = smooth01((now - changedAt) / 0.25f);
     mine = game_pics(roms[sel].file, GPIC_LOGO);
     if (mine) f = smooth01((now - s_cine.at) / CINE_FADE);
-    sprintf(buf, "%d / %d", sel + 1, n);
-    UiText(UI_REGULAR, 19, UI_WIDTH - UI_SAFE_X, 64, UI_COL_TEXT2, buf, UI_RIGHT);
     // The logo big at the bottom left (its own proportions, up to 460 x 150), or the name.
     if (mine && s_cine.logo)
     {
@@ -15251,169 +18232,291 @@ static void browser_draw_cinema(const std::vector<RomEntry> &roms, int sel)
     browser_footer(0);
 }
 
-// ---- Covers grid: the enlarged detail screen (A on a tile) ----
-// Bigger, per what the user asked for - not card_draw() reused as a panel
-// (that one sits at a fixed spot made for sharing the screen with the list).
-// The cover sits at the left, the game's info fills the gap to its right.
-// Sized to its content (not a fixed big panel): a measuring pass first -
-// UiTextWrap/UiTextFit lay text out without drawing anything - decides how
-// tall the two columns (cover, text) really are, then the panel, divider and
-// detail row are placed right after them instead of leaving a fixed gap.
-// `open`: 0..1 as it opens (the veil fades in, the panel rises into place).
-static void cover_detail_draw(const RomEntry *rom, const RomInfo *ri, const ArtView *v, float open)
+// ---- Single game: one game over the whole screen, left and right to the next: its box big on the
+// left (box_draw: the 3D box, else one made from the box art) over its reflection, and on the right
+// its logo for its name (the name until it comes, or without one), the critics' stars, the year,
+// developer and publisher, the details list's chips (genre, players, region) and a few words about
+// it; the picture from the game behind it all.
+#define SINGLE_BOX_CX 330.0f    // the box's middle ...
+#define SINGLE_BOX_CY 365.0f    // ... level with the texts' ...
+#define SINGLE_BOX_W 440.0f     // ... and its room
+#define SINGLE_BOX_H 400.0f
+#define SINGLE_ARROW_GAP 26.0f  // the arrows this far from its sides
+#define SINGLE_TX 680.0f        // the texts' left edge
+#define SINGLE_TOP 122.0f       // the logo's top
+#define SINGLE_LOGO_W 440.0f    // the logo at most this wide ...
+#define SINGLE_LOGO_H 150.0f    // ... and this tall (its room: the name, without one, in the same)
+
+// Darker towards the right behind the texts, smoothly (a ramp across: UiStrip shades top to bottom,
+// and columns of it showed as stripes), at most `a`.
+static void single_shade(float a)
 {
-    const float e = ease_out(open), rise = (1.0f - e) * 44.0f;
-    const float x = 140, w = 1000, pad = 36;
-    const float ix = x + pad, iw = w - pad * 2;
-    const float boxW = 420, boxH = boxW * 232.0f / 400.0f;   // ART_COVER_W:H's ratio
-    const float gap = 36, textX = ix + boxW + gap, textW = (ix + iw) - textX;
+    IDirect3DTexture9 *ramp = ramp_tex();
+    const float x0 = SINGLE_TX - 140;
+    float q[8];
+    if (!ramp) return;
+    q[0] = x0; q[1] = 0; q[2] = UI_WIDTH; q[3] = 0;
+    q[4] = x0; q[5] = UI_HEIGHT; q[6] = UI_WIDTH; q[7] = UI_HEIGHT;
+    UiImageQuad(ramp, q, 1.0f, 0.0f, 0.0f, 1.0f, D3DCOLOR_ARGB((int)(150 * a), 8, 9, 14));
+}
+
+static void browser_draw_single(const std::vector<RomEntry> &roms, int sel)
+{
+    static int lastSel = -1;
+    static float changedAt = -10.0f;
+    const int n = (int)roms.size();
+    const ArtView *v = n ? view_find(roms[sel].file.c_str()) : NULL;
     const H64GameInfo *gi = v && v->hasInfo && v->info.found ? &v->info : NULL;
-    char titleBuf[1024], subtRaw[1024], subtFit[256], descBuf[1024];
-    const char *regionEn = gi && gi->region[0] ? gi->region : ri->region, *region = TrRegion(regionEn);
-    char players[64];
-    int titleLines, descLines = 0, hasSubt = 0, hasChips = 0;
-    float titleH, subtH = 0, chipsH = 0, descH = 0, textColH, contentH;
-    float y, boxX, boxY, divY, detailY, footY, h;
+    const float tw = UI_WIDTH - UI_SAFE_X - SINGLE_TX, now = UiTime();
+    float fade, ty, x, y, w, h;
+    char buf[300];
+    int pics;
+    UiBackdrop();
+    browser_effect();
+    pics = n && game_pics(roms[sel].file, GPIC_SNAP | GPIC_LOGO);   // its picture from the game and its logo
+    if (n && backdrop_video(roms[sel].file) > 0)
+    {
+        // The game's video when it plays (its sound is heard: it is seen too), darker behind the texts.
+        single_shade(1.0f);
+    }
+    else if (pics && s_cine.snap)
+    {
+        // The picture from the game over the whole screen (its middle, cut to the screen's shape),
+        // dimmed, darker behind the texts.
+        float f = smooth01((now - s_cine.at) / CINE_FADE), sa = (float)s_cine.sw / s_cine.sh, ua = (float)UI_WIDTH / UI_HEIGHT;
+        float u0 = 0, u1 = 1, v0 = 0, v1 = 1;
+        if (sa > ua) { u0 = (1 - ua / sa) * 0.5f; u1 = 1 - u0; }
+        else { v0 = (1 - sa / ua) * 0.5f; v1 = 1 - v0; }
+        UiImagePart(s_cine.snap, 0, 0, UI_WIDTH, UI_HEIGHT, u0, v0, u1, v1, D3DCOLOR_ARGB((int)(255 * f), 255, 255, 255));
+        UiRect(0, 0, UI_WIDTH, UI_HEIGHT, D3DCOLOR_ARGB((int)(110 * f), 8, 9, 14));
+        single_shade(f);
+        UiRoundRect(0, UI_HEIGHT - 170, UI_WIDTH, 170, 0, D3DCOLOR_ARGB(0, 8, 9, 14), D3DCOLOR_ARGB((int)(170 * f), 8, 9, 14));
+    }
+    browser_brand();
+    if (!n) { browser_footer(0); return; }
+    if (sel != lastSel) { lastSel = sel; changedAt = now; }
+    fade = smooth01((now - changedAt) / 0.25f);
 
-    // ---- Measure: title (up to 2 lines). ----
-    titleLines = UiTextWrap(UI_BOLD, 28, textW, 2, gi && gi->title[0] ? gi->title : rom->shown.c_str(), titleBuf, sizeof(titleBuf));
-    titleH = (titleLines - 1) * 28 * 1.35f + 34;
+    // The box, its middle level with the texts, rising a little as it comes in, and small arrows
+    // beside it to the games on either side. One made from the box art is shorter than its room
+    // (box_geom: standing on its bottom); its front is what is centred.
+    box_fit(v, SINGLE_BOX_W, SINGLE_BOX_H, &w, &h);
+    {
+        const float shown = v && v->cover && v->shownKind == ART_KIND_BOX ? h * (1.0f - 0.085f) : h;
+        x = SINGLE_BOX_CX - w * 0.5f;
+        y = SINGLE_BOX_CY + shown * 0.5f - h + 14.0f * (1.0f - fade);
+    }
+    if (!v || !v->cover || v->shownKind != ART_KIND_BOX)   // (one made from the box art has its own)
+        UiShadow(x + w * 0.08f, y + h - 10, w * 0.84f, 18, 9, 20, D3DCOLOR_ARGB((int)(130 * fade), 0, 0, 0));
+    box_draw(v, roms[sel].shown.c_str(), x, y, w, h, BOX3D_GAP, fade, 255, 1.0f, 0.0f);
+    if (sel > 0) icon_tri(x - SINGLE_ARROW_GAP, SINGLE_BOX_CY, 14, 3, D3DCOLOR_ARGB((int)(110 * fade), 255, 255, 255));
+    if (sel < n - 1) icon_tri(x + w + SINGLE_ARROW_GAP, SINGLE_BOX_CY, 14, 1, D3DCOLOR_ARGB((int)(110 * fade), 255, 255, 255));
 
-    // ---- Measure: subtitle (year . developer . publisher, or the header's name). ----
-    subtRaw[0] = 0;
+    // The logo for its name (its own proportions in its room, at its bottom left, fading in as it
+    // comes), else the name (two lines at most, in the room's middle); the texts under it sliding in.
+    ty = SINGLE_TOP + 10.0f * (1.0f - fade);
+    {
+        const float lf = pics && s_cine.logo ? smooth01((now - s_cine.at) / CINE_FADE) : 0.0f;
+        if (lf > 0)
+        {
+            float k = SINGLE_LOGO_W / s_cine.lw, lw, lh;
+            if (SINGLE_LOGO_H / s_cine.lh < k) k = SINGLE_LOGO_H / s_cine.lh;
+            if (k > 1.6f) k = 1.6f;
+            lw = s_cine.lw * k;
+            lh = s_cine.lh * k;
+            UiShadow(SINGLE_TX - 14, ty + SINGLE_LOGO_H - lh - 4, lw + 28, lh + 12, 24, 30, D3DCOLOR_ARGB((int)(80 * lf * fade), 0, 0, 0));
+            UiImage(s_cine.logo, SINGLE_TX, ty + SINGLE_LOGO_H - lh, lw, lh, 0, D3DCOLOR_ARGB((int)(255 * lf * fade), 255, 255, 255));
+        }
+        if (lf < 1.0f)
+        {
+            const float size = 34;
+            int lines = UiTextWrap(UI_BOLD, size, tw, 2, gi && gi->title[0] ? gi->title : roms[sel].shown.c_str(), buf, sizeof(buf));
+            UiTextShadowed(UI_BOLD, size, SINGLE_TX, ty + SINGLE_LOGO_H * 0.5f - (lines - 1) * size * 1.35f * 0.5f,
+                           UiAlpha(UI_COL_TEXT, fade * (1.0f - lf)), buf, UI_LEFT);
+        }
+        ty += SINGLE_LOGO_H + 18;
+    }
+    {
+        // The critics' stars and their score out of 5; a favourite's star after them.
+        float sx = SINGLE_TX;
+        if (gi && gi->score > 0)
+        {
+            sx += score_stars(sx, ty + 11, 20, gi->score, fade) + 12;
+            sprintf(buf, "%.1f / 5", gi->score / 20.0f);
+            UiText(UI_BOLD, 19, sx, ty + 11, UiAlpha(UI_COL_TEXT, fade), buf, UI_LEFT);
+            sx += UiTextWidth(UI_BOLD, 19, buf) + 18;
+        }
+        if (fav_is(roms[sel].file)) fav_star(sx + 10, ty + 11, 20, fade);
+        if ((gi && gi->score > 0) || fav_is(roms[sel].file)) ty += 38;
+    }
     if (gi)
     {
+        // Year, developer, publisher (as the details list's card).
         const char *parts[3];
         int k, np = 0;
         parts[np++] = gi->year[0] ? gi->year : NULL;
         parts[np++] = gi->developer[0] ? gi->developer : NULL;
         parts[np++] = gi->publisher[0] && _stricmp(gi->publisher, gi->developer) ? gi->publisher : NULL;
+        buf[0] = 0;
         for (k = 0; k < np; k++)
         {
             if (!parts[k]) continue;
-            if (subtRaw[0]) strcat(subtRaw, "  " UI_CH_MIDDOT "  ");
-            strncat(subtRaw, parts[k], sizeof(subtRaw) - strlen(subtRaw) - 8);
+            if (buf[0]) strcat(buf, "  " UI_CH_MIDDOT "  ");
+            strncat(buf, parts[k], sizeof(buf) - strlen(buf) - 8);
+        }
+        if (buf[0])
+        {
+            char fit[256];
+            UiTextFit(UI_REGULAR, 17, tw, buf, fit, sizeof(fit));
+            UiText(UI_REGULAR, 17, SINGLE_TX, ty + 10, UiAlpha(UI_COL_TEXT2, fade), fit, UI_LEFT);
+            ty += 32;
         }
     }
-    if (!subtRaw[0] && ri->ok) strncpy(subtRaw, ri->name, sizeof(subtRaw) - 1);
-    if (subtRaw[0]) { UiTextFit(UI_REGULAR, 19, textW, subtRaw, subtFit, sizeof(subtFit)); hasSubt = 1; subtH = 38; }
-
-    // ---- Measure: chips (genre/players/region) - just whether the row exists. ----
-    players[0] = 0;
-    if (gi && gi->players[0])
     {
-        if (!strcmp(gi->players, "1")) strcpy(players, Tr(T_ONE_PLAYER));
-        else _snprintf(players, sizeof(players) - 1, Tr(T_N_PLAYERS), gi->players);
-        players[sizeof(players) - 1] = 0;
+        // The details list's chips: genre, players, region (its flag).
+        const char *regionEn = gi && gi->region[0] ? gi->region : "", *region = regionEn[0] ? TrRegion(regionEn) : "";
+        char players[64];
+        float cxp = SINGLE_TX;
+        int any = 0;
+        if (gi && gi->genre[0] && cxp + chip_width(gi->genre, CHIP_GENRE, NULL) <= SINGLE_TX + tw)
+        {
+            cxp += chip_icon(cxp, ty + 14, gi->genre, CHIP_GENRE, NULL, fade) + 8;
+            any = 1;
+        }
+        if (gi && gi->players[0])
+        {
+            if (!strcmp(gi->players, "1")) strcpy(players, Tr(T_ONE_PLAYER));
+            else _snprintf(players, sizeof(players) - 1, Tr(T_N_PLAYERS), gi->players);
+            players[sizeof(players) - 1] = 0;
+            if (cxp + chip_width(players, CHIP_PLAYERS, NULL) <= SINGLE_TX + tw)
+            {
+                cxp += chip_icon(cxp, ty + 14, players, CHIP_PLAYERS, NULL, fade) + 8;
+                any = 1;
+            }
+        }
+        if (region[0] && cxp + chip_width(region, CHIP_REGION, regionEn) <= SINGLE_TX + tw)
+        {
+            cxp += chip_icon(cxp, ty + 14, region, CHIP_REGION, regionEn, fade) + 8;
+            any = 1;
+        }
+        if (any) ty += 28 + 16;
     }
-    hasChips = (gi && gi->genre[0]) || players[0] || region[0] || (ri->ok && ri->hd);
-    if (hasChips) chipsH = 44;
-
-    // ---- Measure: a few lines about the game (Wikipedia), capped so a long
-    // entry cannot push the panel past the screen. ----
-    descBuf[0] = 0;
     if (gi && gi->description[0])
     {
-        float lineH = 17 * 1.35f;
-        descLines = UiTextWrap(UI_REGULAR, 17, textW, 7, gi->description, descBuf, sizeof(descBuf));
-        descH = descLines * lineH + 29;   // the lines, then the "Wikipedia" credit line just below
+        // A few words about it, as many lines as fit above the buttons' row.
+        int lines = (int)((UI_HEIGHT - 110 - (ty + 16)) / (17 * 1.35f));
+        UiRect(SINGLE_TX, ty, tw, 1, UiAlpha(D3DCOLOR_ARGB(60, 255, 255, 255), fade));
+        if (lines > 8) lines = 8;
+        if (lines > 0) paragraph(UI_REGULAR, 17, SINGLE_TX, ty + 16, tw, lines, UiAlpha(UI_COL_TEXT2, fade), gi->description);
     }
-
-    // ---- Lay out: the panel wraps the taller of the cover and the text
-    // column, then the divider/detail row/footer follow right after (28 to
-    // the divider, 22 to the detail row, ~39 its own height, 24 to the
-    // footer, half its ~30 height on each side of the margin below it). ----
-    textColH = titleH + subtH + chipsH + descH;
-    contentH = boxH > textColH ? boxH : textColH;
-    h = 2 * pad + contentH + 28 + 22 + 39 + 24 + 15 + 15;
-    y = (UI_HEIGHT - h) * 0.5f;
-    if (y < 20) y = 20;
-    y += rise;
-    boxX = ix;
-    boxY = y + pad;
-    divY = boxY + contentH + 28;
-    detailY = divY + 22;
-    footY = detailY + 39 + 24 + 15;
-
-    UiRect(0, 0, UI_WIDTH, UI_HEIGHT, UiAlpha(UI_COL_DIM, e));   // the grid behind, veiled
-    edge_glow(x, y, w, h, 24);
-    UiPanel(x, y, w, h, 24);
-    {
-        // The cover framed like the selected tile it came from.
-        float a = selection_pulse();
-        selection_glow(boxX - 4, boxY - 4, boxW + 8, boxH + 8, 18, a);
-        UiRoundRing(boxX - 4, boxY - 4, boxW + 8, boxH + 8, 18, 3.0f, SEL_RING(a));
-    }
-    UiRoundRect(boxX, boxY, boxW, boxH, 16, D3DCOLOR_ARGB(255, 22, 23, 31), D3DCOLOR_ARGB(255, 16, 17, 23));
-    if (v && v->cover) view_cover(v, boxX, boxY, boxW, boxH, 16, D3DCOLOR_ARGB(255, 255, 255, 255));
-    else stage_placeholder(boxX, boxY, boxW, boxH, rom->shown.c_str(), 1.0f);
-
-    UiText(UI_BOLD, 28, textX, boxY, UI_COL_TEXT, titleBuf, UI_LEFT);
-    if (hasSubt) UiText(UI_REGULAR, 19, textX, boxY + titleH, UI_COL_TEXT2, subtFit, UI_LEFT);
-    if (hasChips)
-    {
-        float cxp = textX, cy = boxY + titleH + subtH;
-        if (ri->ok && ri->hd) cxp += hd_chip(cxp, cy, ri->hd, 1.0f) + 8;
-        if (gi && gi->genre[0]) cxp += chip_icon(cxp, cy, gi->genre, CHIP_GENRE, NULL, 1.0f) + 8;
-        if (players[0]) cxp += chip_icon(cxp, cy, players, CHIP_PLAYERS, NULL, 1.0f) + 8;
-        if (region[0] && cxp + chip_width(region, CHIP_REGION, regionEn) <= textX + textW) cxp += chip_icon(cxp, cy, region, CHIP_REGION, regionEn, 1.0f) + 8;
-    }
-    if (descLines > 0)
-    {
-        float lineH = 17 * 1.35f, descY = boxY + titleH + subtH + chipsH;
-        UiText(UI_REGULAR, 17, textX, descY + lineH * 0.5f, UI_COL_TEXT2, descBuf, UI_LEFT);
-        UiText(UI_REGULAR, 13, textX, descY + descLines * lineH + 9, UI_COL_TEXT3, Tr(T_WIKI_TEXT), UI_LEFT);
-    }
-
-    UiRect(ix, divY, iw, 1, UI_COL_LINE);
-    if (!ri->ok)
-        UiText(UI_REGULAR, 19, ix, detailY + 17, UI_COL_ACCENT_HI, Tr(T_NOT_N64), UI_LEFT);
-    else
-    {
-        detail(ix, detailY, 90, Tr(T_GAME_CODE), ri->code, 1.0f);
-        detail(ix + 100, detailY, 70, Tr(T_SIZE), ri->size, 1.0f);
-        detail(ix + 180, detailY, 140, Tr(T_SAVE), ri->save, 1.0f);
-        detail(ix + 330, detailY, iw - 330, Tr(T_INTERNAL_NAME), ri->name, 1.0f);
-    }
-    UiFooter(ix, footY, Tr(T_FOOT_COVER_DETAIL));
-}
-
-// A plays the game - the caller (RomBrowser) does the actual launch (same
-// side effects as the list view's A press, kept in one place), B goes back
-// to the grid. The view it was opened from (a grid's page, or the carousel)
-// stays drawn behind it; the panel opens over it in OPEN_S.
-#define DETAIL_OPEN_S 0.20f
-static int cover_detail_screen(IDirect3DDevice9 *dev, const std::vector<RomEntry> &roms, int sel, int page, int design)
-{
-    UiInput in;
-    RomInfo ri;
-    const RomEntry *rom = &roms[sel];
-    float openAt;
-    UiInputInit(&in);
-    rom_details(rom->file.c_str(), &ri);
-    openAt = UiTime();
-    for (;;)
-    {
-        WORD down = UiInputPoll(&in);
-        if (down & XINPUT_GAMEPAD_A) return 1;
-        if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) return 0;
-        art_step(rom->file, right_stick_step());   // RS: its next picture here too
-        views_take(dev);                           // ... and it arrives while this stays open
-        dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
-        UiBegin(dev);
-        if (design == BD_CAROUSEL) browser_draw_carousel(roms, sel);
-        else if (design == BD_SPOTLIGHT) browser_draw_spotlight(roms, sel);
-        else if (design == BD_CARTRIDGE) browser_draw_cartridges(roms, sel);
-        else if (design == BD_CINEMA) browser_draw_cinema(roms, sel);
-        else browser_draw_covers(roms, sel, page, grid_layout(design));
-        cover_detail_draw(rom, &ri, view_find(rom->file.c_str()), (UiTime() - openAt) / DETAIL_OPEN_S);
-        UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
-    }
+    browser_footer(0);
 }
 
 #define MSG_MS 9000   // how long a message (new version, box art) stays
+#define NOTE_SHOW_MS 6000   // an online notice's card (notify_card)
+
+// An online notice (OnlineNoticeTake): a card in the top right corner sliding in from the right, its symbol in a
+// coloured disc (a room: the play symbol, green; a friend: teal; a message: blue; an invitation: the plane, orange;
+// a friendship asked: lilac), what it is over its text. `age` in ms.
+// Kinds of card past the online notices': a newer LAIKA 64 (Y installs it), what is new after an update (Y shows it).
+enum { NOTE_UPDATE = 6, NOTE_UPDATED = 7, NOTE_KINDS };
+#define NOTE_ACT_MS 12000   // a card Y acts on stays this long
+static void notify_card(const char *text, int kind, DWORD age)
+{
+    static const int titles[NOTE_KINDS] = { T_NOTE_T_OTHER, T_NOTE_T_ROOM, T_NOTE_T_FRIEND, T_NOTE_T_REQUEST, T_NOTE_T_DM, T_NOTE_T_INVITE,
+                                            T_NOTE_T_UPDATE, T_NOTE_T_UPDATED };
+    static const unsigned char icons[NOTE_KINDS] = { UI_ICON_INFO, UI_ICON_PLAY, UI_ICON_FRIENDS, UI_ICON_PERSON, UI_ICON_CHAT, UI_ICON_PLANE,
+                                                     UI_ICON_LOAD, UI_ICON_INFO };
+    static const D3DCOLOR cols[NOTE_KINDS] = { D3DCOLOR_ARGB(255, 120, 175, 255), D3DCOLOR_ARGB(255, 80, 210, 120), D3DCOLOR_ARGB(255, 40, 200, 190),
+                                               D3DCOLOR_ARGB(255, 180, 140, 255), D3DCOLOR_ARGB(255, 70, 160, 255), D3DCOLOR_ARGB(255, 255, 170, 60),
+                                               D3DCOLOR_ARGB(255, 90, 200, 255), D3DCOLOR_ARGB(255, 255, 205, 70) };
+    const DWORD life = kind >= NOTE_UPDATE ? NOTE_ACT_MS : NOTE_SHOW_MS;
+    const float w = 430, h = 82, in = ease_out(age / 280.0f), out = age > life - 350 ? ease_out((age - (life - 350)) / 350.0f) : 0.0f;
+    const float x = UI_WIDTH - UI_SAFE_X - w + (1.0f - in) * (w + 60) + out * (w + 60), y = UI_SAFE_Y + 10;
+    const float a = in * (1.0f - out);
+    char buf[400];
+    int k = kind >= 0 && kind < NOTE_KINDS ? kind : 0, lines;
+    if (age >= life || a <= 0.01f) return;
+    UiShadow(x, y + 6, w, h, 18, 24, D3DCOLOR_ARGB((int)(150 * a), 0, 0, 0));
+    UiRoundRect(x, y, w, h, 16, UiAlpha(D3DCOLOR_ARGB(245, 30, 30, 48), a), UiAlpha(D3DCOLOR_ARGB(245, 22, 22, 36), a));
+    UiRoundRing(x, y, w, h, 16, 1.5f, UiAlpha(cols[k], 0.6f * a));
+    UiRoundRect(x, y + 12, 4, h - 24, 2, UiAlpha(cols[k], a), UiAlpha(cols[k], a));
+    UiCircle(x + 44, y + h * 0.5f, 24, UiAlpha(cols[k], 0.22f * a));
+    menu_icon(icons[k], x + 44, y + h * 0.5f, UiAlpha(cols[k], a));
+    UiText(UI_BOLD, 17, x + 82, y + 22, UiAlpha(cols[k], a), Tr(titles[k]), UI_LEFT);
+    lines = UiTextWrap(UI_REGULAR, 16, w - 100, 2, text, buf, sizeof(buf));
+    UiText(UI_REGULAR, 16, x + 82, y + (lines > 1 ? 44 : 50), UiAlpha(UI_COL_TEXT, a), buf, UI_LEFT);
+}
+
+// The online notices over every screen of the interface (Settings, Online play, the pages ...): taken and shown by
+// UiEnd's hook, the same card, sound and pulse as the ROM list's - which (like Play online, whose invitations select a
+// room) shows them itself: those mark the frame as theirs (s_noteOwned).
+static int s_noteBits = 15;
+static Config *s_hookCfg;          // the settings the list runs with (RomBrowser), for the music's volume in every menu
+static const char *s_hookPath;
+
+// RS up and down: the menus' music volume, 2 % a step while held; kept when the stick is let go.
+static void music_volume_stick(Config *c, const char *settingsPath)
+{
+    static DWORD stepAt;
+    static int changed;
+    XINPUT_STATE ps;
+    int ry = 0, rx = 0;
+    if (XInputGetState(0, &ps) == ERROR_SUCCESS) { ry = ps.Gamepad.sThumbRY; rx = ps.Gamepad.sThumbRX; }
+    if ((ry > 20000 || ry < -20000) && abs(ry) > abs(rx))
+    {
+        DWORD now = GetTickCount();
+        if (now - stepAt >= 70)
+        {
+            c->volumeMusic += ry > 0 ? 2 : -2;
+            if (c->volumeMusic < 0) c->volumeMusic = 0;
+            if (c->volumeMusic > 100) c->volumeMusic = 100;
+            xb_audio_set_music_volume(c->volumeMusic);
+            music_volume_poke();
+            stepAt = now;
+            changed = 1;
+        }
+    }
+    else if (changed)
+    {
+        changed = 0;
+        if (settingsPath) ConfigWriteMenuKeys(c, settingsPath, 1);
+    }
+}   // Config::notify, as the ROM list last read it (8: the controllers' pulse)
+static char s_gNoteText[256];
+static int s_gNoteKind;
+static DWORD s_gNoteAt, s_gNoteBuzz;
+static void global_notes(void)
+{
+    if (s_rsOwned) s_rsOwned = 0;   // a page using the right stick itself (Controls, calibration): no volume there
+    else if (s_browser && s_hookCfg)
+    {
+        // Settings, Online play, the other screens from the list: RS up and down the music's volume there too.
+        music_volume_stick(s_hookCfg, s_hookPath);
+        music_volume_bar(s_hookCfg->volumeMusic);
+    }
+    if (s_noteOwned) { s_noteOwned = 0; return; }
+    if (!s_gNoteAt || GetTickCount() - s_gNoteAt > (DWORD)(s_gNoteKind >= NOTE_UPDATE ? NOTE_ACT_MS : NOTE_SHOW_MS))
+    {
+        int kind = 0;
+        s_gNoteAt = 0;
+        if (OnlineNoticeTake(s_gNoteText, sizeof(s_gNoteText), NULL, &kind))
+        {
+            if (kind == ONLINE_NOTE_UPDATE)
+            {
+                _snprintf(s_gNoteText, sizeof(s_gNoteText) - 1, Tr(T_UPDATE_CARD), OnlineNewerRelease());
+                s_gNoteText[sizeof(s_gNoteText) - 1] = 0;
+                kind = NOTE_UPDATE;
+            }
+            s_gNoteKind = kind;
+            s_gNoteAt = GetTickCount() | 1;
+            xb_audio_ui_sound(XB_SFX_NOTIFY);
+            if (s_noteBits & 8) { rumble_motors(55); s_gNoteBuzz = s_gNoteAt; }
+        }
+    }
+    if (s_gNoteBuzz && GetTickCount() - s_gNoteBuzz > 220) { rumble_motors(0); s_gNoteBuzz = 0; }
+    if (s_gNoteAt) notify_card(s_gNoteText, s_gNoteKind, GetTickCount() - s_gNoteAt);
+}
 
 // Box art may be downloaded here (the settings allow it; not in Xenia, whose
 // network is not the console's, unless artdownload=2).
@@ -15498,6 +18601,9 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
     const int rows = 13;
     char newVersion[32], msg[256], drive[16];
     DWORD msgAt = 0, demoAt = GetTickCount(), idleAt = GetTickCount();
+    DWORD noteAt = 0, noteBuzzAt = 0;   // the online notice shown (notify_card) and the controllers' pulse with it
+    char noteText[200] = "", noteVersion[32] = "";   // (the version of an update card)
+    int noteKind = 0;
     float selAt = 0;
     float viewAt = -10.0f;   // when B changed the view (its fade-in)
     msg[0] = 0;
@@ -15568,7 +18674,7 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
     ArtSetExtras(c->artExtras);
     ArtPause(0);
     PreviewStart();
-    PreviewSettings(c->previewVideo, c->previewSound, c->artDownload && art_net_possible(c));
+    preview_apply(c);
     PreviewAccount(c->ssUser, c->ssPass);
     strncpy(s_libDrive, drive, sizeof(s_libDrive) - 1);   // favourites and categories: <drive>:\config\ too
     if (s_tab)
@@ -15638,11 +18744,14 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
     // in the background and may answer later, or never without a network).
     // updatecheck=2 (testing): as if this were version 0.0.0, so any release is newer.
     if (c->updateCheck && !c->xenia && h64_fenv_reliable()) UpdateCheckStart(c->updateCheck == 2 ? "0.0.0" : H64_VERSION_STRING);
-    // The first start of a new version (an update): what is new in it, once - not the
-    // welcome's set-up again (that is for the first start of all, main.cpp).
+    // The first start of a new version (an update): its card, once - Y shows what is new in it (it used to open
+    // over the list at once). Not the welcome's set-up again (that is for the first start of all, main.cpp).
     if (strcmp(c->lastVersion, H64_VERSION_STRING) && c->autoStart <= 0 && c->browserDemo <= 0 && settingsPath && settingsPath[0])
     {
-        news_screen(dev);
+        _snprintf(noteText, sizeof(noteText) - 1, Tr(T_UPDATED_CARD), H64_VERSION_STRING);
+        noteText[sizeof(noteText) - 1] = 0;
+        noteKind = NOTE_UPDATED;
+        noteAt = GetTickCount() | 1;
         strncpy(c->lastVersion, H64_VERSION_STRING, sizeof(c->lastVersion) - 1);
         c->lastVersion[sizeof(c->lastVersion) - 1] = 0;
         ConfigWriteMenuKeys(c, settingsPath, 1);
@@ -15743,21 +18852,59 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
             UiInputInit(&in);
             continue;
         }
-        if (OnlineNoticeTake(msg, sizeof(msg)))
+        if (!noteAt || GetTickCount() - noteAt > (DWORD)(noteKind >= NOTE_UPDATE ? NOTE_ACT_MS : NOTE_SHOW_MS))
         {
-            msgAt = GetTickCount();
-            xb_audio_ui_sound(XB_SFX_NOTIFY);
+            int kind = 0;
+            if (!noteAt) noteKind = 0;
+            if (OnlineNoticeTake(noteText, sizeof(noteText), NULL, &kind))
+            {
+                // An online notice: its card in the top right corner, a sound, and a short pulse of the controllers. A newer
+                // LAIKA 64 told by the server: the update card (Y installs it), unless this session's own check told it.
+                if (kind == ONLINE_NOTE_UPDATE)
+                {
+                    if (!strcmp(OnlineNewerRelease(), noteVersion)) kind = -1;   // (told already)
+                    else
+                    {
+                        strncpy(noteVersion, OnlineNewerRelease(), sizeof(noteVersion) - 1);
+                        _snprintf(noteText, sizeof(noteText) - 1, Tr(T_UPDATE_CARD), noteVersion);
+                        noteText[sizeof(noteText) - 1] = 0;
+                        kind = NOTE_UPDATE;
+                    }
+                }
+                if (kind >= 0)
+                {
+                    noteKind = kind;
+                    noteAt = GetTickCount() | 1;
+                    xb_audio_ui_sound(XB_SFX_NOTIFY);
+                    if (c->notify & 8) { rumble_motors(55); noteBuzzAt = noteAt; }
+                }
+            }
         }
+        if (noteBuzzAt && GetTickCount() - noteBuzzAt > 220) { rumble_motors(0); noteBuzzAt = 0; }
         if (UpdateCheckTake(newVersion, sizeof(newVersion)))
         {
-            _snprintf(msg, sizeof(msg) - 1, Tr(T_UPDATE_AVAILABLE), newVersion);
-            msg[sizeof(msg) - 1] = 0;
-            msgAt = GetTickCount();
+            // A newer LAIKA 64: its card (Y installs it) - it used to ask at once, over whatever was being done.
+            H64_INFO("[update] LAIKA 64 %s available", newVersion);
+            strncpy(noteVersion, newVersion, sizeof(noteVersion) - 1);
+            _snprintf(noteText, sizeof(noteText) - 1, Tr(T_UPDATE_CARD), newVersion);
+            noteText[sizeof(noteText) - 1] = 0;
+            noteKind = NOTE_UPDATE;
+            noteAt = GetTickCount() | 1;
             xb_audio_ui_sound(XB_SFX_NOTIFY);
-            H64_INFO("[update] %s", msg);
-            // The updater: asked first; yes downloads, checks and installs it, then LAIKA 64 starts again.
-            if (confirm_ask(dev, T_UPDATE_TITLE, T_UPDATE_ASK, T_FOOT_UPDATE))
+            if (c->notify & 8) { rumble_motors(55); noteBuzzAt = noteAt; }
+        }
+        if (noteAt && noteKind >= NOTE_UPDATE && GetTickCount() - noteAt < NOTE_ACT_MS && (down & XINPUT_GAMEPAD_Y))
+        {
+            // Y on an update card: the update (asked first); on "What's new": what is new in this version.
+            const int kind = noteKind;
+            down &= ~(WORD)XINPUT_GAMEPAD_Y;
+            noteAt = 0;
+            xb_audio_ui_sound(XB_SFX_SELECT);
+            if (kind == NOTE_UPDATED) news_screen(dev);
+            else if (confirm_ask(dev, T_UPDATE_TITLE, T_UPDATE_ASK, T_FOOT_UPDATE))
             {
+                strncpy(newVersion, noteVersion, sizeof(newVersion) - 1);
+                newVersion[sizeof(newVersion) - 1] = 0;
                 views_clear(dev);   // the memory for the download
                 ArtPause(1);
                 if (update_run(dev, newVersion))
@@ -15775,42 +18922,22 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
         }
         if (ArtTakeNote(msg, sizeof(msg))) { msgAt = GetTickCount(); xb_audio_ui_sound(XB_SFX_NOTIFY); }
         if (BatteryCheck(c, msg, sizeof(msg))) { msgAt = GetTickCount(); xb_audio_ui_sound(XB_SFX_NOTIFY); }
-        if (n)
+        if (n && !design_still(c->browserDesign))
         {
             // RS: the selected game's next picture, in every view - skipping its video when it plays.
+            // (Not in the 3D boxes, single game and cartridges views: their one picture only.)
             int rs = right_stick_step();
             if (rs && preview_alpha(roms[sel].file.c_str()) > 0) pvSkip = roms[sel].file;
             art_step(roms[sel].file, rs);
         }
         if (n && _stricmp(pvSkip.c_str(), roms[sel].file.c_str())) pvSkip.clear();   // another game: its video plays again
-        art_auto_turn(n ? roms[sel].file : std::string());     // and by itself after a moment on it
-        {
-            // RS up and down: the menus' music volume, 2 % a step while held; kept when the stick is let go.
-            static DWORD stepAt;
-            static int changed;
-            XINPUT_STATE ps;
-            int ry = 0, rx = 0;
-            if (XInputGetState(0, &ps) == ERROR_SUCCESS) { ry = ps.Gamepad.sThumbRY; rx = ps.Gamepad.sThumbRX; }
-            if ((ry > 20000 || ry < -20000) && abs(ry) > abs(rx))
-            {
-                DWORD now = GetTickCount();
-                if (now - stepAt >= 70)
-                {
-                    c->volumeMusic += ry > 0 ? 2 : -2;
-                    if (c->volumeMusic < 0) c->volumeMusic = 0;
-                    if (c->volumeMusic > 100) c->volumeMusic = 100;
-                    xb_audio_set_music_volume(c->volumeMusic);
-                    music_volume_poke();
-                    stepAt = now;
-                    changed = 1;
-                }
-            }
-            else if (changed)
-            {
-                changed = 0;
-                ConfigWriteMenuKeys(c, settingsPath, 1);
-            }
-        }
+        if (n && c->previewVideo && c->artCycle && preview_alpha(roms[sel].file.c_str()) > 0 && PreviewRounds() >= 1)
+            pvSkip = roms[sel].file;   // its video played once: its pictures take turns now
+        // By themselves after a moment on it (Game images > Pictures taking turns), never under its video.
+        art_auto_turn(n && c->artCycle && !design_still(c->browserDesign) && preview_alpha(roms[sel].file.c_str()) <= 0 ? roms[sel].file : std::string());
+        music_volume_stick(c, settingsPath);   // RS up and down: the menus' music volume
+        s_hookCfg = c;                          // (and in every menu opened from here: global_notes)
+        s_hookPath = settingsPath;
         if ((down & XINPUT_GAMEPAD_BACK) && confirm_quit(dev))
         {
             views_clear(dev);
@@ -15901,21 +19028,18 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
                 page = sel / perPage;
                 if (down & XINPUT_GAMEPAD_A)
                 {
-                    if (cover_detail_screen(dev, roms, sel, page, c->browserDesign))
-                    {
-                        if (detailsFor != sel) { details_prefetch(roms, sel); rom_details(roms[sel].file.c_str(), &details); detailsFor = sel; }
-                        hires_offer(dev, c, details.name, details.ok ? details.hd : 0);   // as the list's A press
-                        strncpy(path, roms[sel].file.c_str(), pathSize - 1);
-                        path[pathSize - 1] = 0;
-                        strncpy(c->lastRom, path, sizeof(c->lastRom) - 1);
-                        ConfigWriteMenuKeys(c, settingsPath, 1);
-                        views_clear(dev);
-                        ArtPause(c->artBackground && c->artDownload ? 2 : 1);
-                        xb_audio_music_stop();
-                        xb_audio_ui_sound(XB_SFX_LAUNCH);
-                        return 1;
-                    }
-                    UiInputInit(&in);
+                    // A plays the game at once, in every view (as the list's A press).
+                    if (detailsFor != sel) { details_prefetch(roms, sel); rom_details(roms[sel].file.c_str(), &details); detailsFor = sel; }
+                    hires_offer(dev, c, details.name, details.ok ? details.hd : 0);
+                    strncpy(path, roms[sel].file.c_str(), pathSize - 1);
+                    path[pathSize - 1] = 0;
+                    strncpy(c->lastRom, path, sizeof(c->lastRom) - 1);
+                    ConfigWriteMenuKeys(c, settingsPath, 1);
+                    views_clear(dev);
+                    ArtPause(c->artBackground && c->artDownload ? 2 : 1);
+                    xb_audio_music_stop();
+                    xb_audio_ui_sound(XB_SFX_LAUNCH);
+                    return 1;
                 }
                 if (detailsFor != sel) { details_prefetch(roms, sel); rom_details(roms[sel].file.c_str(), &details); detailsFor = sel; }
                 if (sel != lastSel)
@@ -16033,6 +19157,7 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
                 char romsWas[128];
                 strcpy(romsWas, s_romDir);
                 settings_loop(dev, c, settingsPath, -1);
+                s_listEnterAt = UiTime();
                 if (!s_onlineLaunch.empty())
                 {
                     // Settings > Online play paired this console with another: the room's game starts, as A starts one.
@@ -16063,7 +19188,7 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
             }
             ArtSetNetwork(c->artDownload && art_net_possible(c));
             ArtSetExtras(c->artExtras);
-            PreviewSettings(c->previewVideo, c->previewSound, c->artDownload && art_net_possible(c));
+            preview_apply(c);
             PreviewAccount(c->ssUser, c->ssPass);
             videoBulk = 0;   // the downloads or the videos may have been turned on
             if (((!artWas && c->artDownload) || (artWas && c->artDownload && !extrasWas && c->artExtras)) && !allRoms.empty() && art_net_possible(c))
@@ -16086,6 +19211,12 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
             // B, "Interface view": the next layout (list, covers, big covers, carousel; Interfaz > Diseño), kept at once.
             c->browserDesign = (c->browserDesign + 1) % BD_COUNT;
             viewAt = UiTime();   // it fades in (browser_view_veil), the covers arriving meanwhile
+            if (ArtGetKind() != art_kind_of(c))
+            {
+                // Into or out of the 3D boxes views: every view read again in its kind of picture.
+                views_clear(dev);
+                ArtSetKind(art_kind_of(c));
+            }
             ConfigWriteMenuKeys(c, settingsPath, 1);
             page = n ? sel / grid_per_page(grid_layout(c->browserDesign)) : 0;
             if (sel < top || sel >= top + rows) top = sel >= rows ? sel - rows + 1 : 0;
@@ -16115,10 +19246,13 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
         }
         views_take(dev);
         {
-            // The selected game's video once the selection has rested a moment, in every view (RS skips it:
-            // that game's pictures again until another one is selected).
+            // The selected game's video once the selection has rested a moment, in every view but the
+            // cartridges' (RS skips it: that game's pictures again until another one is selected).
+            // The cartridges view shows no video: there it plays for its sound only (when there is one to hear).
             const ArtView *pv = n ? view_find(roms[sel].file.c_str()) : NULL;
-            if (n && UiTime() - selAt > PREVIEW_DELAY && _stricmp(pvSkip.c_str(), roms[sel].file.c_str()))
+            const int cart = c->browserDesign == BD_CARTRIDGE;
+            s_pvAudioOnly = s_pvMusicMode || cart;
+            if (n && UiTime() - selAt > PREVIEW_DELAY && _stricmp(pvSkip.c_str(), roms[sel].file.c_str()) && (!cart || s_pvMusicMode || c->previewSound))
                 PreviewWant(roms[sel].file.c_str(), pv && pv->hasInfo && pv->info.found ? pv->info.title : roms[sel].shown.c_str());
             else PreviewWant(NULL, NULL);
             preview_frame(dev, n ? roms[sel].file.c_str() : "");
@@ -16128,6 +19262,10 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
         dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
         UiBegin(dev);
         ui_from_config(c);   // also after the settings were left without saving
+        {
+            const float le = ease_out((UiTime() - s_listEnterAt) / 0.35f);
+            UiSetShift(0, 18 * (1 - le), le);
+        }
         if (c->browserDesign == BD_LIST || !n)
             browser_draw(roms, sel, top, rows, &details, n ? view_find(roms[sel].file.c_str()) : NULL,
                          n && !_stricmp(st.busyPath, roms[sel].file.c_str()), selAt, &st);
@@ -16139,6 +19277,10 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
             browser_draw_cartridges(roms, sel);
         else if (c->browserDesign == BD_CINEMA)
             browser_draw_cinema(roms, sel);
+        else if (c->browserDesign == BD_BOX3D)
+            browser_draw_box3d(roms, sel);
+        else if (c->browserDesign == BD_SINGLE)
+            browser_draw_single(roms, sel);
         else
             browser_draw_covers(roms, sel, page, grid_layout(c->browserDesign));
         {
@@ -16175,8 +19317,12 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
             if (age < MSG_MS) UiToast(msg, (float)age, (float)MSG_MS);
             else msg[0] = 0;
         }
+        if (noteAt) notify_card(noteText, noteKind, GetTickCount() - noteAt);
+        s_noteOwned = 1;   // (its own notices: not the hook's)
+        s_rsOwned = 1;     // (its own music volume too)
+        s_noteBits = c->notify;
+        UiSetEndHook(global_notes);
         UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
-        Sleep(16);
+        UiPresent(dev);
     }
 }

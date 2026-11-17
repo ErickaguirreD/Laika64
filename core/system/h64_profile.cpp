@@ -365,6 +365,19 @@ static const GameCpi s_gameCpi[] = {
     { "NGE", 3 },
 };
 
+// Dinosaur Planet: 12.5 ms a frame, some of 18-20 ms - each shown a refresh late and the next 4 ms after it
+// (20-51 of them in 2 s, a stutter at 60 FPS); with a frame in reserve, none.
+static const char *const s_frameReserve[] = { "NDP" };
+
+int h64_game_frame_reserve(const char *gameCode)
+{
+    u32 i;
+    if (!gameCode) return 0;
+    for (i = 0; i < sizeof(s_frameReserve) / sizeof(s_frameReserve[0]); i++)
+        if (!memcmp(gameCode, s_frameReserve[i], 3)) return 1;
+    return 0;
+}
+
 u32 h64_game_cpi(const char *gameCode, u32 cpi)
 {
     u32 i;

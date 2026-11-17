@@ -24,10 +24,17 @@
 // A tiny copy, drawn enlarged as a soft coloured glow behind the cover.
 #define ART_GLOW_W 16
 #define ART_GLOW_H 10
+// The selection's glow round a picture with its alpha (ArtOutline): this many of its pixels out from it.
+#define ART_OUTLINE_PAD 16
 
 // Which picture of a game the browser shows (libretro-thumbnails' folders):
-// the box, a picture from the game, its title screen, its logo.
-enum { ART_KIND_BOX = 0, ART_KIND_SNAP, ART_KIND_TITLE, ART_KIND_LOGO, ART_KIND_COUNT };
+// the box, a picture from the game, its title screen, its logo; and two of
+// ScreenScraper's (pictures with their alpha) for one view each: the 3D box
+// (the 3D boxes and single game views) and the game's cartridge (the cartridges
+// view) - not in `kinds` below, downloaded only while their view asks for them.
+enum { ART_KIND_BOX = 0, ART_KIND_SNAP, ART_KIND_TITLE, ART_KIND_LOGO, ART_KIND_BOX3D, ART_KIND_CART, ART_KIND_COUNT };
+// The kinds only a view of their own asks for (ScreenScraper's alone, their alpha kept).
+#define ART_KIND_VIEW_ONLY(k) ((k) == ART_KIND_BOX3D || (k) == ART_KIND_CART)
 
 struct ArtResult
 {
@@ -43,6 +50,8 @@ struct ArtResult
     u8 *dxt;                // or the same compressed: DXT1 as the Xbox 360's GPU reads it (dxtW x dxtH, whole 4x4 blocks), or NULL
     int dxtW, dxtH;
     u8 *glow;               // RGBA, ART_GLOW_W x ART_GLOW_H, or NULL
+    u8 *outline;            // the cartridge's (ART_KIND_CART) selection glow (ArtOutline), or NULL
+    int outlineW, outlineH;
     int infoOnly;           // only `info` changed (the critics' score came): the pictures shown stay
 };
 
@@ -73,6 +82,11 @@ void ArtWant(const char *const *paths, int count);
 // The next result (1), to free with ArtResultFree.
 int ArtTake(ArtResult *r);
 void ArtResultFree(ArtResult *r);
+// A picture's outline as the selection's glow round it, at half its size (a soft glow: a quarter of the
+// memory): white, ((w + 1) / 2 + ART_OUTLINE_PAD) x ((h + 1) / 2 + ART_OUTLINE_PAD) - ART_OUTLINE_PAD / 2
+// of its pixels round the picture's half - lit on its edge and fading out the same in every direction;
+// its inside lit too (the picture drawn over it hides that). To free(); NULL when out of memory.
+u8 *ArtOutline(const u8 *rgba, int w, int h, int *ow, int *oh);
 // The browser dropped its copy of a ROM's result (or of all): sent again when wanted.
 void ArtForget(const char *path);
 void ArtForgetAll(void);
@@ -110,6 +124,9 @@ int ArtReadPicture(const char *romPath, int kind, int maxW, int maxH, u8 **rgba,
 // A ROM's cache key ("NSME": its files' name in the folder below), from its header read now on the
 // calling thread (key: 16 bytes); 0 when the ROM cannot be read. And that folder ("game:\art\games").
 int ArtKeyOf(const char *romPath, char *key);
+// The same from what the online statistics keep of a game: its header name and code "NALE / 1234ABCD" (the game
+// code, the CRC1); 0 when the code says nothing usable.
+int ArtKeyFromCode(const char *name, const char *code, char *key);
 const char *ArtFolder(void);
 // A message for the user once ("No network connection", the bulk summary).
 int ArtTakeNote(char *text, int size);

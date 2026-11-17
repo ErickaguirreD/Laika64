@@ -27,11 +27,15 @@ enum { UI_ICON_NONE = 0, UI_ICON_SYSTEM, UI_ICON_GRAPHICS, UI_ICON_SCREEN, UI_IC
        UI_ICON_SMOOTH, UI_ICON_SHARP, UI_ICON_BLUR, UI_ICON_CHART, UI_ICON_STRETCH, UI_ICON_CROSSHAIR, UI_ICON_SUN,
        UI_ICON_VSYNC, UI_ICON_EYE, UI_ICON_SCANLINES, UI_ICON_FRAME, UI_ICON_ARROWS_H, UI_ICON_ARROWS_V, UI_ICON_CLOCK,
        UI_ICON_PALETTE, UI_ICON_GLOBE, UI_ICON_LAYOUT, UI_ICON_MUSIC, UI_ICON_SPEAKERS, UI_ICON_PLUS, UI_ICON_TRASH, UI_ICON_INFO,
-       UI_ICON_FRIENDS, UI_ICON_CHAT, UI_ICON_PERSON };
+       UI_ICON_FRIENDS, UI_ICON_CHAT, UI_ICON_PERSON, UI_ICON_PLANE, UI_ICON_HEART };
 // Sets the icons of a menu's rows in order (n of them, from row 0).
 void UiMenuIcons(UiMenu *m, const unsigned char *icons, int n);
 
 void UiMenuClear(UiMenu *m, const char *title, const char *footer);
+// The frame in reserve the game being played has from its profile when left to it (main.cpp; 0 in the ROM list).
+int FrameReserveAuto(void);
+// A game just left: its time added to the ROM list's "Most played" (<drive>:\config\playtime.txt).
+void PlaytimeAdd(const char *romPath, int seconds);
 int UiMenuAdd(UiMenu *m, const char *label, const char *value);   // returns the item's index
 // A side bar down the left over whatever is on the target (the frozen game frame in game).
 void UiMenuDraw(const UiMenu *m);   // between UiBegin and UiEnd
@@ -177,7 +181,20 @@ struct OnlineKbd
 {
     char *out;
     int minLen, maxLen, mode, row, col, lower;
+    int emoji;   // a message's keyboard (KBD_CHAT) showing the emojis instead of the letters (kbd_toggle_emoji: LT)
 };
+void kbd_toggle_emoji(OnlineKbd *k);
+// The keys, keyW x keyH each (a message's space bar six wide), centred on cx from y; kbd_draw_keys: square ones.
+void kbd_draw_keys_wh(const OnlineKbd *k, float cx, float y, float keyW, float keyH, float gap);
+// A message's keyboard's two tabs (ABC, the emojis) from (x, cy), the one shown lit; its width.
+float kbd_draw_tabs(const OnlineKbd *k, float x, float cy);
+// The emojis of the online chats (xb_emojis.h, main.cpp): each one's picture (made when first wanted), how many.
+IDirect3DTexture9 *EmojiTex(int k);
+int EmojiCount(void);
+// A message's text with its emojis in it ("@eNN": two digits; a message "@eN" alone: that emoji), from x on cy, words
+// wrapped at maxW over maxLines lines 1.35 x size apart (the last one cut with "..." when more is left). draw 0: only
+// measured. Returns the lines; *widest (or NULL) the widest one's width.
+int RichText(int font, float size, float x, float cy, float maxW, int maxLines, D3DCOLOR color, const char *text, int draw, float *widest);
 void kbd_init(OnlineKbd *k, char *out, int minLen, int maxLen, int mode);
 int kbd_input(OnlineKbd *k, WORD down);
 void kbd_draw_text(const OnlineKbd *k, float cx, float y, float w, float h, float size);   // between UiBegin and UiEnd

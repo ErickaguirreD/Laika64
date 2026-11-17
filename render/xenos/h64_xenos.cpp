@@ -459,7 +459,7 @@ static const char *a_c(u32 s)
     return t[s & 7];
 }
 
-enum { KEY_TWO_CYCLE = 1, KEY_FOG = 2, KEY_DEPTH = 4, KEY_3POINT = 8 };
+enum { KEY_TWO_CYCLE = 1, KEY_FOG = 2, KEY_DEPTH = 4, KEY_3POINT = 8, KEY_BL_FOG = 16, KEY_BL_SHADEA = 32 };
 #define TRI_ZOUT 0x100   // batch flag beside H64_TRI_*: a vertex Z outside the RDP range
 
 // In the second cycle the RDP's TEXEL0 input is texel 1 and TEXEL1 is the next
@@ -552,7 +552,7 @@ static IDirect3DPixelShader9 *combiner_shader(Xenos *x, u32 flags)
               "  float4 t1 = %s;\n"
               "  float4 noise = frac(sin(dot(vpos, float2(12.9898, 78.233))) * 43758.5453);\n"
               "  float4 comb = float4(0.0, 0.0, 0.0, 0.0);\n"
-              "%s%s%s"
+              "%s%s%s%s%s"
               "  o.c = comb;\n"
               "%s%s"
               "  return o;\n"
@@ -562,6 +562,8 @@ static IDirect3DPixelShader9 *combiner_shader(Xenos *x, u32 flags)
               (flags & KEY_3POINT) ? "tex3p(s0, tc.xy, tsize0)" : "tex2D(s0, tc.xy)",
               (flags & KEY_3POINT) ? "tex3p(s1, tc.zw, tsize1)" : "tex2D(s1, tc.zw)",
               c0, c1, (flags & KEY_FOG) ? "  comb.rgb = lerp(comb.rgb, fogc.rgb, shade.a);\n" : "",
+              // The blender's P is the fog colour (set_blend): the shader hands it over as its colour.
+              (flags & KEY_BL_FOG) ? "  comb.rgb = fogc.rgb;\n" : "", (flags & KEY_BL_SHADEA) ? "  comb.a = shade.a;\n" : "",
               // Xenos computes ddx/ddy with a texture unit: a shader whose
               // combiner reads no texture had no sampler left and failed to
               // compile (X3602, Banjo-Kazooie); t0 * zbias.w (always 0) keeps s0.
@@ -2688,14 +2690,17 @@ static int set_blend(Xenos *x, int lastCycle)
     int force = (st->depthBlendFlags & DB_FORCE_BLEND) != 0;
     // P: 0 in, 1 mem, 2 blend colour, 3 fog; A: 0 combined alpha, 1 fog alpha, 2 shade alpha, 3 zero;
     // M: as P; B: 0 one minus A, 1 memory alpha, 2 one, 3 zero.
-    if (force && b[0] == 0 && b[2] == 1 && (b[1] == 0 || b[1] == 2) && b[3] == 0)
+    // P = fog over memory blends as P = in: the shader's colour is the fog colour then (KEY_BL_FOG).
+    // Banjo-Kazooie tints the screen under water with a full-screen rectangle blended so; drawn
+    // opaque, with the combiner's colour (0), the screen went black.
+    if (force && (b[0] == 0 || b[0] == 3) && b[2] == 1 && (b[1] == 0 || b[1] == 2) && b[3] == 0)
     {
         x->dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
         x->dev->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
         x->dev->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
         return 1;
     }
-    else if (force && b[0] == 0 && b[2] == 1 && b[3] == 0 && (b[1] == 1 || b[1] == 3))
+    else if (force && (b[0] == 0 || b[0] == 3) && b[2] == 1 && b[3] == 0 && (b[1] == 1 || b[1] == 3))
     {
         // in * A + mem * (1 - A) with A the fog colour's alpha (or zero): a
         // constant blend factor. Bomberman 64 fades its title with a
@@ -2835,10 +2840,16 @@ static void setup_combined(Xenos *x, int hasDepth, TexBinding *tb0, TexBinding *
     int two = (st->rasterFlags & RS_MULTI_CYCLE) != 0, blended;
     u32 flags = two ? KEY_TWO_CYCLE : 0;
     float c[4], fbw = (float)(st->colorWidth ? st->colorWidth : 320), fbh = (float)fb_height(x, st->colorWidth);
-    const u8 *b0 = st->blend[0];
+    const u8 *b0 = st->blend[0], *bl = st->blend[two ? 1 : 0];
     IDirect3DPixelShader9 *ps;
     if (two && b0[0] == 3 && b0[1] == 2 && b0[2] == 0 && b0[3] == 0) flags |= KEY_FOG;
     if (!two && b0[0] == 3 && b0[1] == 2 && b0[2] == 0 && b0[3] == 0) flags |= KEY_FOG;
+    if ((st->depthBlendFlags & DB_FORCE_BLEND) && bl[0] == 3 && bl[2] == 1 && bl[3] == 0)
+    {
+        // Fog colour * A + memory * (1 - A) (set_blend); A = shade alpha comes from the shader too.
+        flags |= KEY_BL_FOG;
+        if (bl[1] == 2) flags |= KEY_BL_SHADEA;
+    }
     if (zOut && hasDepth && (st->depthBlendFlags & (DB_DEPTH_TEST | DB_DEPTH_UPDATE))) flags |= KEY_DEPTH;
     if (x->texFilter == 0 && !(x->hts && x->hiTex) && (st->rasterFlags & RS_SAMPLE_QUAD) && !(st->rasterFlags & RS_COPY)) flags |= KEY_3POINT;
     ps = combiner_shader(x, flags);
@@ -3085,12 +3096,27 @@ static void fill_rect(Xenos *x, const u32 *w)
         // Clear() keeps to the scissor of the last draw: Mario Kart 64
         // clears each player's view after drawing the one beside it, and the
         // top-right view kept the previous frame's depth (holes in its walls).
+        // A colour image the GPU drew at the depth image's address is overwritten
+        // by this fill, as in RDRAM: its slot is dropped. Conker's pause keeps its
+        // last frame in the depth image's memory; the slot stayed, and each later
+        // load of depth rows copied that old frame back over them.
+        u32 i, depth = st->depthAddr & 0xFFFFFF;
+        for (i = 0; i < FB_SLOTS; i++)
+        {
+            FbSlot *s = &x->fb[i];
+            if (!s->tex || s->addr != depth) continue;
+            s->valid = 0;
+            s->gpuDirty = 0;
+            s->addr = 0xFFFFFFFFu;
+            if (x->edramOwner == (int)i) x->edramOwner = -1;
+            if (x->curSlot == (int)i) x->curSlot = -1;
+        }
         flush_batch(x);
         bind_n64_target(x);
         x->dev->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
         x->stateDirty = 1;
         x->dev->Clear(1, &r, D3DCLEAR_ZBUFFER, 0, 1.0f, 0);
-        x->edramDepthAddr = st->depthAddr & 0xFFFFFF;
+        x->edramDepthAddr = depth;
         if (x->sys->options.gfxDepthFillToRdram) depth_fill_rdram(x, xl >> 2, xh >> 2, yl >> 2, yh >> 2);
         return;
     }

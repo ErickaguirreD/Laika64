@@ -72,7 +72,9 @@ void ConfigDefaults(Config *c)
     c->updateCheck = 1;   // GitHub ErickaguirreD/Laika64: the check, and the updater when there is a newer release
     c->artDownload = 1;
     c->artExtras = 1;
+    c->artBox3dSs = 0;
     c->previewVideo = 1;
+    c->artCycle = 1;
     c->previewSound = 1;
     c->artBackground = 0;
     c->browserDemo = 0;
@@ -160,6 +162,7 @@ void ConfigDefaults(Config *c)
     c->gameBackdrop = 0;
     c->videoBackdrop = 0;
     c->hideHints = 0;
+    c->notify = 15;
     c->texFilter = 1;
     c->hiTex = 1;
     c->hiTexFile[0] = 0;
@@ -168,6 +171,7 @@ void ConfigDefaults(Config *c)
     c->screen = 0;
     c->brightness = 0;
     c->vsync = 0;   // off by default (as 2.0.1): with it, waits on the GPU also wait for the TV
+    c->frameReserve = -1;
     c->deflicker = 0;
     c->zoom = 100;
     c->offsetX = c->offsetY = 0;
@@ -218,11 +222,16 @@ int ConfigParseFile(Config *c, const char *path)
         if (!strcmp(line, "gfxlog")) c->gfxLog = atoi(eq + 1);
         if (!strcmp(line, "texr3")) c->texR3 = atoi(eq + 1);
         if (!strcmp(line, "artextras")) c->artExtras = atoi(eq + 1);
+        if (!strcmp(line, "artbox3d")) c->artBox3dSs = atoi(eq + 1) != 0;
+        if (!strcmp(line, "reserveframe")) c->frameReserve = atoi(eq + 1) < 0 ? -1 : atoi(eq + 1) ? 1 : 0;
         if (!strcmp(line, "artbg")) c->artBackground = atoi(eq + 1);
         if (!strcmp(line, "previewvideo")) c->previewVideo = atoi(eq + 1) ? 1 : 0;
+        if (!strcmp(line, "artcycle")) c->artCycle = atoi(eq + 1) ? 1 : 0;
+        if (!strcmp(line, "gamemusic")) c->gameMusic = atoi(eq + 1) ? 1 : 0;
         if (!strcmp(line, "previewsound")) c->previewSound = atoi(eq + 1) ? 1 : 0;
-        if (!strcmp(line, "videobg")) c->videoBackdrop = atoi(eq + 1) ? 1 : 0;
+        if (!strcmp(line, "videobg")) c->videoBackdrop = atoi(eq + 1) < 0 ? 0 : atoi(eq + 1) > 2 ? 2 : atoi(eq + 1);   // 2: without its sound
         if (!strcmp(line, "hidehints")) c->hideHints = atoi(eq + 1) ? 1 : 0;
+        if (!strcmp(line, "notify")) c->notify = atoi(eq + 1) & 15;
         if (!strcmp(line, "ssuser")) { strncpy(c->ssUser, eq + 1, sizeof(c->ssUser) - 1); c->ssUser[sizeof(c->ssUser) - 1] = 0; }
         if (!strcmp(line, "sspass")) { strncpy(c->ssPass, eq + 1, sizeof(c->ssPass) - 1); c->ssPass[sizeof(c->ssPass) - 1] = 0; }
         if (!strcmp(line, "panelcolor")) c->panelColor = atoi(eq + 1);
@@ -478,6 +487,7 @@ int ConfigWriteMenuKeys(const Config *c, const char *path, int withLastRom)
             c->descTranslate, c->gameBackdrop);
     fprintf(f, "texfilter=%d\nsharpen=%d\nblur=%d\nscreen=%d\nbrightness=%d\nvsync=%d\nstretch=%d\ndeflicker=%d\n",
             c->texFilter, c->sharpen, c->blur, c->screen, c->brightness, c->vsync, c->stretch, c->deflicker);
+    fprintf(f, "reserveframe=%d\n", c->frameReserve);
     fprintf(f, "hirestex=%d\n", c->hiTex);
     if (c->hiTexFile[0]) fprintf(f, "hirestexfile=%s\n", c->hiTexFile);
     fprintf(f, "shotbtn1=%s\nshotbtn2=%s\n", c->shotBtn1 >= 0 ? h64_padmap_source_name(c->shotBtn1) : "none",
@@ -490,7 +500,7 @@ int ConfigWriteMenuKeys(const Config *c, const char *path, int withLastRom)
     fprintf(f, "hk_save=%X\nhk_load=%X\nhk_slotprev=%X\nhk_slotnext=%X\nhk_shot=%X\n", c->hotkey[HK_SAVE], c->hotkey[HK_LOAD],
             c->hotkey[HK_SLOT_PREV], c->hotkey[HK_SLOT_NEXT], c->hotkey[HK_SHOT]);
     fprintf(f, "padloss=%d\nautosaveslot=%d\nbatterywarn=%d\nuisounds=%d\n", c->padLoss, c->autoSaveSlot, c->batteryWarn, c->uiSounds);
-    if (withLastRom) fprintf(f, "artdownload=%d\nartextras=%d\nartbg=%d\nbrowserdesign=%d\nbgeffect=%d\n", c->artDownload, c->artExtras, c->artBackground, c->browserDesign, c->bgEffect);
+    if (withLastRom) fprintf(f, "artdownload=%d\nartextras=%d\nartbg=%d\nartbox3d=%d\nbrowserdesign=%d\nbgeffect=%d\n", c->artDownload, c->artExtras, c->artBackground, c->artBox3dSs, c->browserDesign, c->bgEffect);
     if (withLastRom)
         fprintf(f, "fxcolor1=%d\nfxcolor2=%d\nfxcolor3=%d\nfxopacity=%d\nfxspeed=%d\n", c->fxColor[0], c->fxColor[1], c->fxColor[2],
                 c->fxOpacity, c->fxSpeed);
@@ -498,7 +508,9 @@ int ConfigWriteMenuKeys(const Config *c, const char *path, int withLastRom)
         fprintf(f, "selcolor=%d\nwallinterval=%d\nwalltransition=%d\nwalldim=%d\nsavermode=%d\nsavertime=%d\n", c->selColor, c->wallInterval,
                 c->wallTransition, c->wallDim, c->saverMode, c->saverTime);
     if (withLastRom) fprintf(f, "wallcustom=%d\nuisoundstyle=%d\nartkind=%d\n", c->wallCustom, c->uiSoundStyle, c->artKind);
-    if (withLastRom) fprintf(f, "previewvideo=%d\npreviewsound=%d\nvideobg=%d\nhidehints=%d\n", c->previewVideo, c->previewSound, c->videoBackdrop, c->hideHints);
+    if (withLastRom) fprintf(f, "previewvideo=%d\npreviewsound=%d\nvideobg=%d\nhidehints=%d\nnotify=%d\n", c->previewVideo, c->previewSound, c->videoBackdrop,
+                             c->hideHints, c->notify);
+    if (withLastRom) fprintf(f, "artcycle=%d\ngamemusic=%d\n", c->artCycle, c->gameMusic);
     if (withLastRom && c->ssUser[0]) fprintf(f, "ssuser=%s\nsspass=%s\n", c->ssUser, c->ssPass);
     fprintf(f, "uifont=%d\ncolorstyle=%d\n", c->uiFont, c->colorStyle);
     {

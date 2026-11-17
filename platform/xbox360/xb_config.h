@@ -52,6 +52,8 @@ struct Config
     int screen;         // screen=0..4: none, scanlines, CRT, curved CRT, LCD grid (crt=1: curved CRT)
     int brightness;     // brightness=0|1|2: as the console, lighter, much lighter
     int vsync;          // vsync=0|2: off (default), or every frame waits for the TV's refresh (V-Sync on; 1, the old "normal", reads as 2)
+    int frameReserve;   // reserveframe=-1|0|1: with V-Sync, the game runs a frame ahead of the TV, its picture held for its refresh (a slow
+                        // frame does not stutter); -1 (default): as the game's profile (h64_game_frame_reserve)
     int deflicker;      // deflicker=0|1: each picture shown mixed with the previous one (default 0)
     int zoom;           // zoom=N: picture size in percent (default 100)
     int offsetX, offsetY;   // posx=, posy=: picture position in output pixels (default 0)
@@ -83,8 +85,13 @@ struct Config
     int gameFlags;      // gameflags=HEX: the game's profile flags instead of the table's (checks; -1: the table)
     int updateCheck;    // updatecheck=0: do not ask GitHub for a newer release (xb_update.cpp); 2: as if running 0.0.0 (testing)
     int artExtras;      // artextras=1 (default): with artdownload, the pictures from the game, title screens and logos are downloaded too (0: the box art only)
+    int artBox3dSs;     // artbox3d=0 (default): the 3D boxes and single game views draw each box from its box art; 1: ScreenScraper's 3D boxes where there are
     int artBackground;  // artbg=1: the downloads of every game go on while a game is played (0, default: they wait for the list)
     int previewVideo;   // previewvideo=1 (default): the ROM list's card plays the selected game's video (xb_preview.cpp)
+    int gameMusic;      // gamemusic=1: only the sound of the selected game's video plays (its music), the video not shown - not
+                        // with the preview videos on (default 0)
+    int artCycle;       // artcycle=1 (default): the selected game's pictures take turns (box, from the game, title, logo) - after its
+                        // video's round when it has one; not in the cartridges view
     int previewSound;   // previewsound=1 (default): with its sound (0: silent, the menus' music goes on)
     char ssUser[64];    // ssuser=NAME / sspass=PASSWORD: the user's own ScreenScraper account for the
     char ssPass[64];    // preview videos (its quota and speed); empty: the anonymous access
@@ -93,8 +100,8 @@ struct Config
     int browserDemo;    // browserdemo=N: the ROM browser moves its selection down every N ms (captures in Xenia)
     char browserSel[128]; // browsersel=FILE: the ROM browser starts on that file name (console checks), over lastrom=
     int artAll;         // artall=1: the ROM browser starts "Get box art for all games" by itself (checks)
-    int browserDesign;  // browserdesign=0..7: the ROM browser's layout, the list+card of old (0), a covers grid (1), big covers (2), a carousel (3),
-                        // mosaic (4), spotlight (5), cartridges (6), cinema (7)
+    int browserDesign;  // browserdesign=0..9: the ROM browser's layout, the list+card of old (0), a covers grid (1), big covers (2), a carousel (3),
+                        // mosaic (4), spotlight (5), cartridges (6), cinema (7), 3D boxes (8), single game (9)
     int bgEffect;       // bgeffect=0..30: the ROM browser's animated background, none (0), the waves (1, default) ... (xb_menu.cpp BGFX_*)
     int fxColor[3];     // fxcolor1..3=0..13: the effect's colours, from xb_menu.cpp's palette; fxcolor1=0: the effect's own, 2 and 3 = 0: unused
     int fxOpacity;      // fxopacity=10..200: how strongly the effect shows, in % (default 100)
@@ -111,6 +118,8 @@ struct Config
     int gameBackdrop;   // gamebg=0|1: a picture from the selected game behind the game list, in every view (default 0)
     int videoBackdrop;  // videobg=0|1: the selected game's preview video there instead of over its picture (default 0; not with gamebg)
     int hideHints;      // hidehints=0|1: the ROM list without its button prompts at the bottom (default 0)
+    int notify;         // notify=bits: the online news shown (1 new rooms, 2 friends online, 4 messages) and 8 the controller
+                        // vibrating with them (default 15: all)
     int wallRecommend;  // wallrec=1: the background shows one of your games at a time, its big cover and what it is about
     int borderColor;    // bordercolor=0..13: the menus' edges - the selection's colour (0), or xb_menu.cpp's swatches
     int borderOpacity;  // borderopacity=0..100: how strong the edges are, in % (default 100)

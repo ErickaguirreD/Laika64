@@ -63,7 +63,11 @@ static int s_mono;                  // Settings > Sound > Audio output: mono
 static volatile LONG s_musicDuck;   // a preview video's sound plays: the music is silent meanwhile
 static int s_musicPaused;           // xb_audio_music_pause (under the music's lock)
 
-static float music_gain(void) { return s_musicDuck ? 0.0f : s_musicVolume; }
+// The music and a preview's sound cross-fade (MUSIC_FADE_MS each way) instead of one cutting the other: how far the
+// music has gone down (0 playing, 1 silent) and how far a preview's sound has come up (music_thread moves both).
+#define MUSIC_FADE_MS 1200.0f
+static float s_duckLevel, s_pvLevel;
+static float music_gain(void) { return s_musicVolume * (1.0f - s_duckLevel); }
 
 // A stereo voice's way to the speakers: its two channels apart (stereo) or
 // mixed into both (mono). The mastering voice may have more channels than
@@ -588,6 +592,33 @@ static int music_decode(s16 *out)
     return frames;
 }
 
+static void pv_lock(void);
+static void pv_unlock(void);
+static IXAudio2SourceVoice *s_pvVoice;
+// One step of the fades: the music towards silent while a preview plays (and back after), the preview's sound up.
+static void fade_step(float ms)
+{
+    const float step = ms / MUSIC_FADE_MS, duck = s_musicDuck ? 1.0f : 0.0f;
+    if (s_duckLevel != duck)
+    {
+        s_duckLevel += s_duckLevel < duck ? step : -step;
+        if (s_duckLevel < 0) s_duckLevel = 0;
+        if (s_duckLevel > 1) s_duckLevel = 1;
+        music_lock();
+        if (s_musicVoice) s_musicVoice->SetVolume(music_gain());
+        music_unlock();
+    }
+    if (!s_pvVoice || s_pvLevel >= 1.0f) return;   // (no voice: its lock may not be made yet)
+    pv_lock();
+    if (s_pvVoice && s_pvLevel < 1.0f)
+    {
+        s_pvLevel += step;
+        if (s_pvLevel > 1) s_pvLevel = 1;
+        s_pvVoice->SetVolume(s_musicVolume * s_pvLevel);
+    }
+    pv_unlock();
+}
+
 static DWORD WINAPI music_thread(LPVOID)
 {
     while (!s_musQuit)
@@ -626,6 +657,7 @@ static DWORD WINAPI music_thread(LPVOID)
             }
         }
         music_unlock();
+        fade_step(15.0f);
         Sleep(15);
     }
     return 0;
@@ -697,7 +729,6 @@ static float volume_from_percent(int percent)
 #define PV_FRAMES 4096   // per slot (per channel): ~85 ms at 48 kHz
 static CRITICAL_SECTION s_pvLock;
 static int s_pvLockReady;
-static IXAudio2SourceVoice *s_pvVoice;
 static s16 *s_pvBuf[PV_SLOTS];
 static int s_pvNext, s_pvCh;
 
@@ -712,16 +743,13 @@ static void pv_unlock(void) { LeaveCriticalSection(&s_pvLock); }
 static void preview_volume(void)
 {
     pv_lock();
-    if (s_pvVoice) s_pvVoice->SetVolume(s_musicVolume);
+    if (s_pvVoice) s_pvVoice->SetVolume(s_musicVolume * s_pvLevel);
     pv_unlock();
 }
 
 static void music_duck(int on)
 {
-    InterlockedExchange(&s_musicDuck, on);
-    music_lock();
-    if (s_musicVoice) s_musicVoice->SetVolume(music_gain());
-    music_unlock();
+    InterlockedExchange(&s_musicDuck, on);   // (music_thread fades it there)
 }
 
 int xb_audio_preview_open(u32 rate, int channels)
@@ -747,7 +775,8 @@ int xb_audio_preview_open(u32 rate, int channels)
         H64_ERROR("[audio] preview: CreateSourceVoice(%u Hz, %d ch) failed", rate, channels);
         return -1;
     }
-    s_pvVoice->SetVolume(s_musicVolume);
+    s_pvLevel = 0;   // rising as the music goes down (fade_step)
+    s_pvVoice->SetVolume(0.0f);
     apply_output_matrix(s_pvVoice, channels);
     s_pvVoice->Start(0, XAUDIO2_COMMIT_NOW);
     s_pvCh = channels;

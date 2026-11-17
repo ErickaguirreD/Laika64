@@ -362,6 +362,14 @@ static IDirect3DDevice9 *s_workDev;
 static H64Renderer *s_workRenderer;
 static int s_ownsDevice = 1;
 static u32 s_presentRegs[WORK_SLOTS][32];
+// The frame in reserve (Settings > Screen): each present's refresh to hold its picture for (0: none, as soon as it is ready).
+static LONG s_presentSlot[WORK_SLOTS];
+static LONG s_frameSlot;   // the frame being run's (RunGame's V-Sync pacing), 0: no reserve
+static int s_reserveAuto;  // the game being played has a frame in reserve from its profile (h64_game_frame_reserve)
+int FrameReserveAuto(void) { return s_reserveAuto; }
+// The frame in reserve for this game: the player's choice, else its profile's.
+static int FrameReserveOn(const Config *c) { return c->frameReserve < 0 ? s_reserveAuto : c->frameReserve; }
+static void PresentHold(LONG slot);   // below, with the refreshes' counter
 
 static DWORD WINAPI WorkThread(LPVOID param)
 {
@@ -513,6 +521,8 @@ static void NotePresent(void)
 
 static void PresentJob(void *arg)
 {
+    const int k = (int)(((const u32 *)arg - s_presentRegs[0]) / 32);
+    if (k >= 0 && k < WORK_SLOTS && s_presentSlot[k]) PresentHold(s_presentSlot[k]);
     h64_xenos_present_vi(s_workRenderer, (const u32 *)arg);
     NotePresent();
 }
@@ -523,6 +533,7 @@ static void PresentFrame(H64System *sys, H64Renderer *renderer)
     if (s_gfxQ.thread)
     {
         u32 *regs = s_presentRegs[s_gfxQ.queued % WORK_SLOTS];
+        s_presentSlot[s_gfxQ.queued % WORK_SLOTS] = s_frameSlot;
         memcpy(regs, sys->vi.regs, sizeof(s_presentRegs[0]) < sizeof(sys->vi.regs) ? sizeof(s_presentRegs[0]) : sizeof(sys->vi.regs));
         WorkStart(NULL, PresentJob, regs);
     }
@@ -681,6 +692,8 @@ static H64System *MakeSystem(const u8 *rom, u32 size, int jit)
     if (sys->jit && !s_statusFast) { sys->jit->noStatusFast = 1; h64_jit_reset(sys); }
     if (sys->jit && s_noSuper) { sys->jit->noSuper = 1; h64_jit_reset(sys); }
     sys->cpu.cpi = h64_game_cpi(sys->rom.gameCode, s_cpi);   // a game's own (profile) when cpi is the default
+    s_reserveAuto = h64_game_frame_reserve(sys->rom.gameCode);
+    if (s_reserveAuto) H64_INFO("[profile] %.4s: frame in reserve with V-Sync", sys->rom.gameCode);
     if (sys->cpu.cpi != s_cpi) H64_INFO("[profile] %.4s: cpi %u", sys->rom.gameCode, sys->cpu.cpi);
     return sys;
 }
@@ -787,7 +800,9 @@ static void ApplyGraphics(H64System *sys, H64Renderer *renderer, const Config *c
         o.brightPower = lv >= 50 ? 1.0f - 0.4f * (lv - 50) / 50.0f : 1.0f + 0.6f * (50 - lv) / 50.0f;
     }
     o.colorStyle = c->colorStyle;
-    o.vsync = c->vsync && s_netMode <= 0 ? 1 : 0;   // adaptive: a late picture shown at once (RunGame paces frames on the TV's refreshes); online: the clock, as the others
+    // Adaptive: a late picture shown at once (RunGame paces frames on the TV's refreshes); a frame in reserve: each
+    // held for its refresh, never shown early (2); online: the clock, as the others.
+    o.vsync = c->vsync && s_netMode <= 0 ? (FrameReserveOn(c) ? 2 : 1) : 0;
     o.deflicker = c->deflicker;
     o.zoom = c->zoom;
     o.offsetX = c->offsetX;
@@ -1063,7 +1078,7 @@ static double QpcMs(void);
 #define NET_PLAYERS 4
 #define NET_TIMEOUT_MS 10000        // nothing from the others this long (they ping every NET_PING_MS, their pause menu too): alone
 #define NET_PING_MS 500
-#define NET_DELAY_RELAY 5           // reads of input delay through the server's rooms (direct: netplay.txt's, 3)
+#define NET_DELAY_RELAY 6           // frames of input delay through the server's rooms (direct: netplay.txt's, 3; a room's direct way: 4)
 #define NET_HASH_EVERY 60           // frames between two state hashes (each of a different MB of RDRAM, and the CPU)
 #define NET_HASHES 64
 // A message's type: its low bytes; the server puts the sender's port in the top byte (0: directly, the other console).
@@ -1102,10 +1117,13 @@ static int s_netRtt[NET_PLAYERS + 1];       // per port: the time there and back
 static DWORD s_netPingAt;                   // the next ping (one a second, as the game sends its inputs)
 // Directly (xb_p2p.cpp): in a room's game the consoles try UDP to each other as it starts; when every one
 // reaches every other, the game's messages go that way and the room only carries the chat (and a ping to
-// keep it). A way that goes quiet sends everyone back to the room, the last inputs sent again there.
+// keep it). A way that goes quiet sends everyone back to the room, the last inputs sent again there; the
+// probes go on, and when every console is heard again a while the game's messages go directly again.
 #define NET_P2P_PUNCH_MS 3000       // probing each other's addresses
 #define NET_P2P_AGREE_MS 2500       // waiting for every console's verdict
-#define NET_P2P_QUIET_MS 1500       // nothing directly from a console this long: back to the room
+#define NET_P2P_QUIET_MS 4000       // nothing directly from a console this long: back to the room (a Wi-Fi hiccup of 1.5 s was not the end of the way)
+#define NET_P2P_BACK_MS 3000        // back on the room: every console heard directly this long, and directly again
+#define NET_P2P_RETRY_MS 5000       // ... not before this long after leaving the direct way
 #define NET_P2P_REPEAT 8            // the last input messages repeated in each packet (a lost one costs nothing; one per port played here)
 static int s_netP2p;                        // the game's messages go directly
 static int s_netP2pOpen;                    // the UDP socket is open (directly, or trying)
@@ -1124,21 +1142,40 @@ static u32 s_netNextSlot;                   // the next read this console's own 
 static u32 s_netRateReads;                  // s_netReads at the last count
 static u32 s_netDelayNext;                  // a new delay, from the next read on (0: none)
 static DWORD s_netRelayPingAt;              // directly: the next ping that keeps the room open
+static DWORD s_netP2pOffAt;                 // the direct way was left (GetTickCount; 0: never, or the game never had one)
+static DWORD s_netP2pGoodAt;                // back on the room: since when every console is heard directly (0: not now)
 static void NetText(char *line);
 static void NetP2pOff(int tell);
 // The quick chat (BACK, online through a room): see NetQuickChatInput below.
 #define NET_BACK_MENU_MS 1200       // BACK held this long: the menu (online), not the quick chat
 #define NET_CHAT_SHOW_MS 14000      // a message stays this long beside the game
 #define NET_CHAT_LINES 8
-#define QC_TEXTS 8
+#define QC_TEXTS 32   // the quick chat's texts (T_QC_1...): sent as their number, "@q<n>" (the first 8 as before 2.2.2)
+#define QC_CATS 4     // ... in tabs (LB/RB): the game, teasing, notices, greetings - 8 each
+static const unsigned char s_qcTab[QC_CATS][8] = {
+    { 0, 1, 3, 6, 8, 9, 10, 11 },          // the game: good game, well played, rematch?, let's go, so close, lucky, I won, one more
+    { 12, 13, 14, 15, 16, 17, 18, 19 },    // teasing: the best player, sore loser, that was a cheat...
+    { 2, 20, 21, 22, 23, 24, 25, 26 },     // notices: wait a moment, the bathroom, back soon, the internet went...
+    { 4, 5, 7, 27, 28, 29, 30, 31 } };     // greetings: haha, oops, bye, hi, thanks, sorry, good night, see you tomorrow
 struct NetChatLine { char tag[16], text[84]; DWORD at; };
 static NetChatLine s_netChat[NET_CHAT_LINES];   // the last messages, the newest last
 static int s_netChatCount;
+static int s_qcCat;   // the quick chat's tab of texts
+static BYTE s_qcLtWas = 255;   // the left trigger (the keyboard's letters or emojis)
 static int s_qcOpen, s_qcKbd, s_qcRow, s_qcCol;   // the quick chat open, its keyboard, the selection (row 0 emojis, 1-2 texts, 3 keyboard)
 static WORD s_qcPrev;
 static char s_qcText[84];
 static OnlineKbd s_qcKb;
 static IDirect3DTexture9 *s_emojiTex[EMOJI_COUNT];   // made by the overlay (it has the device), kept
+
+IDirect3DTexture9 *EmojiTex(int k)
+{
+    if (k < 0 || k >= EMOJI_COUNT) return NULL;
+    if (!s_emojiTex[k] && UiDevice()) s_emojiTex[k] = UiImageCreate(UiDevice(), s_emojiRgba[k], EMOJI_SIZE, EMOJI_SIZE);
+    return s_emojiTex[k];
+}
+
+int EmojiCount(void) { return EMOJI_COUNT; }
 
 static u32 NetBuildId(void)
 {
@@ -1318,6 +1355,28 @@ static void NetPump(int ms)
                 s_netRelayPingAt = GetTickCount() + 20000;
             }
         }
+        else if (s_netMode > 0 && s_netP2pOffAt)
+        {
+            // On the room since the direct way went quiet: the probes go on (one each 100 ms, nothing waits); every
+            // console reached both ways and heard lately, for NET_P2P_BACK_MS: directly again. Each console decides for
+            // itself - what arrives either way is used, and the others' probes keep the quiet check fed meanwhile.
+            const DWORD now = GetTickCount();
+            int all = 1;
+            P2pPunch(0);
+            for (p = 1; p <= s_netPlayers; p++)
+                if (NET_CONSOLE(p) && p != s_netPort && !s_netGone[p] && (!P2pReached(p) || now - P2pLastHeard(p) > 500)) all = 0;
+            if (!all || now - s_netP2pOffAt < NET_P2P_RETRY_MS) s_netP2pGoodAt = 0;
+            else if (!s_netP2pGoodAt) s_netP2pGoodAt = now;
+            else if (now - s_netP2pGoodAt >= NET_P2P_BACK_MS)
+            {
+                s_netP2p = 1;
+                s_netP2pOffAt = s_netP2pGoodAt = 0;
+                s_netBaseVi = 4;
+                s_netRelayPingAt = now + 20000;
+                H64_INFO("[net] direct way back (read %u)", s_netReads);
+                NetOsd("EN LINEA: conexion directa recuperada", 6000);
+            }
+        }
     }
     while (s_netWs)
     {
@@ -1488,10 +1547,13 @@ static void NetVi(H64System *sys)
         s_netRateReads = s_netReads;
         if (reads >= NET_RATE_VI / 6)
         {
-            u32 d = (reads * s_netBaseVi + NET_RATE_VI / 2) / NET_RATE_VI;
+            // In quarters of a read: changed only when it is 3/4 of a read away from the delay now (a game reading
+            // 1.1 times a frame made 4.4 and the delay went 4, 5, 4, 5... every few seconds).
+            const u32 q = (reads * s_netBaseVi * 4 + NET_RATE_VI / 2) / NET_RATE_VI;
+            u32 d = (q + 2) / 4;
             if (d < 1) d = 1;
             if (d > NET_RING / 4) d = NET_RING / 4;
-            if (d != s_netDelay) s_netDelayNext = d;
+            if (d != s_netDelay && (q >= s_netDelay * 4 + 3 || q + 3 <= s_netDelay * 4)) s_netDelayNext = d;
         }
     }
     if (s_netMode <= 0 || f % NET_HASH_EVERY) return;
@@ -1588,6 +1650,10 @@ static void NetP2pOff(int tell)
     u32 r;
     int k;
     s_netP2p = 0;
+    s_netBaseVi = NET_DELAY_RELAY;   // the room's delay from the next count (the server's way is longer)
+    s_netP2pOffAt = GetTickCount();  // the probes go on: NetPump takes the direct way again when it works
+    s_netP2pGoodAt = 0;
+    H64_INFO("[net] direct way quiet: through the room (read %u)", s_netReads);
     if (!s_netWs) return;
     if (tell) NetWsSend(s_netWs, "p2p\toff", 7, 1);
     for (r = s_netSentUpTo > 128 ? s_netSentUpTo - 128 : 0; r < s_netSentUpTo; r += 2)
@@ -1610,6 +1676,7 @@ static void NetP2pSetup(u32 token)
     memset(s_netP2pOk, 0, sizeof(s_netP2pOk));
     s_netP2p = 0;
     s_netP2pHistN = 0;
+    s_netP2pOffAt = s_netP2pGoodAt = 0;
     s_netP2pOpen = P2pOpen(token, s_netPort, cand, sizeof(cand));
     if (s_netP2pOpen)
     {
@@ -1796,6 +1863,7 @@ static void NetStop(void)
     s_qcOpen = s_qcKbd = 0;
     if (s_netP2pOpen) P2pClose();
     s_netP2pOpen = s_netP2p = 0;
+    s_netP2pOffAt = s_netP2pGoodAt = 0;
 }
 
 // What would take one console away from the others: refused online.
@@ -1823,7 +1891,11 @@ static void NetChatAdd(const char *tag, const char *text)
     }
     l = &s_netChat[s_netChatCount++];
     // A quick chat text ("@q<n>"): in this console's language.
-    if (text[0] == '@' && text[1] == 'q' && text[2] >= '0' && text[2] < '0' + QC_TEXTS && !text[3]) text = Tr(T_QC_1 + (text[2] - '0'));
+    if (text[0] == '@' && text[1] == 'q' && text[2] >= '0' && text[2] <= '9' && (!text[3] || (text[3] >= '0' && text[3] <= '9' && !text[4])))
+    {
+        const int q = atoi(text + 2);
+        if (q < QC_TEXTS) text = Tr(T_QC_1 + q);
+    }
     _snprintf(l->tag, sizeof(l->tag) - 1, "%s", tag);
     l->tag[sizeof(l->tag) - 1] = 0;
     _snprintf(l->text, sizeof(l->text) - 1, "%s", text);
@@ -1883,21 +1955,30 @@ static void NetStatus(const char *what)
 static void NetQuickChatInput(void)
 {
     const WORD b = s_padValid ? s_pad.Gamepad.wButtons : 0, down = b & ~s_qcPrev & ~(WORD)XINPUT_GAMEPAD_BACK;
-    const int cols = s_qcRow == 0 ? EMOJI_COUNT : s_qcRow <= 2 ? QC_TEXTS / 2 : 1;
+    const int cols = s_qcRow == 0 ? EMOJI_COUNT : s_qcRow <= 2 ? 4 : 1;
     s_qcPrev = b;
     if (s_qcKbd)
     {
+        const BYTE lt = s_padValid ? s_pad.Gamepad.bLeftTrigger : 0;
         if (down & XINPUT_GAMEPAD_B) { s_qcKbd = 0; xb_audio_ui_sound(XB_SFX_BACK); return; }
+        if (lt > 128 && s_qcLtWas <= 128) kbd_toggle_emoji(&s_qcKb);   // the letters or the emojis
+        s_qcLtWas = lt;
         if (kbd_input(&s_qcKb, down)) { NetChatSay(s_qcText); s_qcText[0] = 0; s_qcKbd = 0; s_qcOpen = 0; }
         return;
     }
     if (down & XINPUT_GAMEPAD_B) { s_qcOpen = 0; xb_audio_ui_sound(XB_SFX_BACK); return; }
+    if (down & (XINPUT_GAMEPAD_LEFT_SHOULDER | XINPUT_GAMEPAD_RIGHT_SHOULDER))
+    {
+        s_qcCat = (s_qcCat + ((down & XINPUT_GAMEPAD_RIGHT_SHOULDER) ? 1 : QC_CATS - 1)) % QC_CATS;
+        if (s_qcRow == 0 || s_qcRow == 3) s_qcRow = 1;   // to the texts
+        xb_audio_ui_sound(XB_SFX_TAB);
+    }
     if (down & XINPUT_GAMEPAD_DPAD_UP) s_qcRow = (s_qcRow + 3) % 4;
     if (down & XINPUT_GAMEPAD_DPAD_DOWN) s_qcRow = (s_qcRow + 1) % 4;
     if (down & XINPUT_GAMEPAD_DPAD_LEFT) s_qcCol = (s_qcCol + cols - 1) % cols;
     if (down & XINPUT_GAMEPAD_DPAD_RIGHT) s_qcCol = (s_qcCol + 1) % cols;
     {
-        const int now = s_qcRow == 0 ? EMOJI_COUNT : s_qcRow <= 2 ? QC_TEXTS / 2 : 1;
+        const int now = s_qcRow == 0 ? EMOJI_COUNT : s_qcRow <= 2 ? 4 : 1;
         if (s_qcCol >= now) s_qcCol = now - 1;
     }
     if (down & (XINPUT_GAMEPAD_DPAD_UP | XINPUT_GAMEPAD_DPAD_DOWN | XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT)) xb_audio_ui_sound(XB_SFX_MOVE);
@@ -1913,7 +1994,7 @@ static void NetQuickChatInput(void)
         else if (s_qcRow <= 2)
         {
             // Its number, not its text: each console shows it in its own language (NetChatAdd).
-            _snprintf(msg, sizeof(msg), "@q%d", (s_qcRow - 1) * (QC_TEXTS / 2) + s_qcCol);
+            _snprintf(msg, sizeof(msg), "@q%d", s_qcTab[s_qcCat][(s_qcRow - 1) * 4 + s_qcCol]);
             NetChatSay(msg);
             s_qcOpen = 0;
         }
@@ -1922,24 +2003,27 @@ static void NetQuickChatInput(void)
             s_qcText[0] = 0;
             kbd_init(&s_qcKb, s_qcText, 1, 80, KBD_CHAT);
             s_qcKbd = 1;
+            s_qcLtWas = 255;
         }
         xb_audio_ui_sound(XB_SFX_SELECT);
     }
 }
 
-// A message's text, or its emoji (a message "@e<n>"), from (x, cy): its width.
+// A message's text with its emojis (a message "@e<n>": that emoji, big), from (x, cy): its width.
 static float NetChatBody(float x, float cy, float size, const char *text, D3DCOLOR c)
 {
-    if (text[0] == '@' && text[1] == 'e' && text[2] >= '0' && text[2] <= '9')
+    float w = 0;
+    if (text[0] == '@' && text[1] == 'e' && text[2] >= '0' && text[2] <= '9' && (!text[3] || (text[3] >= '0' && text[3] <= '9' && !text[4])))
     {
         const int k = atoi(text + 2);
-        if (k >= 0 && k < EMOJI_COUNT && s_emojiTex[k])
+        if (k >= 0 && k < EMOJI_COUNT && EmojiTex(k))
         {
-            UiImage(s_emojiTex[k], x, cy - size * 0.75f, size * 1.5f, size * 1.5f, 0, D3DCOLOR_ARGB(255, 255, 255, 255));
+            UiImage(EmojiTex(k), x, cy - size * 0.75f, size * 1.5f, size * 1.5f, 0, D3DCOLOR_ARGB(255, 255, 255, 255));
             return size * 1.5f;
         }
     }
-    return UiText(UI_REGULAR, size, x, cy, c, text, UI_LEFT);
+    RichText(UI_REGULAR, size, x, cy, 900, 1, c, text, 1, &w);
+    return w;
 }
 
 // What the online play draws over the game (OverlayHook, between UiBegin and UiEnd).
@@ -1984,7 +2068,7 @@ static void NetOverlayDraw(IDirect3DDevice9 *dev)
     }
     // The quick chat: the last messages, then the emojis, the quick texts and the keyboard (or the keyboard open).
     {
-        const float w = 960, h = s_qcKbd ? 330 : 250, x = (UI_WIDTH - w) * 0.5f, y = UI_HEIGHT - h - 50, cx = x + w * 0.5f;
+        const float w = 960, h = s_qcKbd ? 350 : 292, x = (UI_WIDTH - w) * 0.5f, y = UI_HEIGHT - h - 50, cx = x + w * 0.5f;
         const int first = s_netChatCount > 5 ? s_netChatCount - 5 : 0;
         UiPanel(x, y - 200, w, 190, 18);
         for (k = first; k < s_netChatCount; k++)
@@ -1998,7 +2082,8 @@ static void NetOverlayDraw(IDirect3DDevice9 *dev)
         if (s_qcKbd)
         {
             kbd_draw_text(&s_qcKb, cx, y + 16, w - 60, 42, 20);
-            kbd_draw_keys(&s_qcKb, cx, y + 70, 42, 5);
+            kbd_draw_tabs(&s_qcKb, x + 30, y + 82);
+            kbd_draw_keys(&s_qcKb, cx, y + 104, 42, 5);
             UiScreenFooter(Tr(T_FOOT_QC_KEYS));
             return;
         }
@@ -2007,21 +2092,40 @@ static void NetOverlayDraw(IDirect3DDevice9 *dev)
             const float ex = x + 24 + k * 65, ey = y + 18;
             const int on = s_qcRow == 0 && s_qcCol == k;
             if (on) UiRoundRect(ex - 4, ey - 4, 60, 60, 12, UI_COL_SELECT, UI_COL_SELECT);
-            if (s_emojiTex[k]) UiImage(s_emojiTex[k], ex + 2, ey + 2, 48, 48, 0, D3DCOLOR_ARGB(255, 255, 255, 255));
+            if (EmojiTex(k)) UiImage(EmojiTex(k), ex + 2, ey + 2, 48, 48, 0, D3DCOLOR_ARGB(255, 255, 255, 255));
         }
-        for (k = 0; k < QC_TEXTS; k++)
         {
-            const int row = 1 + k / (QC_TEXTS / 2), col = k % (QC_TEXTS / 2), on = s_qcRow == row && s_qcCol == col;
-            const float bw = (w - 48 - 3 * 12) / 4, bx = x + 24 + col * (bw + 12), by = y + 86 + (row - 1) * 52;
+            // The texts' tabs (LB/RB), the one shown lit.
+            float tx = x + 24;
+            int t2;
+            UiRoundRect(tx, y + 86, 36, 24, 12, D3DCOLOR_ARGB(255, 60, 62, 76), D3DCOLOR_ARGB(255, 60, 62, 76));
+            UiText(UI_BOLD, 12, tx + 18, y + 98, UI_COL_TEXT2, "LB", UI_CENTER);
+            tx += 46;
+            for (t2 = 0; t2 < QC_CATS; t2++)
+            {
+                const int on = t2 == s_qcCat;
+                const float tw = UiTextWidth(on ? UI_BOLD : UI_REGULAR, 16, Tr(T_QC_CAT_1 + t2)) + 30;
+                if (on) UiRoundRect(tx, y + 83, tw, 30, 15, UI_COL_ACCENT, UI_COL_ACCENT);
+                else UiRoundRing(tx, y + 83, tw, 30, 15, 1.0f, UI_COL_LINE);
+                UiText(on ? UI_BOLD : UI_REGULAR, 16, tx + tw * 0.5f, y + 98, on ? D3DCOLOR_ARGB(255, 255, 255, 255) : UI_COL_TEXT2, Tr(T_QC_CAT_1 + t2), UI_CENTER);
+                tx += tw + 8;
+            }
+            UiRoundRect(tx + 2, y + 86, 36, 24, 12, D3DCOLOR_ARGB(255, 60, 62, 76), D3DCOLOR_ARGB(255, 60, 62, 76));
+            UiText(UI_BOLD, 12, tx + 20, y + 98, UI_COL_TEXT2, "RB", UI_CENTER);
+        }
+        for (k = 0; k < 8; k++)
+        {
+            const int row = 1 + k / 4, col = k % 4, on = s_qcRow == row && s_qcCol == col;
+            const float bw = (w - 48 - 3 * 12) / 4, bx = x + 24 + col * (bw + 12), by = y + 126 + (row - 1) * 52;
             char fit[64];
             UiRoundRect(bx, by, bw, 44, 12, on ? UI_COL_ACCENT : UI_COL_CARD, on ? UI_COL_ACCENT : UI_COL_CARD);
-            UiTextFit(UI_BOLD, 17, bw - 16, Tr(T_QC_1 + k), fit, sizeof(fit));
+            UiTextFit(UI_BOLD, 17, bw - 16, Tr(T_QC_1 + s_qcTab[s_qcCat][k]), fit, sizeof(fit));
             UiText(UI_BOLD, 17, bx + bw * 0.5f, by + 22, on ? D3DCOLOR_ARGB(255, 255, 255, 255) : UI_COL_TEXT2, fit, UI_CENTER);
         }
         {
             const int on = s_qcRow == 3;
-            UiRoundRect(cx - 130, y + 196, 260, 40, 12, on ? UI_COL_ACCENT : UI_COL_CARD, on ? UI_COL_ACCENT : UI_COL_CARD);
-            UiText(UI_BOLD, 17, cx, y + 216, on ? D3DCOLOR_ARGB(255, 255, 255, 255) : UI_COL_TEXT2, Tr(T_QC_KEYBOARD), UI_CENTER);
+            UiRoundRect(cx - 130, y + 236, 260, 40, 12, on ? UI_COL_ACCENT : UI_COL_CARD, on ? UI_COL_ACCENT : UI_COL_CARD);
+            UiText(UI_BOLD, 17, cx, y + 256, on ? D3DCOLOR_ARGB(255, 255, 255, 255) : UI_COL_TEXT2, Tr(T_QC_KEYBOARD), UI_CENTER);
         }
         UiScreenFooter(Tr(T_FOOT_QC));
     }
@@ -2926,7 +3030,24 @@ static double QpcMs(void)
 static volatile LONG s_vblanks;         // counted by the GPU's vertical blank interrupt (VBlankCallback)
 static volatile LONGLONG s_vblankAt;    // the QPC of the last one
 static LONGLONG s_vblankTicks;          // a refresh's length in QPC ticks (measured once; 0: not yet)
-static LONG s_paceVblank;               // the refresh the last frame started at
+static LONG s_paceVblank;               // the refresh the last frame started at (with a frame in reserve: the one it would have)
+
+// A frame in reserve: its picture, ready early, held on the graphics worker until the refresh before its own
+// (V-Sync then shows it at its own: a frame that took longer still makes it). 50 ms at most.
+static void PresentHold(LONG slot)
+{
+    LARGE_INTEGER freq, t0, now;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&t0);
+    while (s_vblanks - (slot - 1) < 0)
+    {
+        LONGLONG left;
+        QueryPerformanceCounter(&now);
+        if (now.QuadPart - t0.QuadPart > freq.QuadPart / 20) break;
+        left = s_vblankAt + s_vblankTicks - now.QuadPart;
+        if (left > freq.QuadPart / 500) Sleep(1);
+    }
+}
 static LONG s_rateVblank0 = -1;         // the refresh (and its QPC) the measure started from
 static LONGLONG s_rateAt0;
 
@@ -3599,8 +3720,15 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
             // picture at once (a tear on that frame) instead of waiting for the next refresh.
             // The game runs at the TV's rate (59.94 Hz for 60.1): XAudio2's rate control keeps
             // the sound in step.
-            LONG want = s_paceVblank + 1;
+            // A frame in reserve (Settings > Screen): the game runs a refresh ahead, each picture held for
+            // its own refresh (PresentHold), so one that took longer than a refresh is still shown on time.
+            // Dinosaur Planet, 12.5 ms a frame with some of 18-20 ms: each of those was shown a refresh late
+            // and the next 4 ms after it, a stutter at 60 FPS.
+            const int reserve = FrameReserveOn(c) && s_gfxQ.thread;
+            LONG want;
             int target = xb_audio_target_ms();
+            if (reserve && (s_frameSlot == 0 || s_vblanks - s_paceVblank > 2)) s_paceVblank = s_vblanks - 1;   // (re)starting, or far behind: from now
+            want = reserve ? s_paceVblank : s_paceVblank + 1;
             while (s_vblanks - want < 0)
             {
                 LONGLONG left;
@@ -3609,17 +3737,29 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
                 left = s_vblankAt + s_vblankTicks - now.QuadPart;
                 if (left > freq.QuadPart / 500) Sleep(1);   // more than 2 ms to the refresh: sleep, then spin
             }
-            s_paceVblank = s_vblanks;
+            if (reserve)
+            {
+                s_paceVblank++;
+                s_frameSlot = s_paceVblank + 1;
+                if (!s_frameSlot) s_frameSlot = 1;
+            }
+            else
+            {
+                s_paceVblank = s_vblanks;
+                s_frameSlot = 0;
+            }
             QueryPerformanceCounter(&frameStart);   // the clock's pacing goes on from here if V-Sync is turned off
             if (queued > 2 * target && target > 0)
             {
                 while (xb_audio_queued_ms() > target) Sleep(1);
                 s_paceVblank = s_vblanks;
+                if (reserve) s_frameSlot = s_paceVblank + 1;
                 QueryPerformanceCounter(&frameStart);
             }
         }
         else
         {
+            s_frameSlot = 0;
             LONGLONG frameTicks = freq.QuadPart * sys->vi.frameCycles / 93750000;
             int target = xb_audio_target_ms();
             if (queued >= 0 && target > 0)
@@ -3793,6 +3933,7 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
     s_toRoom = 0;
     if (!OnlineRoomBack()) OnlineRoomClose();   // a room this game did not take (it takes it in NetConfig) - not one given back to
     OnlinePlayed(onlineCode, onlineGame, (int)((GetTickCount() - onlineStart) / 60000));
+    PlaytimeAdd(romPath, (int)((GetTickCount() - onlineStart) / 1000));   // the ROM list's "Most played"
     if (statsOn)
     {
         // The summary; back in the ROM list after 3 minutes or more, the game's one-time vote

@@ -168,41 +168,82 @@ static u32 ss_game_id(const char *body, const char *after)
     return (u32)strtoul(p, NULL, 10);
 }
 
-// The ROM looked up on ScreenScraper: by its file name and size, else by its title. Its id (0: not found,
-// -1: no answer - no network, or ScreenScraper busy).
-static long ss_lookup(const char *romPath, const char *title, LONG seq)
+// The ROM looked up on ScreenScraper, the first of these that finds it: its file name and size; `altName`,
+// the file name the databases give it (No-Intro's: "1080 Snowboarding (Japan, USA) (En,Ja).z64" finds what
+// a GoodN64 name such as "N64 1080 Snowboarding (JU).z64" does not; NULL: none); its title; and the title's
+// parts between " - " or ":" (longest first, up to 3): ScreenScraper's search wants its own name's words in
+// a row ("Talisman of Fate" finds Xena, "Xena - Warrior Princess - The Talisman of Fate" does not).
+// Its id (0: not found, -1: no answer - no network, or ScreenScraper busy).
+static long ss_lookup(const char *romPath, const char *altName, const char *title, LONG seq)
 {
+    struct Ask { int search; char text[128]; };
+    Ask asks[6];
     char path[1024], size[16];
     const char *name = strrchr(romPath, '\\');
     WIN32_FILE_ATTRIBUTE_DATA fa;
     u8 *body = NULL;
     u32 len = 0, id = 0;
-    int status, pass;
+    int status, n = 0, i;
     name = name ? name + 1 : romPath;
     size[0] = 0;
     if (GetFileAttributesExA(romPath, GetFileExInfoStandard, &fa)) sprintf(size, "%lu", fa.nFileSizeLow);
-    for (pass = 0; pass < 2 && !id; pass++)
+    asks[n].search = 0; _snprintf(asks[n].text, sizeof(asks[n].text) - 1, "%s", name); asks[n++].text[127] = 0;
+    if (altName && altName[0] && _stricmp(altName, name))
     {
-        if (pass == 1 && (!title || !title[0])) break;
+        asks[n].search = 0; _snprintf(asks[n].text, sizeof(asks[n].text) - 1, "%s", altName); asks[n++].text[127] = 0;
+    }
+    if (title && title[0])
+    {
+        const char *p = title;
+        int first = n, k;
+        asks[n].search = 1; _snprintf(asks[n].text, sizeof(asks[n].text) - 1, "%s", title); asks[n++].text[127] = 0;
+        while (*p && n < 6)
+        {
+            // The next part: up to " - " or ':', without the spaces round it.
+            size_t len2 = 0;
+            const char *e = p;
+            while (*e && *e != ':' && !(e[0] == ' ' && e[1] == '-' && e[2] == ' ')) e++;
+            while (p < e && *p == ' ') p++;
+            len2 = e - p;
+            while (len2 && p[len2 - 1] == ' ') len2--;
+            if (len2 >= 4 && len2 < strlen(title))
+            {
+                asks[n].search = 1;
+                _snprintf(asks[n].text, sizeof(asks[n].text) - 1, "%.*s", (int)len2, p);
+                asks[n++].text[127] = 0;
+            }
+            p = *e == ':' ? e + 1 : *e ? e + 3 : e;
+        }
+        for (i = first + 2; i < n; i++)   // the parts longest first
+            for (k = i; k > first + 1 && strlen(asks[k].text) > strlen(asks[k - 1].text); k--)
+            {
+                Ask t = asks[k];
+                asks[k] = asks[k - 1];
+                asks[k - 1] = t;
+            }
+        if (n > first + 4) n = first + 4;   // the title and 3 parts at most
+    }
+    for (i = 0; i < n && !id; i++)
+    {
         if (aborted(seq) || (s_ssPauseUntil && (int)(s_ssPauseUntil - GetTickCount()) > 0)) return -1;
-        if (!ss_path(path, sizeof(path), pass ? "jeuRecherche.php" : "jeuInfos.php")) return -1;
-        if (pass == 0)
+        if (!ss_path(path, sizeof(path), asks[i].search ? "jeuRecherche.php" : "jeuInfos.php")) return -1;
+        if (!asks[i].search)
         {
             sprintf(path + strlen(path), "&systemeid=%d&romtype=rom&romnom=", SS_SYSTEM_N64);
-            url_put(path, sizeof(path), name);
-            if (size[0]) { strncat(path, "&romtaille=", sizeof(path) - strlen(path) - 1); strncat(path, size, sizeof(path) - strlen(path) - 1); }
+            url_put(path, sizeof(path), asks[i].text);
+            if (i == 0 && size[0]) { strncat(path, "&romtaille=", sizeof(path) - strlen(path) - 1); strncat(path, size, sizeof(path) - strlen(path) - 1); }
         }
         else
         {
             sprintf(path + strlen(path), "&systemeid=%d&recherche=", SS_SYSTEM_N64);
-            url_put(path, sizeof(path), title);
+            url_put(path, sizeof(path), asks[i].text);
         }
         status = NetGet(SS_HOST, path, 1, &body, &len, 2 * 1024 * 1024, NULL, 0);
         memset(path, 0, sizeof(path));
         if (!status) { free(body); return -1; }
         if (ss_busy(status)) { free(body); return -1; }
-        if (status == 200 && body) id = ss_game_id((const char *)body, pass ? "\"jeux\"" : "\"jeu\"");
-        H64_INFO("[preview] ScreenScraper %s \"%s\": HTTP %d, game %u", pass ? "search" : "file", pass ? title : name, status, id);
+        if (status == 200 && body) id = ss_game_id((const char *)body, asks[i].search ? "\"jeux\"" : "\"jeu\"");
+        H64_INFO("[preview] ScreenScraper %s \"%s\": HTTP %d, game %u", asks[i].search ? "search" : "file", asks[i].text, status, id);
         free(body);
         body = NULL;
     }
@@ -243,6 +284,59 @@ static int ss_download(u32 id, const char *out, LONG seq)
         }
         DeleteFileA(part);
         if (!status || ss_busy(status)) return 0;
+    }
+    return 0;
+}
+
+// A picture of the game from ScreenScraper into `out` (a PNG: ScreenScraper converts its JPEGs), for
+// xb_art.cpp: what the databases and libretro's thumbnails do not have (the boxes of prototypes such
+// as Dinosaur Planet and of hacks such as Smash Remix, pictures from the game, title screens, logos)
+// and the 3D boxes. `media`: its kinds, the first there is taken ("box-2D", "box-3D", "ss", "sstitle",
+// "wheel,wheel-hd"). The regions in the order they are most often there: the boxes "us", the rest "wor".
+// 1: saved, 0: none, -1: no answer (no network, ScreenScraper busy, a game started).
+int PreviewFetchMedia(const char *romPath, const char *altName, const char *title, const char *media, const char *out)
+{
+    static const char *const boxRegions[5] = { "us", "wor", "eu", "ss", "jp" };
+    static const char *const otherRegions[5] = { "wor", "us", "eu", "jp", "ss" };
+    const char *const *regions = !strncmp(media, "box", 3) ? boxRegions : otherRegions;
+    char path[512], kind[24];
+    const char *m = media;
+    long id;
+    int r;
+    if (!s_started) return -1;
+    id = ss_lookup(romPath, altName, title, -1);
+    if (id <= 0) return id < 0 ? -1 : 0;
+    while (*m)
+    {
+        size_t n = strcspn(m, ",");
+        _snprintf(kind, sizeof(kind) - 1, "%.*s", (int)n, m);
+        kind[sizeof(kind) - 1] = 0;
+        m += n + (m[n] == ',');
+        for (r = 0; r < 5; r++)
+        {
+            u8 *data = NULL;
+            u32 len = 0;
+            int status, png;
+            FILE *f;
+            if (s_stopAll || !ss_path(path, sizeof(path), "mediaJeu.php")) return -1;
+            sprintf(path + strlen(path), "&systemeid=%d&jeuid=%ld&media=%s(%s)&outputformat=png&maxwidth=640&maxheight=480", SS_SYSTEM_N64, id, kind,
+                    regions[r]);   // (no larger than the menus draw them: ScreenScraper's are up to 2000 wide)
+            status = NetGet(SS_HOST, path, 1, &data, &len, 4u << 20, NULL, 0);
+            memset(path, 0, sizeof(path));
+            png = status == 200 && data && len > 8 && !memcmp(data, "\x89PNG", 4);   // else a text: no such media
+            H64_INFO("[preview] %s %s of game %ld: HTTP %d, %u bytes%s", kind, regions[r], id, status, len, png ? "" : " (not a PNG)");
+            if (png && (f = fopen(out, "wb")) != NULL)
+            {
+                int ok = fwrite(data, 1, len, f) == len;
+                ok = fclose(f) == 0 && ok;
+                free(data);
+                if (ok) return 1;
+                DeleteFileA(out);
+                return -1;
+            }
+            free(data);
+            if (!status || ss_busy(status)) return -1;
+        }
     }
     return 0;
 }
@@ -305,7 +399,7 @@ static int video_get(const char *romPath, const char *title, char *file, size_t 
     CreateDirectoryA(dir, NULL);
     if (id <= 0)
     {
-        id = ss_lookup(romPath, title, seq);
+        id = ss_lookup(romPath, NULL, title, seq);
         if (id < 0) return 0;   // no answer: asked again next time
         if (!id)
         {
@@ -584,6 +678,9 @@ static void feed_stop(PvFeed *f)
     DeleteCriticalSection(&f->lock);
 }
 
+static volatile LONG s_rounds;   // the rounds the video playing now has finished
+int PreviewRounds(void) { return s_rounds; }
+
 // Plays `file` round and round while the list wants it.
 static void play(const char *file, const char *romPath, LONG seq)
 {
@@ -606,6 +703,7 @@ static void play(const char *file, const char *romPath, LONG seq)
     memset(&feed, 0, sizeof(feed));
     sound = s_sound && sound_open(v, &snd);
     if (sound && !feed_start(&feed, v, &snd)) { sound_close(&snd); sound = 0; }
+    InterlockedExchange(&s_rounds, 0);
     rate = VideoRate1000(v);
     frameMs = rate ? 1000000.0 / rate : 1000.0 / 30.0;
     QueryPerformanceFrequency(&freq);
@@ -672,6 +770,7 @@ static void play(const char *file, const char *romPath, LONG seq)
             }
             frame = 0;
             videoEnded = 0;
+            InterlockedIncrement(&s_rounds);
             VideoRewind(v);
             continue;
         }
@@ -960,9 +1059,12 @@ void PreviewWant(const char *romPath, const char *title)
     if (!s_started) return;
     if (!romPath) romPath = "";
     if (!title) title = "";
-    if (romPath[0] && s_stopAll)
+    if (s_stopAll)
     {
-        // The list is back after PreviewStop: the bulk pass goes on too.
+        // The list is back after PreviewStop: the bulk pass goes on too, and xb_art.cpp's pictures
+        // (PreviewFetchMedia) - also in a view that wants no video (the cartridges': a NULL each frame;
+        // waiting for a game's path there left every ScreenScraper lookup "no answer" after a game).
+        // PreviewStop asks for NULL before it stops all, so its stop holds.
         InterlockedExchange(&s_bulkCancel, 0);
         InterlockedExchange(&s_stopAll, 0);
     }

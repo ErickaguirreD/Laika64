@@ -24,6 +24,8 @@ void PreviewWant(const char *romPath, const char *title);
 // romPath's video picture now, as a texture to draw over (w x h); NULL while there is none.
 // *since: UiTime() when its first picture came (its fade-in). Every frame from the list's thread.
 IDirect3DTexture9 *PreviewTexture(IDirect3DDevice9 *dev, const char *romPath, int *w, int *h, float *since);
+// How many times the video playing now has reached its end (0 in its first round).
+int PreviewRounds(void);
 // The user's own ScreenScraper account (Settings > Game images; "" user: none, the anonymous access).
 // Its check runs on the thread: the status is PREVIEW_ACCOUNT_CHECKING until it answers, then OK (with
 // its level, download speed in KB/s and requests today / per day, as ScreenScraper says them), BAD (the
@@ -37,6 +39,11 @@ int PreviewAccountStatus(char *level, char *speed, char *today, char *maxDay);  
 // downloads on); the list is copied. Status: how far it is; 1 while it goes on.
 void PreviewBulkStart(const char *const *paths, int count);
 int PreviewBulkStatus(int *done, int *total);
+// A picture of the game from ScreenScraper (`media`: its kinds, the first there is taken: "box-2D",
+// "box-3D", "ss", "sstitle", "wheel,wheel-hd") into `out` (a PNG; from xb_art.cpp's thread), the game
+// found by its file, `altName` (the databases' file name for it, or NULL) or `title`.
+// 1: saved, 0: none, -1: no answer.
+int PreviewFetchMedia(const char *romPath, const char *altName, const char *title, const char *media, const char *out);
 // Stops the video and frees its memory (before a game), waiting for the thread; the textures too.
 // The bulk pass waits until the list is back (PreviewWant of a game).
 void PreviewStop(IDirect3DDevice9 *dev);

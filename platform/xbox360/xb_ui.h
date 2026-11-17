@@ -47,6 +47,9 @@ enum { UI_LEFT = 0, UI_CENTER = 1, UI_RIGHT = 2 };
 void UiBegin(IDirect3DDevice9 *dev);
 // Draws what is batched; leaves blending off.
 void UiEnd(void);
+// Shows a menu's frame on the TV's next refresh (V-Sync: no tearing while the covers move), the device's
+// present interval put back after it (a game's own V-Sync setting untouched), at most about 60 a second.
+void UiPresent(IDirect3DDevice9 *dev);
 // Seconds since the first UI call (animations).
 float UiTime(void);
 // The menus' font (Settings > Interface > Font): 0 Inter, then the others of
@@ -88,6 +91,11 @@ void UiSetPanelStyle(D3DCOLOR edge, float edgeWidth, int bodyPercent, float roun
 float UiPanelRadius(float r);
 // What is drawn next scaled by k around (cx, cy); k = 1: as it is again.
 void UiSetScale(float cx, float cy, float k);
+// What is drawn next moved by (dx, dy) and its alpha multiplied by `fade` (0..1): a part of a screen coming in or
+// going out. UiSetShift(0, 0, 1): as it is again.
+void UiSetShift(float dx, float dy, float fade);
+// Drawn over every interface frame, last (in UiEnd): the online notices' cards wherever the menus are.
+void UiSetEndHook(void (*hook)(void));
 // The panels' body colour: a dark tint of (r, g, b); r < 0: the interface's own.
 void UiSetPanelColor(int r, int g, int b);
 // `c` with its alpha multiplied by `a` (0..1): fades.
