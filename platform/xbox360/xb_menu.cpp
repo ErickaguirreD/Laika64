@@ -5121,6 +5121,28 @@ static void rumble_motors(int pct)
     v.wLeftMotorSpeed = (WORD)(0xC000 * pct / 100);
     v.wRightMotorSpeed = (WORD)(0x6000 * pct / 100);
     for (i = 0; i < 4; i++) XInputSetState(i, &v);
+    RumbleForget();
+}
+
+// An online notice's pulse of the controllers, stopped NOTE_BUZZ_MS later by note_buzz_tick (every screen's end
+// hook, global_notes). The ROM list stopped its own pulse in its loop: a game started before then left the pads
+// vibrating for good.
+#define NOTE_BUZZ_MS 220
+static DWORD s_noteBuzzAt;
+
+static void note_buzz(void)
+{
+    rumble_motors(55);
+    s_noteBuzzAt = GetTickCount() | 1;
+}
+
+static void note_buzz_tick(void)
+{
+    if (s_noteBuzzAt && GetTickCount() - s_noteBuzzAt > NOTE_BUZZ_MS)
+    {
+        rumble_motors(0);
+        s_noteBuzzAt = 0;
+    }
 }
 
 static void rumble_values(UiMenu *m, const Config *c)
@@ -11712,6 +11734,14 @@ static void online_avatar(float cx, float cy, float r, int avatar, const char *t
     }
 }
 
+// A player's avatar over the game (main.cpp's online players): the pictures made at its first one (the menus
+// free them when they close theirs).
+void OnlineGameAvatar(float cx, float cy, float r, int avatar, const char *tag)
+{
+    if (!s_avatarTex[0] && UiDevice()) online_avatars_load(UiDevice());
+    online_avatar(cx, cy, r, avatar, tag);
+}
+
 // The avatar chosen from all of them in a grid: the D-pad moves, A takes it (its number), B leaves (-1).
 // RB pressed 7 times adds the LAIKA team's avatar after the others (and picks it); a player who has it
 // sees it there from the start.
@@ -11721,6 +11751,9 @@ static void online_avatar(float cx, float cy, float r, int avatar, const char *t
 static const char *s_onlineScreen = "";
 static unsigned s_onlineFrame;
 static float s_onlineAt = -10.0f;
+static void arrive_under(void);   // the way into online play ending in its first screen (online_intro)
+static void arrive_over(void);
+
 static void online_begin(IDirect3DDevice9 *dev, const char *screen)
 {
     const unsigned frame = UiFrameCount();
@@ -11730,6 +11763,7 @@ static void online_begin(IDirect3DDevice9 *dev, const char *screen)
     s_onlineDrawing = 1;
     s_onlineRectN = 0;
     UiBegin(dev);
+    arrive_under();
 }
 
 // The entrance, over the screen just drawn: the loading window (online_busy's) first, then its border
@@ -11738,6 +11772,7 @@ static void online_begin(IDirect3DDevice9 *dev, const char *screen)
 static void online_end(void)
 {
     const float t = UiTime() - s_onlineAt;
+    arrive_over();
     if (t >= 0.0f && t < 0.5f)
     {
         const float veil = t < 0.25f ? 0.9f : 0.9f * (1.0f - ease_out((t - 0.25f) / 0.2f));
@@ -14382,8 +14417,9 @@ static const char *const s_telegramQr[29] = {
 
 
 // ---- The online intro: down a tunnel of data, the LAIKA 64 ONLINE logo coming out of it ----
-// Every time online play opens: 4.2 s (A, B or START cut it short), the menus' music stopped meanwhile and its
-// own sound (xb_audio_online_intro, timed to it). The tunnel is drawn here: its wall in sectors and slices in
+// Every time online play opens: 4 s down the tunnel and out into its light (A, B or START go straight out), the
+// first screen coming out of that light (s_arrive), the menus' music stopped meanwhile and its own sound
+// (xb_audio_online_intro, timed to it), the controllers vibrating with it. The tunnel is drawn here: its wall in sectors and slices in
 // perspective, each sector a lane of words and numbers (xb_tunnel_data.h) flowing at its own speed, rings and
 // lines over it, packets of light racing out; its far end swings, so it bends. The logo comes from the far end
 // and lands in front at 2.2 s with a flash.
@@ -14397,11 +14433,13 @@ static const char *const s_telegramQr[29] = {
 #define TUN_FAR (TUN_NEAR + TUN_SLICES * TUN_SLICE)
 #define TUN_FOCAL 330.0f     // pixels for a radius 1 at depth 1
 #define TUN_PACKETS 56
-#define INTRO_TOTAL 4.2f
+#define INTRO_EXIT 3.0f      // the way out begins: the logo flying past, the tunnel's end coming
+#define INTRO_LIGHT 1.0f     // ... until its light fills the screen (the sound's swell and chord)
 #define INTRO_LANDS 2.2f     // the logo in front (the sound's thump)
 #define INTRO_LOGO_H 180.0f
 #define OUTRO_TOTAL 1.6f
 #define OUTRO_OUT 1.15f      // out of the tunnel: its end's light fills the screen (the sound's swell)
+#define ARRIVE_TOTAL 0.6f    // online play's first screen coming out of the light
 
 struct TunPacket { float ang, z, speed, len; D3DCOLOR col; };
 
@@ -14459,152 +14497,284 @@ static void tun_packet(TunPacket *p, unsigned *seed, int anywhere)
     p->col = cols[tun_rand(seed) % 8];
 }
 
-// leaving: the way out when online play closes (1.6 s): already at full speed, the logo flying past, the
-// tunnel's end coming closer as a disc of light until it fills the screen, then fading to the menus.
-static void online_intro(IDirect3DDevice9 *dev, int leaving = 0)
+// The tunnel's state: its packets of light, each sector's lane of data and speed, the data's picture.
+struct Tunnel
 {
     TunPacket packets[TUN_PACKETS];
-    float speedOf[TUN_SECTORS], last, end = leaving ? OUTRO_TOTAL : INTRO_TOTAL;
-    int laneOf[TUN_SECTORS], i, k, s;
-    unsigned seed = GetTickCount() | 1;
-    IDirect3DTexture9 *data = NULL;
-    const float start = UiTime();
-    UiInput in;
-    {
-        int w = 0, h = 0;
-        u8 *rgba = h64_png_decode(s_tunnelDataPng, sizeof(s_tunnelDataPng), &w, &h, 1024 * 1024);
-        if (rgba) { data = UiImageCreate(dev, rgba, w, h); free(rgba); }
-    }
+    float speedOf[TUN_SECTORS];
+    int laneOf[TUN_SECTORS];
+    unsigned seed;
+    IDirect3DTexture9 *data;
+};
+
+static void tun_open(IDirect3DDevice9 *dev, Tunnel *tn)
+{
+    int w = 0, h = 0, i;
+    u8 *rgba = h64_png_decode(s_tunnelDataPng, sizeof(s_tunnelDataPng), &w, &h, 1024 * 1024);
+    tn->seed = GetTickCount() | 1;
+    tn->data = NULL;
+    if (rgba) { tn->data = UiImageCreate(dev, rgba, w, h); free(rgba); }
     for (i = 0; i < TUN_SECTORS; i++)
     {
-        laneOf[i] = (i * 5) % TUNNEL_DATA_LANES;
-        speedOf[i] = 0.85f + (tun_rand(&seed) % 100) / 160.0f;   // each lane of data flows at its own speed
+        tn->laneOf[i] = (i * 5) % TUNNEL_DATA_LANES;
+        tn->speedOf[i] = 0.85f + (tun_rand(&tn->seed) % 100) / 160.0f;   // each lane of data flows at its own speed
     }
-    for (i = 0; i < TUN_PACKETS; i++) tun_packet(&packets[i], &seed, 1);
+    for (i = 0; i < TUN_PACKETS; i++) tun_packet(&tn->packets[i], &tn->seed, 1);
+}
+
+static void tun_close(IDirect3DDevice9 *dev, Tunnel *tn)
+{
+    if (tn->data) UiImageRelease(dev, tn->data);
+    tn->data = NULL;
+}
+
+// The way out: the tunnel's end at `out` (0 at its far end, 1 past the viewer: its light fills the screen).
+static float tun_exit_depth(float out)
+{
+    return TUN_NEAR * 0.7f + (TUN_FAR + 0.3f - TUN_NEAR * 0.7f) * (1.0f - out * out * out);
+}
+
+// The tunnel at `t` (its bend and turn), gone `dist` along at `speed` (dt since the last frame); its light times
+// `fade`. exit: nothing drawn past depth zx, where its end is a disc of light; else the far end's glow.
+static void tun_draw(Tunnel *tn, float t, float dt, float dist, float speed, int exit, float zx, float fade)
+{
+    const float rot = t * 0.22f;
+    float vx, vy, xy[8];
+    int i, k, s;
+    if (exit)
+    {
+        // The way out: a disc of light as wide as the tunnel at depth zx, behind the wall still before it.
+        tun_centre(zx, t, &vx, &vy);
+        UiCircle(vx, vy, TUN_FOCAL / zx, D3DCOLOR_ARGB((int)(fade * 255), 225, 245, 255));
+        UiCircle(vx, vy, TUN_FOCAL / zx * 0.6f, D3DCOLOR_ARGB((int)(fade * 255), 255, 255, 255));
+    }
+    else
+    {
+        // The far end's glow.
+        tun_centre(TUN_FAR, t, &vx, &vy);
+        for (k = 6; k >= 1; k--) UiCircle(vx, vy, 18.0f + k * k * 9.0f, D3DCOLOR_ARGB((int)(fade * (10 + 4 * (6 - k))), 40, 150, 255));
+        UiCircle(vx, vy, 10, D3DCOLOR_ARGB((int)(fade * 140), 200, 240, 255));
+    }
+    // The wall's data, far to near: each sector's lane in slices, eight slices a lane's length.
+    if (tn->data)
+    {
+        UiQuadsBegin(tn->data);
+        for (k = TUN_SLICES - 1; k >= 0; k--)
+            for (i = 0; i < TUN_SECTORS; i++)
+            {
+                const float phase = dist * tn->speedOf[i] / TUN_SLICE, z0 = TUN_NEAR + (k - tun_frac(phase)) * TUN_SLICE;
+                const int cell = (k + (int)floorf(phase) + i * 3) & 7;
+                const float a0 = rot + i * 6.2831853f / TUN_SECTORS, a1 = a0 + 6.2831853f / TUN_SECTORS;
+                const float v0 = tn->laneOf[i] / (float)TUNNEL_DATA_LANES, v1 = (tn->laneOf[i] + 1) / (float)TUNNEL_DATA_LANES;
+                for (s = 0; s < TUN_SUB; s++)
+                {
+                    float za = z0 + TUN_SLICE * s / TUN_SUB, zb = z0 + TUN_SLICE * (s + 1) / TUN_SUB, ua, ub, light;
+                    if (zb <= TUN_NEAR || za >= zx) continue;
+                    if (za < TUN_NEAR) za = TUN_NEAR;
+                    if (zb > zx) zb = zx;
+                    ua = (cell + (za - z0) / TUN_SLICE) / 8.0f;
+                    ub = (cell + (zb - z0) / TUN_SLICE) / 8.0f;
+                    light = tun_light((za + zb) * 0.5f) * fade;
+                    if (light < 0.02f) continue;
+                    tun_point(a0, za, t, &xy[0], &xy[1]);
+                    tun_point(a0, zb, t, &xy[2], &xy[3]);
+                    tun_point(a1, za, t, &xy[4], &xy[5]);
+                    tun_point(a1, zb, t, &xy[6], &xy[7]);
+                    UiQuadsAdd(xy, ua, v0, ub, v1, D3DCOLOR_ARGB((int)(225 * light), 70, 220, 255));
+                }
+            }
+        UiQuadsEnd();
+    }
+    {
+        // The rings (one a slice, every third one brighter) and the lines along the tunnel.
+        const float phase = dist / TUN_SLICE, lineFar = zx < TUN_FAR ? zx : TUN_FAR;
+        float ring[49 * 2];
+        for (k = TUN_SLICES - 1; k >= 0; k--)
+        {
+            const float z = TUN_NEAR + (k - tun_frac(phase)) * TUN_SLICE, light = tun_light(z) * fade;
+            const int bright = ((k + (int)floorf(phase)) % 3) == 0;
+            float thick;
+            if (z < 0.3f || z > zx || light < 0.02f) continue;
+            for (i = 0; i <= 48; i++) tun_point(rot + i * 6.2831853f / 48, z, t, &ring[i * 2], &ring[i * 2 + 1]);
+            thick = (bright ? 5.0f : 2.5f) / z;
+            if (thick < 1.0f) thick = 1.0f;
+            if (thick > 9.0f) thick = 9.0f;
+            UiPolyline(ring, 49, thick, 1.5f, D3DCOLOR_ARGB((int)(light * (bright ? 230 : 90)), 210, 245, 255));
+        }
+        for (i = 0; i < TUN_SECTORS && lineFar > 0.35f; i++)
+        {
+            float line[8 * 2];
+            for (k = 0; k < 8; k++) tun_point(rot + i * 6.2831853f / TUN_SECTORS, 0.3f + k * (lineFar - 0.3f) / 7, t, &line[k * 2], &line[k * 2 + 1]);
+            UiPolyline(line, 8, 1.5f, 1.0f, D3DCOLOR_ARGB((int)(fade * 45), 120, 200, 255));
+        }
+    }
+    // The packets of light, racing out of the tunnel (faster as it speeds up).
+    for (i = 0; i < TUN_PACKETS; i++)
+    {
+        TunPacket *p = &tn->packets[i];
+        float x0, y0, x1, y1, thick, light;
+        p->z -= p->speed * dt * speed * 0.25f;
+        if (p->z < TUN_NEAR + 0.08f) { tun_packet(p, &tn->seed, 0); continue; }
+        light = tun_light(p->z) * fade;
+        if (p->z > TUN_FAR || p->z + p->len > zx || light < 0.02f) continue;
+        tun_point(rot + p->ang, p->z, t, &x0, &y0);
+        tun_point(rot + p->ang, p->z + p->len, t, &x1, &y1);
+        thick = 3.5f / p->z;
+        if (thick < 1.2f) thick = 1.2f;
+        if (thick > 7.0f) thick = 7.0f;
+        UiLine(x1, y1, x0, y0, thick, UiAlpha(p->col, light * 0.9f));
+        UiCircle(x0, y0, thick * 0.9f, UiAlpha(D3DCOLOR_ARGB(255, 255, 255, 255), light));
+    }
+}
+
+// The controllers' motors following the tunnel: `level` 0-1 of Settings > Controls > Rumble's strength (0: off),
+// sent only when it changes.
+static int s_tunRumbleSent = -1;
+static void tun_rumble(int strength, float level)
+{
+    int pct = (int)(strength * (level < 0 ? 0 : level > 1 ? 1 : level) + 0.5f);
+    if (pct == s_tunRumbleSent) return;
+    rumble_motors(pct);
+    s_tunRumbleSent = pct;
+}
+
+// The way in ends in Online play's first screen (its arrival): out of the tunnel's light, the screen at its full
+// size coming forward a little while the light lifts off it, the controllers' last pulse. Drawn by online_begin
+// (the screen scaled) and online_end (the light over it).
+static struct
+{
+    int on;
+    float at;       // when the light filled the screen
+    int rumble;
+    int drawing;    // online_begin drew it this frame (online_end goes on)
+} s_arrive;
+
+static void arrive_end(void)
+{
+    if (!s_arrive.on) return;
+    s_arrive.on = 0;
+    s_arrive.drawing = 0;
+    tun_rumble(s_arrive.rumble, 0);
+    s_tunRumbleSent = -1;
+    UiSetOuter(1.0f, 0, 0, 1.0f);
+    xb_audio_music_pause(0);
+}
+
+// Every screen's end (global_notes): the screen is not scaled any more (online_end may not have run: another
+// screen), and the arrival ends on time even if no online screen draws it.
+static void arrive_frame_end(void)
+{
+    UiSetOuter(1.0f, 0, 0, 1.0f);
+    s_arrive.drawing = 0;
+    if (s_arrive.on && UiTime() - s_arrive.at >= ARRIVE_TOTAL) arrive_end();
+}
+
+// online_begin, after UiBegin: the screen a little bigger, settling to its size.
+static void arrive_under(void)
+{
+    const float te = UiTime() - s_arrive.at;
+    UiSetOuter(1.0f, 0, 0, 1.0f);
+    s_arrive.drawing = 0;
+    if (!s_arrive.on) return;
+    if (te >= ARRIVE_TOTAL) { arrive_end(); return; }
+    s_arrive.drawing = 1;
+    s_onlineAt = UiTime() - 10.0f;   // (no entrance of its own: it comes out of the tunnel)
+    UiSetOuter(1.0f + 0.07f * (1.0f - wiz_ease(te / ARRIVE_TOTAL)), 0, 0, 1.0f);
+    // The controllers: the last pulse, out into the light.
+    tun_rumble(s_arrive.rumble, te < 0.16f ? 1.0f : 0.0f);
+}
+
+// online_end: the tunnel's light lifting off the screen.
+static void arrive_over(void)
+{
+    float te;
+    if (!s_arrive.drawing) return;
+    s_arrive.drawing = 0;
+    te = UiTime() - s_arrive.at;
+    UiSetOuter(1.0f, 0, 0, 1.0f);
+    UiRect(0, 0, UI_WIDTH, UI_HEIGHT, D3DCOLOR_ARGB((int)(255 * (1.0f - wiz_ease(te / ARRIVE_TOTAL))), 235, 248, 255));
+}
+
+// leaving: the way out when online play closes (1.6 s): already at full speed, the logo flying past, the
+// tunnel's end coming closer as a disc of light until it fills the screen, then fading to the menus.
+// Else the way in, in one go with its sound: speeding up, the logo landing (INTRO_LANDS) and floating, then from
+// INTRO_EXIT (sooner when A, B or START cut it short) the logo flying past and the tunnel's end coming as a disc of
+// light until it fills the screen (INTRO_LIGHT later); online play's first screen comes out of that light
+// (s_arrive). The controllers vibrate along (rumble: Settings > Controls > Rumble's strength, 0 none).
+static void online_intro(IDirect3DDevice9 *dev, int leaving = 0, int rumble = 0)
+{
+    Tunnel tn;
+    float last, exitAt = leaving ? 0.0f : INTRO_EXIT, end = leaving ? OUTRO_TOTAL : INTRO_EXIT + INTRO_LIGHT;
+    const float start = UiTime();
+    UiInput in;
+    arrive_end();
+    tun_open(dev, &tn);
     xb_audio_music_pause(1);
     xb_audio_online_intro(leaving ? 2 : 1);
     UiInputInit(&in);
     last = 0;
+    s_tunRumbleSent = -1;
     for (;;)
     {
         const float t = UiTime() - start, dt = t - last > 0.1f ? 0.1f : t - last;
         const WORD down = UiInputPoll(&in);
-        const float fade = leaving ? (t < 0.15f ? wiz_ease(t / 0.15f) : 1.0f)
-                                   : (t < 0.35f ? wiz_ease(t / 0.35f) : 1.0f) * (t > end - 0.45f ? 1.0f - wiz_ease((t - (end - 0.45f)) / 0.45f) : 1.0f);
-        const float rot = t * 0.22f;
-        // Leaving: at full speed and quickening; the tunnel's end (depth zx) coming in, nothing drawn past it.
-        const float dist = leaving ? 6.0f * t + 3.0f * t * t : tun_dist(t), speed = leaving ? 6.0f + 6.0f * t : tun_speed(t);
-        const float out = leaving ? (t < OUTRO_OUT ? t / OUTRO_OUT : 1.0f) : 0.0f;
-        const float zx = leaving ? TUN_NEAR * 0.7f + (TUN_FAR + 0.3f - TUN_NEAR * 0.7f) * (1.0f - out * out * out) : TUN_FAR + 10.0f;
-        float vx, vy, xy[8];
-        last = t;
+        float fade, dist, speed, out, zx, te;
         if (t >= end) break;
-        if ((down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_START)) && t > 0.3f && end > t + 0.45f && !leaving)
+        if ((down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_START)) && t > 0.3f && t < exitAt && !leaving)
         {
-            end = t + 0.45f;   // cut short: a quick fade
-            xb_audio_online_intro(0);
+            // Cut short: out of the tunnel at once (its sound with it).
+            exitAt = t;
+            end = t + INTRO_LIGHT;
+            xb_audio_online_intro(2);
+        }
+        te = t - exitAt;   // into the way out (leaving: all of it)
+        fade = leaving ? (t < 0.15f ? wiz_ease(t / 0.15f) : 1.0f) : (t < 0.35f ? wiz_ease(t / 0.35f) : 1.0f);
+        // The way out: at full speed and quickening; the tunnel's end (depth zx) coming in, nothing drawn past it.
+        dist = leaving ? 6.0f * t + 3.0f * t * t : tun_dist(t) + (te > 0 ? 3.0f * te * te : 0.0f);
+        speed = leaving ? 6.0f + 6.0f * t : tun_speed(t) + (te > 0 ? 6.0f * te : 0.0f);
+        out = te <= 0 ? 0.0f : leaving ? (te < OUTRO_OUT ? te / OUTRO_OUT : 1.0f) : (te < INTRO_LIGHT ? te / INTRO_LIGHT : 1.0f);
+        zx = te > 0 || leaving ? tun_exit_depth(out) : TUN_FAR + 10.0f;
+        last = t;
+        if (!leaving)
+        {
+            // The controllers: humming up with the speed, a thump as the logo lands, a hum while it floats, then
+            // harder and harder towards the light.
+            const float since = t - INTRO_LANDS;
+            tun_rumble(rumble, te > 0 ? 0.3f + 0.7f * out * out : since < 0 ? 0.1f + 0.3f * t / INTRO_LANDS : since < 0.16f ? 1.0f : 0.2f + 0.05f * sinf(since * 9.0f));
         }
         dev->Clear(0, NULL, D3DCLEAR_TARGET, D3DCOLOR_ARGB(255, 2, 6, 12), 1.0f, 0);
         UiBegin(dev);
-        if (leaving)
+        tun_draw(&tn, t, dt, dist, speed, te > 0 || leaving, zx, fade);
+        if (te > 0 || leaving)
         {
-            // The way out: a disc of light as wide as the tunnel at depth zx, behind the wall still before it.
-            tun_centre(zx, t, &vx, &vy);
-            UiCircle(vx, vy, TUN_FOCAL / zx, D3DCOLOR_ARGB((int)(fade * 255), 225, 245, 255));
-            UiCircle(vx, vy, TUN_FOCAL / zx * 0.6f, D3DCOLOR_ARGB((int)(fade * 255), 255, 255, 255));
-        }
-        else
-        {
-            // The far end's glow.
-            tun_centre(TUN_FAR, t, &vx, &vy);
-            for (k = 6; k >= 1; k--) UiCircle(vx, vy, 18.0f + k * k * 9.0f, D3DCOLOR_ARGB((int)(fade * (10 + 4 * (6 - k))), 40, 150, 255));
-            UiCircle(vx, vy, 10, D3DCOLOR_ARGB((int)(fade * 140), 200, 240, 255));
-        }
-        // The wall's data, far to near: each sector's lane in slices, eight slices a lane's length.
-        if (data)
-        {
-            UiQuadsBegin(data);
-            for (k = TUN_SLICES - 1; k >= 0; k--)
-                for (i = 0; i < TUN_SECTORS; i++)
+            // The logo where it floated, flying past (bigger, fading) in 0.5 s ...
+            if (te < 0.5f)
+            {
+                const float e = te / 0.5f, h = INTRO_LOGO_H * (1.0f + 3.0f * e * e);
+                float lx = UI_WIDTH * 0.5f, ly = UI_HEIGHT * 0.5f;
+                if (!leaving && t > INTRO_LANDS)
                 {
-                    const float phase = dist * speedOf[i] / TUN_SLICE, z0 = TUN_NEAR + (k - tun_frac(phase)) * TUN_SLICE;
-                    const int cell = (k + (int)floorf(phase) + i * 3) & 7;
-                    const float a0 = rot + i * 6.2831853f / TUN_SECTORS, a1 = a0 + 6.2831853f / TUN_SECTORS;
-                    const float v0 = laneOf[i] / (float)TUNNEL_DATA_LANES, v1 = (laneOf[i] + 1) / (float)TUNNEL_DATA_LANES;
-                    for (s = 0; s < TUN_SUB; s++)
-                    {
-                        float za = z0 + TUN_SLICE * s / TUN_SUB, zb = z0 + TUN_SLICE * (s + 1) / TUN_SUB, ua, ub, light;
-                        if (zb <= TUN_NEAR || za >= zx) continue;
-                        if (za < TUN_NEAR) za = TUN_NEAR;
-                        if (zb > zx) zb = zx;
-                        ua = (cell + (za - z0) / TUN_SLICE) / 8.0f;
-                        ub = (cell + (zb - z0) / TUN_SLICE) / 8.0f;
-                        light = tun_light((za + zb) * 0.5f) * fade;
-                        if (light < 0.02f) continue;
-                        tun_point(a0, za, t, &xy[0], &xy[1]);
-                        tun_point(a0, zb, t, &xy[2], &xy[3]);
-                        tun_point(a1, za, t, &xy[4], &xy[5]);
-                        tun_point(a1, zb, t, &xy[6], &xy[7]);
-                        UiQuadsAdd(xy, ua, v0, ub, v1, D3DCOLOR_ARGB((int)(225 * light), 70, 220, 255));
-                    }
+                    tun_centre(1.0f, t, &lx, &ly);
+                    ly += 3.0f * sinf((t - INTRO_LANDS) * 2.2f);
                 }
-            UiQuadsEnd();
-        }
-        {
-            // The rings (one a slice, every third one brighter) and the lines along the tunnel.
-            const float phase = dist / TUN_SLICE, lineFar = zx < TUN_FAR ? zx : TUN_FAR;
-            float ring[49 * 2];
-            for (k = TUN_SLICES - 1; k >= 0; k--)
-            {
-                const float z = TUN_NEAR + (k - tun_frac(phase)) * TUN_SLICE, light = tun_light(z) * fade;
-                const int bright = ((k + (int)floorf(phase)) % 3) == 0;
-                float thick;
-                if (z < 0.3f || z > zx || light < 0.02f) continue;
-                for (i = 0; i <= 48; i++) tun_point(rot + i * 6.2831853f / 48, z, t, &ring[i * 2], &ring[i * 2 + 1]);
-                thick = (bright ? 5.0f : 2.5f) / z;
-                if (thick < 1.0f) thick = 1.0f;
-                if (thick > 9.0f) thick = 9.0f;
-                UiPolyline(ring, 49, thick, 1.5f, D3DCOLOR_ARGB((int)(light * (bright ? 230 : 90)), 210, 245, 255));
+                UiOnlineLogo(lx, ly, h * (t > INTRO_LANDS || leaving ? 1.0f : 0.5f), 1.0f - e);
             }
-            for (i = 0; i < TUN_SECTORS && lineFar > 0.35f; i++)
+            if (leaving)
             {
-                float line[8 * 2];
-                for (k = 0; k < 8; k++) tun_point(rot + i * 6.2831853f / TUN_SECTORS, 0.3f + k * (lineFar - 0.3f) / 7, t, &line[k * 2], &line[k * 2 + 1]);
-                UiPolyline(line, 8, 1.5f, 1.0f, D3DCOLOR_ARGB((int)(fade * 45), 120, 200, 255));
+                // ... then, out of the tunnel, the light filling the screen and fading to the menus.
+                if (t > OUTRO_OUT - 0.25f)
+                {
+                    const float w = t < OUTRO_OUT ? (t - (OUTRO_OUT - 0.25f)) / 0.25f : 1.0f;
+                    const float dark = t > OUTRO_OUT ? wiz_ease((t - OUTRO_OUT) / (OUTRO_TOTAL - OUTRO_OUT)) : 0.0f;
+                    UiRect(0, 0, UI_WIDTH, UI_HEIGHT, D3DCOLOR_ARGB((int)(255 * w), (int)(235 * (1 - dark) + 2 * dark),
+                                                                    (int)(248 * (1 - dark) + 6 * dark), (int)(255 * (1 - dark) + 12 * dark)));
+                }
             }
-        }
-        // The packets of light, racing out of the tunnel (faster as it speeds up).
-        for (i = 0; i < TUN_PACKETS; i++)
-        {
-            TunPacket *p = &packets[i];
-            float x0, y0, x1, y1, thick, light;
-            p->z -= p->speed * dt * speed * 0.25f;
-            if (p->z < TUN_NEAR + 0.08f) { tun_packet(p, &seed, 0); continue; }
-            light = tun_light(p->z) * fade;
-            if (p->z > TUN_FAR || p->z + p->len > zx || light < 0.02f) continue;
-            tun_point(rot + p->ang, p->z, t, &x0, &y0);
-            tun_point(rot + p->ang, p->z + p->len, t, &x1, &y1);
-            thick = 3.5f / p->z;
-            if (thick < 1.2f) thick = 1.2f;
-            if (thick > 7.0f) thick = 7.0f;
-            UiLine(x1, y1, x0, y0, thick, UiAlpha(p->col, light * 0.9f));
-            UiCircle(x0, y0, thick * 0.9f, UiAlpha(D3DCOLOR_ARGB(255, 255, 255, 255), light));
-        }
-        if (leaving)
-        {
-            // The logo in front where the way in left it, flying past (bigger, fading) in 0.5 s; then, out of the
-            // tunnel, the light filling the screen and fading to the menus.
-            if (t < 0.5f)
+            else if (te > INTRO_LIGHT - 0.3f)
             {
-                const float e = t / 0.5f, h = INTRO_LOGO_H * (1.0f + 3.0f * e * e);
-                UiOnlineLogo(UI_WIDTH * 0.5f, UI_HEIGHT * 0.5f, h, 1.0f - e);
-            }
-            if (t > OUTRO_OUT - 0.25f)
-            {
-                const float w = t < OUTRO_OUT ? (t - (OUTRO_OUT - 0.25f)) / 0.25f : 1.0f;
-                const float dark = t > OUTRO_OUT ? wiz_ease((t - OUTRO_OUT) / (OUTRO_TOTAL - OUTRO_OUT)) : 0.0f;
-                UiRect(0, 0, UI_WIDTH, UI_HEIGHT, D3DCOLOR_ARGB((int)(255 * w), (int)(235 * (1 - dark) + 2 * dark),
-                                                                (int)(248 * (1 - dark) + 6 * dark), (int)(255 * (1 - dark) + 12 * dark)));
+                // ... then the light filling the screen: online play's first screen comes out of it.
+                const float w = (te - (INTRO_LIGHT - 0.3f)) / 0.3f;
+                UiRect(0, 0, UI_WIDTH, UI_HEIGHT, D3DCOLOR_ARGB((int)(255 * (w > 1 ? 1 : w)), 235, 248, 255));
             }
         }
         else if (t > 0.9f)
@@ -14635,9 +14805,19 @@ static void online_intro(IDirect3DDevice9 *dev, int leaving = 0)
         dev->Present(NULL, NULL, NULL, NULL);
         Sleep(8);
     }
-    if (data) UiImageRelease(dev, data);
-    xb_audio_music_pause(0);
+    tun_close(dev, &tn);
+    if (leaving)
+    {
+        xb_audio_music_pause(0);
+        return;
+    }
+    // Out into the light: online play's first screen comes out of it (the music back when it has).
+    s_arrive.at = UiTime();
+    s_arrive.rumble = rumble;
+    s_arrive.drawing = 0;
+    s_arrive.on = 1;
 }
+
 
 // Settings > Online play: the list of what it has, the general chat beside it to read (written in Play
 // online), read again every few seconds; the player's profile in the top right corner. 1 when a game starts.
@@ -14960,9 +15140,10 @@ static int online_hub(IDirect3DDevice9 *dev, Config *c)
             }
         }
     }
-    online_intro(dev);
-    online_avatars_load(dev);
+    online_avatars_load(dev);   // (before the tunnel: its way out goes on in the hub's first frames)
+    online_intro(dev, 0, c->rumble);
     r = online_hub_run(dev, c);
+    arrive_end();
     online_avatars_free(dev);
     room_covers_free(dev);
     if (!r) online_intro(dev, 1);   // back to the menus: out of the tunnel (a game starting goes straight in)
@@ -18485,9 +18666,11 @@ static void music_volume_stick(Config *c, const char *settingsPath)
 }   // Config::notify, as the ROM list last read it (8: the controllers' pulse)
 static char s_gNoteText[256];
 static int s_gNoteKind;
-static DWORD s_gNoteAt, s_gNoteBuzz;
+static DWORD s_gNoteAt;
 static void global_notes(void)
 {
+    note_buzz_tick();   // (first: a screen with its own notices returns below)
+    arrive_frame_end();
     if (s_rsOwned) s_rsOwned = 0;   // a page using the right stick itself (Controls, calibration): no volume there
     else if (s_browser && s_hookCfg)
     {
@@ -18511,10 +18694,9 @@ static void global_notes(void)
             s_gNoteKind = kind;
             s_gNoteAt = GetTickCount() | 1;
             xb_audio_ui_sound(XB_SFX_NOTIFY);
-            if (s_noteBits & 8) { rumble_motors(55); s_gNoteBuzz = s_gNoteAt; }
+            if (s_noteBits & 8) note_buzz();
         }
     }
-    if (s_gNoteBuzz && GetTickCount() - s_gNoteBuzz > 220) { rumble_motors(0); s_gNoteBuzz = 0; }
     if (s_gNoteAt) notify_card(s_gNoteText, s_gNoteKind, GetTickCount() - s_gNoteAt);
 }
 
@@ -18601,7 +18783,7 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
     const int rows = 13;
     char newVersion[32], msg[256], drive[16];
     DWORD msgAt = 0, demoAt = GetTickCount(), idleAt = GetTickCount();
-    DWORD noteAt = 0, noteBuzzAt = 0;   // the online notice shown (notify_card) and the controllers' pulse with it
+    DWORD noteAt = 0;   // the online notice shown (notify_card); its controllers' pulse: note_buzz
     char noteText[200] = "", noteVersion[32] = "";   // (the version of an update card)
     int noteKind = 0;
     float selAt = 0;
@@ -18876,11 +19058,10 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
                     noteKind = kind;
                     noteAt = GetTickCount() | 1;
                     xb_audio_ui_sound(XB_SFX_NOTIFY);
-                    if (c->notify & 8) { rumble_motors(55); noteBuzzAt = noteAt; }
+                    if (c->notify & 8) note_buzz();
                 }
             }
         }
-        if (noteBuzzAt && GetTickCount() - noteBuzzAt > 220) { rumble_motors(0); noteBuzzAt = 0; }
         if (UpdateCheckTake(newVersion, sizeof(newVersion)))
         {
             // A newer LAIKA 64: its card (Y installs it) - it used to ask at once, over whatever was being done.
@@ -18891,7 +19072,7 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
             noteKind = NOTE_UPDATE;
             noteAt = GetTickCount() | 1;
             xb_audio_ui_sound(XB_SFX_NOTIFY);
-            if (c->notify & 8) { rumble_motors(55); noteBuzzAt = noteAt; }
+            if (c->notify & 8) note_buzz();
         }
         if (noteAt && noteKind >= NOTE_UPDATE && GetTickCount() - noteAt < NOTE_ACT_MS && (down & XINPUT_GAMEPAD_Y))
         {

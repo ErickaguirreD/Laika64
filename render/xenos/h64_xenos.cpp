@@ -2780,7 +2780,14 @@ static void set_depth(Xenos *x, int hasDepth)
 static void set_alpha_test(Xenos *x, int hires)
 {
     const H64RdpState *st = x->st;
-    if ((st->rasterFlags & RS_ALPHA_TEST) && hires && (st->blendColor & 0xFF) < HD_ALPHA_REF)
+    // Alpha from coverage (ALPHA_CVG_SELECT) without coverage times alpha: the RDP compares the
+    // coverage, full inside a triangle, not the combiner's alpha - nothing is dropped. Army Men:
+    // Air Combat draws its ground so (anti-aliased opaque surface, alpha compare on) with palette
+    // texels of alpha 0: all of it was dropped, a black ground under the units. Copy mode
+    // compares the texel's alpha whatever these bits say.
+    if ((st->rasterFlags & (RS_ALPHA_CVG_SELECT | RS_CVG_TIMES_ALPHA | RS_COPY)) == RS_ALPHA_CVG_SELECT)
+        x->dev->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+    else if ((st->rasterFlags & RS_ALPHA_TEST) && hires && (st->blendColor & 0xFF) < HD_ALPHA_REF)
     {
         x->dev->SetRenderState(D3DRS_ALPHATESTENABLE, TRUE);
         x->dev->SetRenderState(D3DRS_ALPHAFUNC, D3DCMP_GREATEREQUAL);

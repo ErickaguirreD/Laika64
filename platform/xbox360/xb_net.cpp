@@ -1,6 +1,7 @@
 // Harissa64 - HTTPS downloads from the console (see xb_net.h).
 #include <xtl.h>
 #include <winsockx.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -702,7 +703,28 @@ struct NetWs
     u8 in[NET_WS_BUF];   // what arrived and is not a whole message yet
     int inLen;
     int dead;
+    char why[96];        // why it ended (NetWsWhy): a game lost its room and nothing said why
 };
+
+// The connection over, and why (the first reason kept).
+static int ws_fail(NetWs *w, const char *fmt, ...)
+{
+    if (!w->why[0])
+    {
+        va_list ap;
+        va_start(ap, fmt);
+        _vsnprintf(w->why, sizeof(w->why) - 1, fmt, ap);
+        va_end(ap);
+        w->why[sizeof(w->why) - 1] = 0;
+    }
+    w->dead = 1;
+    return -1;
+}
+
+const char *NetWsWhy(const NetWs *w)
+{
+    return w && w->why[0] ? w->why : "?";
+}
 
 static int ws_wait(SOCKET s, int write, int ms)
 {
@@ -728,14 +750,14 @@ static int ws_pump(NetWs *w, int ms)
         size_t len;
         unsigned char *buf;
         int n;
-        if (st == BR_SSL_CLOSED) return -1;
+        if (st == BR_SSL_CLOSED) return ws_fail(w, "TLS closed (error %d)", br_ssl_engine_last_error(eng));
         if (st & BR_SSL_SENDREC)
         {
             buf = br_ssl_engine_sendrec_buf(eng, &len);
             n = send(w->s, (const char *)buf, (int)len, 0);
             if (n > 0) { br_ssl_engine_sendrec_ack(eng, n); continue; }
             if (n < 0 && WSAGetLastError() == WSAEWOULDBLOCK && ws_wait(w->s, 1, NET_TIMEOUT_MS)) continue;
-            return -1;
+            return ws_fail(w, n < 0 ? "send failed (socket error %d)" : "send blocked for %d ms", n < 0 ? WSAGetLastError() : NET_TIMEOUT_MS);
         }
         if (st & BR_SSL_RECVAPP) return 1;
         if (st & BR_SSL_RECVREC)
@@ -743,7 +765,8 @@ static int ws_pump(NetWs *w, int ms)
             buf = br_ssl_engine_recvrec_buf(eng, &len);
             n = recv(w->s, (char *)buf, (int)len, 0);
             if (n > 0) { br_ssl_engine_recvrec_ack(eng, n); continue; }
-            if (n == 0 || WSAGetLastError() != WSAEWOULDBLOCK) return -1;
+            if (n == 0) return ws_fail(w, "the server closed the socket");
+            if (WSAGetLastError() != WSAEWOULDBLOCK) return ws_fail(w, "receive failed (socket error %d)", WSAGetLastError());
             n = ms - (int)(GetTickCount() - t0);
             if (n <= 0 || !ws_wait(w->s, 0, n)) return 0;
             continue;
@@ -765,7 +788,8 @@ static int ws_write(NetWs *w, const void *data, int len)
         if (!(br_ssl_engine_current_state(eng) & BR_SSL_SENDAPP))
         {
             // The handshake is not over yet (or the engine is full): its records go on, a little at a time.
-            if (GetTickCount() - t0 > NET_TIMEOUT_MS || ws_pump(w, 20) < 0) return 0;
+            if (GetTickCount() - t0 > NET_TIMEOUT_MS) { ws_fail(w, "the TLS engine took nothing for %d ms", NET_TIMEOUT_MS); return 0; }
+            if (ws_pump(w, 20) < 0) return 0;
             continue;
         }
         buf = br_ssl_engine_sendapp_buf(eng, &room);
@@ -925,7 +949,7 @@ fail:
 int NetWsSend(NetWs *w, const void *data, int len, int text)
 {
     if (!w || w->dead) return 0;
-    if (!ws_frame(w, text ? 1 : 2, data, len)) { w->dead = 1; return 0; }
+    if (!ws_frame(w, text ? 1 : 2, data, len)) { ws_fail(w, "a message of %d bytes not sent", len); return 0; }
     return 1;
 }
 
@@ -946,13 +970,23 @@ int NetWsRecv(NetWs *w, void *buf, int max, int ms, int *text)
                 if (w->inLen < 4) len = -1;
                 else { len = (w->in[2] << 8) | w->in[3]; head = 4; }
             }
-            else if (len == 127) { w->dead = 1; return -1; }   // 64-bit lengths: never ours
-            if (len >= 0 && (masked || !fin || head + len > NET_WS_BUF)) { w->dead = 1; return -1; }
+            else if (len == 127) return ws_fail(w, "a message with a 64-bit length");   // never ours
+            if (len >= 0 && masked) return ws_fail(w, "a masked message (opcode %d)", opcode);
+            if (len >= 0 && !fin) return ws_fail(w, "a message in pieces (opcode %d)", opcode);
+            if (len >= 0 && head + len > NET_WS_BUF) return ws_fail(w, "a message of %d bytes (opcode %d), more than %d", len, opcode, NET_WS_BUF - head);
             if (len >= 0 && w->inLen >= head + len)
             {
                 const u8 *payload = w->in + head;
                 int out = -2;
-                if (opcode == 8) { w->dead = 1; return -1; }   // the server closed
+                if (opcode == 8)
+                {
+                    // The server closed: its code and reason.
+                    char reason[64];
+                    int rl = len > 2 ? (len - 2 < (int)sizeof(reason) - 1 ? len - 2 : (int)sizeof(reason) - 1) : 0;
+                    memcpy(reason, payload + 2, rl);
+                    reason[rl] = 0;
+                    return ws_fail(w, "the server closed it (code %d \"%s\")", len >= 2 ? (payload[0] << 8) | payload[1] : 0, reason);
+                }
                 if (opcode == 9) ws_frame(w, 10, payload, len < 125 ? len : 125);   // ping: pong
                 else if (opcode == 1 || opcode == 2)
                 {
@@ -968,7 +1002,7 @@ int NetWsRecv(NetWs *w, void *buf, int max, int ms, int *text)
         }
         left = ms - (int)(GetTickCount() - t0);
         r = ws_pump(w, left > 0 ? left : 0);
-        if (r < 0) { w->dead = 1; return -1; }
+        if (r < 0) return ws_fail(w, "?");   // (ws_pump said why)
         if (r > 0) { ws_take(w); continue; }
         return 0;
     }

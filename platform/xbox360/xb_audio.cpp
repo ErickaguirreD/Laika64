@@ -1177,9 +1177,13 @@ void xb_audio_ui_sound_instead(int kind) { sfx_play(kind, 1); }
 // ---- The online intro's sound (xb_menu.cpp online_intro): data going down a line ----
 // Made here as the interface sounds are (sfx_tone, in the glass style whatever the one chosen), 4.3 s timed to
 // the tunnel: a rush of noise opening up and a carrier humming higher as it speeds up, short beeps of data
-// quicker and quicker, then at 2.2 s (the logo in front) a low thump and a bright chord ringing out.
-#define INTRO_MS 4300
+// quicker and quicker, then at 2.2 s (the logo in front) a low thump and a bright chord ringing out; from 3 s
+// (the way out) the rush swelling again with beeps racing by, to 4 s (into the light: online play's screen) and
+// a soft chord there.
+#define INTRO_MS 4900
 #define INTRO_LANDS 2.2f
+#define INTRO_EXIT 3.0f
+#define INTRO_LIGHT 4.0f
 static IXAudio2SourceVoice *s_introVoice;
 static s16 *s_introPcm;
 
@@ -1214,6 +1218,12 @@ static u32 intro_make(void)
         lp1 += a1 * (n - lp1);
         lp2 += a2 * (n - lp2);
         env = ti < INTRO_LANDS ? 0.05f + 0.25f * open * open : 0.30f * expf(-(ti - INTRO_LANDS) / 0.35f);
+        if (ti > INTRO_EXIT)
+        {
+            // The way out: swelling into the light, then breathing out.
+            const float e = (ti - INTRO_EXIT) / (INTRO_LIGHT - INTRO_EXIT);
+            env += ti < INTRO_LIGHT ? 0.34f * e * e : 0.34f * expf(-(ti - INTRO_LIGHT) / 0.2f);
+        }
         mix[i] += (lp1 - lp2) * env * 1.6f;
         // The carrier: 55 Hz rising to 110, pulsing eight times a second.
         hum += pi2 * (55.0f + 55.0f * open) / SFX_RATE;
@@ -1237,6 +1247,17 @@ static u32 intro_make(void)
     sfx_tone(mix, len, INTRO_LANDS * 1000.0f + 60, 1840, 1568.0f, 1568.0f, 0.12f, 4, 750);
     sfx_tone(mix, len, INTRO_LANDS * 1000.0f + 90, 1500, 2093.0f, 2093.0f, 0.06f, 4, 600);
     sfx_tone(mix, len, INTRO_LANDS * 1000.0f + 90, 1200, 4186.0f, 4180.0f, 0.02f, 4, 400);
+    for (t = INTRO_EXIT + 0.03f; t < INTRO_LIGHT;)
+    {
+        // The way out's beeps, racing by.
+        const float d = 0.010f + (intro_rand(&seed) % 15) / 1000.0f, f = notes[intro_rand(&seed) % 8], e = (t - INTRO_EXIT) / (INTRO_LIGHT - INTRO_EXIT);
+        sfx_tone(mix, len, t * 1000.0f, d * 1000.0f, f, f * 1.08f, 0.04f + 0.05f * e, 0.8f, d * 600.0f);
+        t += d + (0.05f - 0.03f * e) * (0.5f + (intro_rand(&seed) % 100) / 100.0f);
+    }
+    // Into the light: a soft chord (G5 C6 E6).
+    sfx_tone(mix, len, INTRO_LIGHT * 1000.0f, 700, 784.0f, 784.0f, 0.08f, 4, 500);
+    sfx_tone(mix, len, INTRO_LIGHT * 1000.0f + 25, 680, 1046.5f, 1046.5f, 0.07f, 4, 500);
+    sfx_tone(mix, len, INTRO_LIGHT * 1000.0f + 50, 660, 1318.5f, 1318.5f, 0.06f, 4, 500);
     s_sfxStyle = keepStyle;
     s_introPcm = (s16 *)malloc(len * sizeof(s16));
     if (s_introPcm)

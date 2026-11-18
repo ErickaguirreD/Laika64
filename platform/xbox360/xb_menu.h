@@ -167,6 +167,11 @@ const char *SkinName(int i);   // i: 0..SkinCount()-1, just the folder name (als
 // (said again after a few minutes while it stays low), else 0.
 int BatteryCheck(const Config *c, char *msg, int size);
 
+// ---- Rumble ----
+// main.cpp: the menus set the controllers' motors themselves; the game's Rumble Pak sends its own again next frame.
+void RumbleForget(void);
+void OnlineGameAvatar(float cx, float cy, float r, int avatar, const char *tag);   // between UiBegin and UiEnd
+
 // ---- ROM browser ----
 // Lists game:\roms\ (.z64 .n64 .v64 .zip). Returns 1 with the chosen path, 0 when
 // the user leaves to the dashboard. Y opens the settings for all games,

@@ -57,6 +57,8 @@ int NetWsSend(NetWs *w, const void *data, int len, int text = 0);
 // The next message into `buf` (at most `max` bytes of it): its length; 0 when none came within `ms`
 // (0: do not wait); -1 when the connection is over. *text (may be NULL): 1 for a text message.
 int NetWsRecv(NetWs *w, void *buf, int max, int ms, int *text);
+// Why the connection is over (a socket error, the server's close and its code, a message refused): for the log.
+const char *NetWsWhy(const NetWs *w);
 void NetWsClose(NetWs *w);
 
 #endif

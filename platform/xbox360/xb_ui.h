@@ -94,6 +94,9 @@ void UiSetScale(float cx, float cy, float k);
 // What is drawn next moved by (dx, dy) and its alpha multiplied by `fade` (0..1): a part of a screen coming in or
 // going out. UiSetShift(0, 0, 1): as it is again.
 void UiSetShift(float dx, float dy, float fade);
+// A whole screen scaled by k around the screen's centre, then moved by (dx, dy), its alpha times `fade`: on top of
+// UiSetScale and UiSetShift (the screen's own, which it may reset while drawing). UiSetOuter(1, 0, 0, 1): none.
+void UiSetOuter(float k, float dx, float dy, float fade);
 // Drawn over every interface frame, last (in UiEnd): the online notices' cards wherever the menus are.
 void UiSetEndHook(void (*hook)(void));
 // The panels' body colour: a dark tint of (r, g, b); r < 0: the interface's own.

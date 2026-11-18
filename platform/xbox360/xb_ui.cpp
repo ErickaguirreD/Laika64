@@ -372,6 +372,15 @@ void UiEnd(void)
 // their look (their edges are worked out in their own units).
 static float s_scaleX, s_scaleY, s_scaleK = 1.0f;
 static float s_shiftX, s_shiftY, s_fade = 1.0f;
+static float s_outerK = 1.0f, s_outerX, s_outerY, s_outerFade = 1.0f;
+
+void UiSetOuter(float k, float dx, float dy, float fade)
+{
+    s_outerK = k > 0.0f ? k : 1.0f;
+    s_outerX = dx;
+    s_outerY = dy;
+    s_outerFade = fade < 0.0f ? 0.0f : fade > 1.0f ? 1.0f : fade;
+}
 
 void UiSetShift(float dx, float dy, float fade)
 {
@@ -397,6 +406,12 @@ static void vtx(UiVtx *v, float x, float y, D3DCOLOR c, float t0, float t1, floa
     x += s_shiftX;
     y += s_shiftY;
     if (s_fade < 1.0f) c = (c & 0x00FFFFFFu) | ((D3DCOLOR)((c >> 24) * s_fade) << 24);
+    if (s_outerK != 1.0f || s_outerX != 0.0f || s_outerY != 0.0f)
+    {
+        x = UI_WIDTH * 0.5f + (x - UI_WIDTH * 0.5f) * s_outerK + s_outerX;
+        y = UI_HEIGHT * 0.5f + (y - UI_HEIGHT * 0.5f) * s_outerK + s_outerY;
+    }
+    if (s_outerFade < 1.0f) c = (c & 0x00FFFFFFu) | ((D3DCOLOR)((c >> 24) * s_outerFade) << 24);
     v->x = x * (2.0f / UI_WIDTH) - 1.0f;
     v->y = 1.0f - y * (2.0f / UI_HEIGHT);
     v->color = c;
