@@ -7,7 +7,7 @@
 
 #include "xb_config.h"
 
-#define UI_MENU_MAX 17
+#define UI_MENU_MAX 20
 
 struct UiMenu
 {
@@ -27,7 +27,7 @@ enum { UI_ICON_NONE = 0, UI_ICON_SYSTEM, UI_ICON_GRAPHICS, UI_ICON_SCREEN, UI_IC
        UI_ICON_SMOOTH, UI_ICON_SHARP, UI_ICON_BLUR, UI_ICON_CHART, UI_ICON_STRETCH, UI_ICON_CROSSHAIR, UI_ICON_SUN,
        UI_ICON_VSYNC, UI_ICON_EYE, UI_ICON_SCANLINES, UI_ICON_FRAME, UI_ICON_ARROWS_H, UI_ICON_ARROWS_V, UI_ICON_CLOCK,
        UI_ICON_PALETTE, UI_ICON_GLOBE, UI_ICON_LAYOUT, UI_ICON_MUSIC, UI_ICON_SPEAKERS, UI_ICON_PLUS, UI_ICON_TRASH, UI_ICON_INFO,
-       UI_ICON_FRIENDS, UI_ICON_CHAT, UI_ICON_PERSON, UI_ICON_PLANE, UI_ICON_HEART };
+       UI_ICON_FRIENDS, UI_ICON_CHAT, UI_ICON_PERSON, UI_ICON_PLANE, UI_ICON_HEART, UI_ICON_TROPHY };
 // Sets the icons of a menu's rows in order (n of them, from row 0).
 void UiMenuIcons(UiMenu *m, const unsigned char *icons, int n);
 
@@ -55,6 +55,28 @@ void UiMenuPress(void);
 // A yes/no question over what is drawn (the in-game menu's): `title` (T_*, -1:
 // none), the question and its prompts, centred. Between UiBegin and UiEnd.
 void UiConfirmDraw(int title, int question, int footer);
+// A game's pause menu (main.cpp): leaving to the dashboard asked by Laika, angry, as in the main menu. Called each
+// frame with `open` while the question is up (her pictures loaded as it opens, freed once it closes).
+void UiQuitLaikaDraw(IDirect3DDevice9 *dev, int open);
+// A game's pause menu's Back to online (its online game ended: the player put out, the connection lost): the ROM
+// list, as the game ends, opens Online play.
+void UiRequestOnline(void);
+// The online players' avatars and countries' flags, for a game's pause menu (its Players online page): loaded as it
+// opens, freed as it closes. UiOnlineFlag: the flag of a country's code at x (its middle at cy, h high), its width.
+void UiOnlinePicsLoad(IDirect3DDevice9 *dev);
+// The menus' icons (UI_ICON_*), and the selection's colour as the player chose it (dark 0: its light one).
+void UiIcon(int icon, float cx, float cy, D3DCOLOR c);
+// The panels' border glow as the player chose it (Interface > Borders), round a panel about to be drawn (UiPanel).
+void UiEdgeGlow(float x, float y, float w, float h, float r);
+// The game running, for Settings' pages in it (their side bar's header): its box (or picture), its name, a hack.
+void UiSetGameHeader(IDirect3DTexture9 *tex, int w, int h, const char *title, int hack);
+// The Settings page's row `i`: what its section holds now; what a row (by its label) is for ("": nothing said).
+const char *UiSettingsSub(int i);
+const char *UiRowDesc(const char *label);
+D3DCOLOR UiSelColor(int dark, int alpha);
+void UiOnlinePicsFree(IDirect3DDevice9 *dev);
+void UiOnlineAvatar(float cx, float cy, float r, int avatar, const char *tag);
+float UiOnlineFlag(float x, float cy, float h, const char *country);
 
 // ---- Settings (cpu, hle, audio margin, FPS display, the Graphics and Controls pages) ----
 enum { SET_NONE = 0, SET_CHANGED, SET_BACK, SET_SAVE_ALL, SET_SAVE_GAME, SET_ART_ASK, SET_LANGUAGE, SET_PREVIEW, SET_SAVER, SET_WIZARD, SET_PICK_PATH, SET_EXPLORER, SET_ABOUT,
@@ -177,6 +199,9 @@ void OnlineGameAvatar(float cx, float cy, float r, int avatar, const char *tag);
 // the user leaves to the dashboard. Y opens the settings for all games,
 // saved to `settingsPath` (also where the last selection is kept).
 int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char *path, size_t pathSize);
+// A game played: its time (seconds), once more, online or not - the detailed view's "Your activity" (playtime.txt
+// beside settingsPath). Under 10 seconds: not counted (it did not start).
+void PlayStatsAdd(const char *settingsPath, const char *romPath, int seconds, int online);
 
 // ---- The on-screen keyboard (the online play's names, codes and chats; main.cpp's quick chat) ----
 // The D-pad moves over the keys, A types, X deletes, Y changes the case (RB a space in a message);

@@ -89,11 +89,18 @@ void UiPanel(float x, float y, float w, float h, float r);
 void UiSetPanelStyle(D3DCOLOR edge, float edgeWidth, int bodyPercent, float roundness);
 // A panel's corner radius `r` as the panels are drawn now.
 float UiPanelRadius(float r);
+// The panels' style as set (UiSetPanelStyle): the body's alpha (0..255), the border's width and colour.
+int UiPanelAlpha(void);
+float UiPanelEdgeWidth(void);
+D3DCOLOR UiPanelEdgeColor(void);
 // What is drawn next scaled by k around (cx, cy); k = 1: as it is again.
 void UiSetScale(float cx, float cy, float k);
 // What is drawn next moved by (dx, dy) and its alpha multiplied by `fade` (0..1): a part of a screen coming in or
 // going out. UiSetShift(0, 0, 1): as it is again.
 void UiSetShift(float dx, float dy, float fade);
+void UiClip(float x, float y, float w, float h);
+void UiFade(float seconds);   // the next frames come out of black over `seconds` (a screen's change)
+void UiFadeFrom(float seconds, float from);   // ... from a veil `from` dark (0 to 1): softer   // only inside that box from now on (w or h 0: everywhere)
 // A whole screen scaled by k around the screen's centre, then moved by (dx, dy), its alpha times `fade`: on top of
 // UiSetScale and UiSetShift (the screen's own, which it may reset while drawing). UiSetOuter(1, 0, 0, 1): none.
 void UiSetOuter(float k, float dx, float dy, float fade);
@@ -214,6 +221,7 @@ void UiImageQuad(IDirect3DTexture9 *tex, const float *xy, float u0, float v0, fl
 // Many quads of one picture sent together: Begin, Add each (as UiImageQuad), End. Nothing else is drawn between.
 void UiQuadsBegin(IDirect3DTexture9 *tex);
 void UiQuadsAdd(const float *xy, float u0, float v0, float u1, float v1, D3DCOLOR color);
+void UiTrisAdd(const float *xy, const float *uv, D3DCOLOR color);   // a triangle: xy[6] on screen, uv[6] in the picture
 void UiQuadsEnd(void);
 // Part (u0..u1, v0..v1, 0..1) of a picture stretched over (x, y, w, h).
 void UiImagePart(IDirect3DTexture9 *tex, float x, float y, float w, float h, float u0, float v0, float u1, float v1, D3DCOLOR color);

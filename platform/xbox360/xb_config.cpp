@@ -58,6 +58,9 @@ void ConfigDefaults(Config *c)
     c->rom[0] = 0;
     c->lastRom[0] = 0;
     c->lastVersion[0] = 0;
+    c->updateSeen[0] = 0;
+    c->startScreen = 0;
+    c->showNews = 1;
     c->showFps = 0;
     c->perfItems = 0;
     c->perfPos = 2;
@@ -101,7 +104,7 @@ void ConfigDefaults(Config *c)
     c->langPick = 0;
     c->rumble = 100;
     c->padLoss = PADLOSS_OFF;
-    c->autoSaveSlot = 9;
+    c->autoSaveSlot = CONFIG_STATE_SLOTS;   // the last slot
     c->batteryWarn = 0;
     c->uiSounds = 1;
     c->startRomMode = 0;
@@ -129,7 +132,6 @@ void ConfigDefaults(Config *c)
     c->panelColor = 0;
     c->intro = 1;
     c->statsShare = -1;
-    c->settingsView = 1;   // big icons
     c->brightLevel = -1;
     c->sharpLevel = c->blurLevel = -1;
     c->panelRound = 2;
@@ -232,12 +234,14 @@ int ConfigParseFile(Config *c, const char *path)
         if (!strcmp(line, "videobg")) c->videoBackdrop = atoi(eq + 1) < 0 ? 0 : atoi(eq + 1) > 2 ? 2 : atoi(eq + 1);   // 2: without its sound
         if (!strcmp(line, "hidehints")) c->hideHints = atoi(eq + 1) ? 1 : 0;
         if (!strcmp(line, "notify")) c->notify = atoi(eq + 1) & 15;
+        if (!strcmp(line, "updseen")) { strncpy(c->updateSeen, eq + 1, sizeof(c->updateSeen) - 1); c->updateSeen[sizeof(c->updateSeen) - 1] = 0; }
         if (!strcmp(line, "ssuser")) { strncpy(c->ssUser, eq + 1, sizeof(c->ssUser) - 1); c->ssUser[sizeof(c->ssUser) - 1] = 0; }
         if (!strcmp(line, "sspass")) { strncpy(c->ssPass, eq + 1, sizeof(c->ssPass) - 1); c->ssPass[sizeof(c->ssPass) - 1] = 0; }
         if (!strcmp(line, "panelcolor")) c->panelColor = atoi(eq + 1);
         if (!strcmp(line, "intro")) c->intro = atoi(eq + 1);
+        if (!strcmp(line, "startscreen")) c->startScreen = atoi(eq + 1);
+        if (!strcmp(line, "shownews")) c->showNews = atoi(eq + 1);
         if (!strcmp(line, "statsshare")) c->statsShare = atoi(eq + 1) > 0 ? 1 : atoi(eq + 1) < 0 ? -1 : 0;
-        if (!strcmp(line, "setview")) c->settingsView = atoi(eq + 1);
         if (!strcmp(line, "brightlevel")) c->brightLevel = atoi(eq + 1);
         if (!strcmp(line, "sharplevel")) c->sharpLevel = atoi(eq + 1);
         if (!strcmp(line, "blurlevel")) c->blurLevel = atoi(eq + 1);
@@ -265,8 +269,7 @@ int ConfigParseFile(Config *c, const char *path)
         else if (!strcmp(line, "cpu")) { strncpy(c->cpu, eq + 1, sizeof(c->cpu) - 1); c->cpu[sizeof(c->cpu) - 1] = 0; }
         else if (!strcmp(line, "rom")) { strncpy(c->rom, eq + 1, sizeof(c->rom) - 1); c->rom[sizeof(c->rom) - 1] = 0; }
         else if (!strcmp(line, "lastrom")) { strncpy(c->lastRom, eq + 1, sizeof(c->lastRom) - 1); c->lastRom[sizeof(c->lastRom) - 1] = 0; }
-        else if (!strcmp(line, "lastver")) { strncpy(c->lastVersion, eq + 1, sizeof(c->lastVersion) - 1); c->lastVersion[sizeof(c->lastVersion) - 1] = 0; }
-        else if (!strcmp(line, "showfps"))
+        else if (!strcmp(line, "lastver")) { strncpy(c->lastVersion, eq + 1, sizeof(c->lastVersion) - 1); c->lastVersion[sizeof(c->lastVersion) - 1] = 0; }        else if (!strcmp(line, "showfps"))
         {
             // The old levels as items (a perfitems= further on wins).
             static const int levels[5] = { 0, CONFIG_PERF_FPS, CONFIG_PERF_FPS | CONFIG_PERF_CPU | CONFIG_PERF_RAM,
@@ -369,7 +372,7 @@ int ConfigParseFile(Config *c, const char *path)
         else if (!strcmp(line, "autosaveslot"))
         {
             int v = atoi(eq + 1);
-            if (v >= 1 && v <= 9) c->autoSaveSlot = v;
+            if (v >= 1 && v <= CONFIG_STATE_SLOTS) c->autoSaveSlot = v;
         }
         else if (!strcmp(line, "uisounds")) c->uiSounds = atoi(eq + 1) ? 1 : 0;
         else if (!strcmp(line, "startrommode"))
@@ -494,7 +497,7 @@ int ConfigWriteMenuKeys(const Config *c, const char *path, int withLastRom)
             c->shotBtn2 >= 0 ? h64_padmap_source_name(c->shotBtn2) : "none");
     fprintf(f, "zoom=%d\nposx=%d\nposy=%d\nrumble=%d\n", c->zoom, c->offsetX, c->offsetY, c->rumble);
     fprintf(f, "devmode=%d\ngfxlog=%d\ntexr3=%d\n", c->devMode, c->gfxLog, c->texR3);
-    fprintf(f, "setview=%d\n", c->settingsView);
+    fprintf(f, "startscreen=%d\nshownews=%d\n", c->startScreen, c->showNews);
     fprintf(f, "panelcolor=%d\nintro=%d\nbrightlevel=%d\nsharplevel=%d\nblurlevel=%d\n", c->panelColor, c->intro, c->brightLevel,
             c->sharpLevel, c->blurLevel);
     fprintf(f, "hk_save=%X\nhk_load=%X\nhk_slotprev=%X\nhk_slotnext=%X\nhk_shot=%X\n", c->hotkey[HK_SAVE], c->hotkey[HK_LOAD],
@@ -561,14 +564,18 @@ int ConfigWriteMenuKeys(const Config *c, const char *path, int withLastRom)
     }
     if (withLastRom && c->lastRom[0]) fprintf(f, "lastrom=%s\n", c->lastRom);
     if (c->lastVersion[0]) fprintf(f, "lastver=%s\n", c->lastVersion);
+    if (c->updateSeen[0]) fprintf(f, "updseen=%s\n", c->updateSeen);
     if (withLastRom && c->lang[0]) fprintf(f, "lang=%s\n", c->lang);
     fclose(f);
     return 1;
 }
 
-int ConfigWriteLang(const char *path, const char *code)
+int ConfigWriteLang(const char *path, const char *code) { return ConfigWriteKey(path, "lang", code); }
+
+int ConfigWriteKey(const char *path, const char *key, const char *value)
 {
-    static char in[16384], out[16384 + 64];
+    static char in[16384], out[16384 + 300];
+    const size_t klen = strlen(key);
     size_t len = 0, used = 0, pos = 0;
     int found = 0;
     FILE *f = fopen(path, "rb");
@@ -580,13 +587,13 @@ int ConfigWriteLang(const char *path, const char *code)
     }
     while (pos < len)
     {
-        // One line (with its end of line, if any): copied, or replaced when it is lang=.
+        // One line (with its end of line, if any): copied, or replaced when it is key=.
         size_t end = pos;
         while (end < len && in[end] != '\n') end++;
         if (end < len) end++;
-        if (end - pos >= 5 && !memcmp(in + pos, "lang=", 5))
+        if (end - pos > klen && !memcmp(in + pos, key, klen) && in[pos + klen] == '=')
         {
-            if (!found) used += sprintf(out + used, "lang=%s\n", code);
+            if (!found) used += _snprintf(out + used, 280, "%s=%s\n", key, value);
             found = 1;
         }
         else
@@ -597,7 +604,7 @@ int ConfigWriteLang(const char *path, const char *code)
         }
         pos = end;
     }
-    if (!found) used += sprintf(out + used, "lang=%s\n", code);
+    if (!found) used += _snprintf(out + used, 280, "%s=%s\n", key, value);
     f = fopen(path, "wb");
     if (!f) return 0;
     if (fwrite(out, 1, used, f) != used) { fclose(f); return 0; }

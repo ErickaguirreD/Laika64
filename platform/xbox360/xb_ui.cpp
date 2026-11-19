@@ -340,6 +340,21 @@ void UiPresent(IDirect3DDevice9 *dev)
 static void (*s_endHook)(void);
 void UiSetEndHook(void (*hook)(void)) { s_endHook = hook; }
 
+// The screen coming out of black (UiFade): from when, for how long.
+static float s_fadeAt = -100.0f, s_fadeFor = 0.0f, s_fadeFrom = 1.0f;
+void UiFade(float seconds)
+{
+    s_fadeAt = UiTime();
+    s_fadeFor = seconds;
+    s_fadeFrom = 1.0f;
+}
+
+void UiFadeFrom(float seconds, float from)
+{
+    UiFade(seconds);
+    s_fadeFrom = from;
+}
+
 void UiEnd(void)
 {
     if (!s_dev) return;
@@ -349,6 +364,17 @@ void UiEnd(void)
         UiSetShift(0, 0, 1);
         UiSetScale(0, 0, 1.0f);
         s_endHook();
+    }
+    {
+        // out of black: the screens' changes (Online play, Settings, back to the main menu)
+        const float f = s_fadeFor > 0 ? (UiTime() - s_fadeAt) / s_fadeFor : 1.0f;
+        if (f < 1.0f)
+        {
+            const float e = f <= 0 ? 0.0f : f * f * (3 - 2 * f);
+            UiSetShift(0, 0, 1);
+            UiSetScale(0, 0, 1.0f);
+            UiRect(0, 0, UI_WIDTH, UI_HEIGHT, D3DCOLOR_ARGB((int)(255 * s_fadeFrom * (1.0f - e)), 0, 0, 0));
+        }
     }
     if (s_shotMsg[0])
     {
@@ -380,6 +406,25 @@ void UiSetOuter(float k, float dx, float dy, float fade)
     s_outerX = dx;
     s_outerY = dy;
     s_outerFade = fade < 0.0f ? 0.0f : fade > 1.0f ? 1.0f : fade;
+}
+
+// What is drawn next only inside x, y, w, h (UI pixels: the viewport is the UI's 1280 x 720); w or h 0: everywhere again.
+void UiClip(float x, float y, float w, float h)
+{
+    RECT r;
+    if (!s_dev) return;
+    flush();
+    if (w <= 0 || h <= 0)
+    {
+        s_dev->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+        return;
+    }
+    r.left = (LONG)x;
+    r.top = (LONG)y;
+    r.right = (LONG)(x + w);
+    r.bottom = (LONG)(y + h);
+    s_dev->SetScissorRect(&r);
+    s_dev->SetRenderState(D3DRS_SCISSORTESTENABLE, TRUE);
 }
 
 void UiSetShift(float dx, float dy, float fade)
@@ -1198,6 +1243,25 @@ void UiQuadsAdd(const float *xy, float u0, float v0, float u1, float v1, D3DCOLO
     s_quads++;
 }
 
+// A triangle of the picture between UiQuadsBegin and UiQuadsEnd: its corners xy[6] on the screen, uv[6] in the
+// picture (0..1) - a picture warped piece by piece (Laika's morphing in the setup assistant). The quad's second
+// triangle has no area.
+void UiTrisAdd(const float *xy, const float *uv, D3DCOLOR color)
+{
+    const float p[4] = { 0.5f, 0.5f, 0.0f, 0.004f };
+    UiVtx *v;
+    if (!s_dev) return;
+    if (s_quads == UI_MAX_QUADS) flush();
+    v = &s_vtx[s_quads * 6];
+    vtx(&v[0], xy[0], xy[1], color, uv[0] - 0.5f, uv[1] - 0.5f, 2.0f, 0.0f, p);
+    vtx(&v[1], xy[2], xy[3], color, uv[2] - 0.5f, uv[3] - 0.5f, 2.0f, 0.0f, p);
+    vtx(&v[2], xy[4], xy[5], color, uv[4] - 0.5f, uv[5] - 0.5f, 2.0f, 0.0f, p);
+    v[3] = v[2];
+    v[4] = v[2];
+    v[5] = v[2];
+    s_quads++;
+}
+
 void UiQuadsEnd(void)
 {
     if (!s_dev) return;
@@ -1370,6 +1434,9 @@ void UiSetPanelStyle(D3DCOLOR edge, float edgeWidth, int bodyPercent, float roun
 }
 
 float UiPanelRadius(float r) { return r * s_panelRound; }
+int UiPanelAlpha(void) { return s_panelAlpha; }
+float UiPanelEdgeWidth(void) { return s_panelEdgeW; }
+D3DCOLOR UiPanelEdgeColor(void) { return s_panelEdge; }
 
 static int (*s_backdropLayer)(void);
 void UiSetBackdropLayer(int (*fn)(void)) { s_backdropLayer = fn; }

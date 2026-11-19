@@ -174,10 +174,10 @@ static u32 ss_game_id(const char *body, const char *after)
 // parts between " - " or ":" (longest first, up to 3): ScreenScraper's search wants its own name's words in
 // a row ("Talisman of Fate" finds Xena, "Xena - Warrior Princess - The Talisman of Fate" does not).
 // Its id (0: not found, -1: no answer - no network, or ScreenScraper busy).
-static long ss_lookup(const char *romPath, const char *altName, const char *title, LONG seq)
+static long ss_lookup(const char *romPath, const char *altName, const char *title, LONG seq, const char *crc = NULL, std::string *answer = NULL)
 {
     struct Ask { int search; char text[128]; };
-    Ask asks[6];
+    Ask asks[7];
     char path[1024], size[16];
     const char *name = strrchr(romPath, '\\');
     WIN32_FILE_ATTRIBUTE_DATA fa;
@@ -187,17 +187,23 @@ static long ss_lookup(const char *romPath, const char *altName, const char *titl
     name = name ? name + 1 : romPath;
     size[0] = 0;
     if (GetFileAttributesExA(romPath, GetFileExInfoStandard, &fa)) sprintf(size, "%lu", fa.nFileSizeLow);
-    asks[n].search = 0; _snprintf(asks[n].text, sizeof(asks[n].text) - 1, "%s", name); asks[n++].text[127] = 0;
-    if (altName && altName[0] && _stricmp(altName, name))
+    if (crc && crc[0])
+    {
+        // a hack: by its whole file's CRC first (its own page; its name alone, or its title, finds its original)
+        asks[n].search = 2; _snprintf(asks[n].text, sizeof(asks[n].text) - 1, "%s", name); asks[n++].text[127] = 0;
+        if (answer) n = 1;   // (its page alone: PreviewFetchInfo)
+    }
+    if (!answer) { asks[n].search = 0; _snprintf(asks[n].text, sizeof(asks[n].text) - 1, "%s", name); asks[n++].text[127] = 0; }
+    if (!answer && altName && altName[0] && _stricmp(altName, name))
     {
         asks[n].search = 0; _snprintf(asks[n].text, sizeof(asks[n].text) - 1, "%s", altName); asks[n++].text[127] = 0;
     }
-    if (title && title[0])
+    if (!answer && title && title[0])
     {
         const char *p = title;
         int first = n, k;
         asks[n].search = 1; _snprintf(asks[n].text, sizeof(asks[n].text) - 1, "%s", title); asks[n++].text[127] = 0;
-        while (*p && n < 6)
+        while (*p && n < 7)
         {
             // The next part: up to " - " or ':', without the spaces round it.
             size_t len2 = 0;
@@ -226,12 +232,19 @@ static long ss_lookup(const char *romPath, const char *altName, const char *titl
     for (i = 0; i < n && !id; i++)
     {
         if (aborted(seq) || (s_ssPauseUntil && (int)(s_ssPauseUntil - GetTickCount()) > 0)) return -1;
-        if (!ss_path(path, sizeof(path), asks[i].search ? "jeuRecherche.php" : "jeuInfos.php")) return -1;
-        if (!asks[i].search)
+        if (!ss_path(path, sizeof(path), asks[i].search == 1 ? "jeuRecherche.php" : "jeuInfos.php")) return -1;
+        if (asks[i].search == 2)
+        {
+            // the hack's checksum, its file's name and size
+            sprintf(path + strlen(path), "&systemeid=%d&romtype=rom&crc=%s&romnom=", SS_SYSTEM_N64, crc);
+            url_put(path, sizeof(path), asks[i].text);
+            if (size[0]) { strncat(path, "&romtaille=", sizeof(path) - strlen(path) - 1); strncat(path, size, sizeof(path) - strlen(path) - 1); }
+        }
+        else if (!asks[i].search)
         {
             sprintf(path + strlen(path), "&systemeid=%d&romtype=rom&romnom=", SS_SYSTEM_N64);
             url_put(path, sizeof(path), asks[i].text);
-            if (i == 0 && size[0]) { strncat(path, "&romtaille=", sizeof(path) - strlen(path) - 1); strncat(path, size, sizeof(path) - strlen(path) - 1); }
+            if (size[0] && !_stricmp(asks[i].text, name)) { strncat(path, "&romtaille=", sizeof(path) - strlen(path) - 1); strncat(path, size, sizeof(path) - strlen(path) - 1); }
         }
         else
         {
@@ -242,8 +255,9 @@ static long ss_lookup(const char *romPath, const char *altName, const char *titl
         memset(path, 0, sizeof(path));
         if (!status) { free(body); return -1; }
         if (ss_busy(status)) { free(body); return -1; }
-        if (status == 200 && body) id = ss_game_id((const char *)body, asks[i].search ? "\"jeux\"" : "\"jeu\"");
-        H64_INFO("[preview] ScreenScraper %s \"%s\": HTTP %d, game %u", asks[i].search ? "search" : "file", asks[i].text, status, id);
+        if (status == 200 && body) id = ss_game_id((const char *)body, asks[i].search == 1 ? "\"jeux\"" : "\"jeu\"");
+        if (id && answer && body) answer->assign((const char *)body, len);
+        H64_INFO("[preview] ScreenScraper %s \"%s\": HTTP %d, game %u", asks[i].search == 1 ? "search" : asks[i].search == 2 ? "checksum" : "file", asks[i].text, status, id);
         free(body);
         body = NULL;
     }
@@ -294,7 +308,8 @@ static int ss_download(u32 id, const char *out, LONG seq)
 // and the 3D boxes. `media`: its kinds, the first there is taken ("box-2D", "box-3D", "ss", "sstitle",
 // "wheel,wheel-hd"). The regions in the order they are most often there: the boxes "us", the rest "wor".
 // 1: saved, 0: none, -1: no answer (no network, ScreenScraper busy, a game started).
-int PreviewFetchMedia(const char *romPath, const char *altName, const char *title, const char *media, const char *out)
+int PreviewFetchMedia(const char *romPath, const char *altName, const char *title, const char *media, const char *out, const char *crc,
+                      const char *title2)
 {
     static const char *const boxRegions[5] = { "us", "wor", "eu", "ss", "jp" };
     static const char *const otherRegions[5] = { "wor", "us", "eu", "jp", "ss" };
@@ -304,7 +319,8 @@ int PreviewFetchMedia(const char *romPath, const char *altName, const char *titl
     long id;
     int r;
     if (!s_started) return -1;
-    id = ss_lookup(romPath, altName, title, -1);
+    id = ss_lookup(romPath, altName, title, -1, crc);
+    if (!id && title2 && title2[0] && (!title || _stricmp(title, title2))) id = ss_lookup(romPath, NULL, title2, -1);   // (a hack: its header's name)
     if (id <= 0) return id < 0 ? -1 : 0;
     while (*m)
     {
@@ -339,6 +355,131 @@ int PreviewFetchMedia(const char *romPath, const char *altName, const char *titl
         }
     }
     return 0;
+}
+
+// A JSON string's text from `p` (just after its opening quote) as UTF-8 into `out`: escapes decoded, line ends
+// and tabs as spaces. The end of the string (its closing quote) or NULL.
+static const char *ss_json_text(const char *p, char *out, size_t size)
+{
+    size_t n = 0;
+    while (*p && *p != '"')
+    {
+        unsigned c = (unsigned char)*p++;
+        if (c == '\\' && *p)
+        {
+            const char e = *p++;
+            if (e == 'n' || e == 'r' || e == 't') c = ' ';
+            else if (e == 'u' && strlen(p) >= 4)
+            {
+                char hex[5];
+                memcpy(hex, p, 4);
+                hex[4] = 0;
+                c = (unsigned)strtoul(hex, NULL, 16);
+                p += 4;
+                if (c >= 0xD800 && c < 0xE000) c = '?';   // (outside the font)
+            }
+            else c = (unsigned char)e;   // \" \\ \/
+        }
+        if (c < 0x80) { if (n + 1 < size) out[n++] = (char)c; }
+        else if (c < 0x800) { if (n + 2 < size) { out[n++] = (char)(0xC0 | (c >> 6)); out[n++] = (char)(0x80 | (c & 0x3F)); } }
+        else if (n + 3 < size) { out[n++] = (char)(0xE0 | (c >> 12)); out[n++] = (char)(0x80 | ((c >> 6) & 0x3F)); out[n++] = (char)(0x80 | (c & 0x3F)); }
+    }
+    out[n] = 0;
+    while (n && out[n - 1] == ' ') out[--n] = 0;
+    return *p == '"' ? p : NULL;
+}
+
+// The string value of `key` in [p, end): just after its opening quote, spaces round the colon allowed. NULL: none.
+static const char *ss_json_value(const char *p, const char *end, const char *key)
+{
+    std::string k = std::string("\"") + key + "\"";
+    const char *q = p;
+    while ((q = strstr(q, k.c_str())) != NULL && q < end)
+    {
+        const char *v = q + k.size();
+        while (*v == ' ' || *v == '\t' || *v == '\r' || *v == '\n') v++;
+        if (*v == ':')
+        {
+            v++;
+            while (*v == ' ' || *v == '\t' || *v == '\r' || *v == '\n') v++;
+            if (*v == '"' && v < end) return v + 1;
+        }
+        q += k.size();
+    }
+    return NULL;
+}
+
+// The "text" of an object in the answer's `key` ("noms", "developpeur", "synopsis"...): of the one whose `field`
+// is `want` when given ("langue": "es"), else the first. 1 when found.
+static int ss_json_pick(const char *body, const char *key, const char *field, const char *want, char *out, size_t size)
+{
+    std::string k = std::string("\"") + key + "\"";
+    const char *p = strstr(body, k.c_str()), *end, *t;
+    out[0] = 0;
+    if (!p) return 0;
+    p += k.size();
+    // the value's extent: an object or an array, to its matching bracket
+    while (*p == ' ' || *p == ':') p++;
+    {
+        int depth = 0, inStr = 0;
+        for (end = p; *end; end++)
+        {
+            if (inStr) { if (*end == '\\' && end[1]) end++; else if (*end == '"') inStr = 0; continue; }
+            if (*end == '"') inStr = 1;
+            else if (*end == '[' || *end == '{') depth++;
+            else if ((*end == ']' || *end == '}') && --depth == 0) break;
+        }
+    }
+    for (t = p; t < end; t++)
+    {
+        const char *obj = t, *objEnd;
+        if (*t != '{') continue;
+        for (objEnd = obj; objEnd < end && *objEnd != '}'; objEnd++)
+            if (*objEnd == '"') { objEnd++; while (objEnd < end && *objEnd != '"') { if (*objEnd == '\\') objEnd++; objEnd++; } }
+        if (want && field)
+        {
+            const char *fv = ss_json_value(obj, objEnd, field);
+            if (!fv || strncmp(fv, want, strlen(want)) || fv[strlen(want)] != '"') { t = objEnd; continue; }
+        }
+        {
+            const char *tx = ss_json_value(obj, objEnd, "text");
+            if (tx) { ss_json_text(tx, out, size); return out[0] != 0; }
+        }
+        t = objEnd;
+    }
+    return 0;
+}
+
+int PreviewFetchInfo(const char *romPath, const char *crc, const char *lang, H64GameInfo *info)
+{
+    std::string answer;
+    char v[700];
+    long id;
+    if (!s_started || !crc || !crc[0]) return -1;
+    id = ss_lookup(romPath, NULL, NULL, -1, crc, &answer);
+    if (id <= 0) return id < 0 ? -1 : 0;
+    {
+        const char *body = answer.c_str();
+        // its name: ScreenScraper's own ("ss"), else the world's, else the first
+        if (ss_json_pick(body, "noms", "region", "ss", v, sizeof(v)) || ss_json_pick(body, "noms", "region", "wor", v, sizeof(v)) ||
+            ss_json_pick(body, "noms", NULL, NULL, v, sizeof(v)))
+            _snprintf(info->title, sizeof(info->title) - 1, "%s", v);
+        if ((lang && ss_json_pick(body, "synopsis", "langue", lang, v, sizeof(v))) || ss_json_pick(body, "synopsis", "langue", "en", v, sizeof(v)) ||
+            ss_json_pick(body, "synopsis", NULL, NULL, v, sizeof(v)))
+            _snprintf(info->description, sizeof(info->description) - 1, "%s", v);
+        if (ss_json_pick(body, "developpeur", NULL, NULL, v, sizeof(v))) _snprintf(info->developer, sizeof(info->developer) - 1, "%s", v);
+        if (ss_json_pick(body, "editeur", NULL, NULL, v, sizeof(v))) _snprintf(info->publisher, sizeof(info->publisher) - 1, "%s", v);
+        if (ss_json_pick(body, "dates", "region", "wor", v, sizeof(v)) || ss_json_pick(body, "dates", NULL, NULL, v, sizeof(v)))
+        {
+            _snprintf(info->date, sizeof(info->date) - 1, "%s", v);
+            _snprintf(info->year, sizeof(info->year) - 1, "%.4s", v);
+        }
+        if ((lang && ss_json_pick(body, "genres", "langue", lang, v, sizeof(v))) || ss_json_pick(body, "genres", "langue", "en", v, sizeof(v)))
+            _snprintf(info->genre, sizeof(info->genre) - 1, "%s", v);
+        if (ss_json_pick(body, "joueurs", NULL, NULL, v, sizeof(v))) _snprintf(info->players, sizeof(info->players) - 1, "%s", v);
+    }
+    H64_INFO("[preview] ScreenScraper page of the hack %s: \"%s\" (game %ld)", romPath, info->title, id);
+    return 1;
 }
 
 // What is known of a game on ScreenScraper (<key>.ss beside its video): "id=N", "none=<day>" when it
@@ -399,7 +540,11 @@ static int video_get(const char *romPath, const char *title, char *file, size_t 
     CreateDirectoryA(dir, NULL);
     if (id <= 0)
     {
-        id = ss_lookup(romPath, NULL, title, seq);
+        char crc[12], header[96], base[96];
+        const int hack = ArtSsHint(romPath, crc, sizeof(crc), header, sizeof(header), base, sizeof(base));
+        id = ss_lookup(romPath, NULL, title, seq, hack ? crc : NULL);
+        if (!id && hack && header[0]) id = ss_lookup(romPath, NULL, header, seq);   // its header's name ("MK64 - AMPED UP")
+        if (!id && hack && base[0]) id = ss_lookup(romPath, NULL, base, seq);       // not there: its original's video
         if (id < 0) return 0;   // no answer: asked again next time
         if (!id)
         {

@@ -800,6 +800,7 @@ static void RunDynarecTest(const Config *c, char *report, size_t len)
 }
 
 static int s_netMode;   // netplay: 0 off, 1 host, 2 guest, -1 ended (see NetConfig)
+static int s_netPlayed; // the game being played went online (the detailed view's activity: PlayStatsAdd)
 
 // The menu's Graphics settings on the renderer.
 static void ApplyGraphics(H64System *sys, H64Renderer *renderer, const Config *c)
@@ -1162,6 +1163,20 @@ static u8 s_netOwner[NET_PLAYERS + 1];
 #define NET_MINE(p) (s_netOwner[p] == s_netPort)
 #define NET_CONSOLE(p) (s_netOwner[p] == (p))
 static int s_netHiTex = -1;         // Config::hiTex as it was before an online game turned it off (-1: not changed)
+static char s_settingsPath[160];    // <drive>:\config\settings.ini ("" when the menu files are not used)
+static char s_profilePath[160];     // <drive>:\config\<game>.ini
+
+// The HD textures as just chosen in the game (R3 twice, Textures, Settings) kept for its next start: in the game's
+// own settings when it has them (they would put back what they hold over the settings for all games), else in those.
+// Not online: there the pack is off for that game only.
+static void HiresRemember(const Config *c)
+{
+    const char *path = s_profilePath[0] && GetFileAttributesA(s_profilePath) != (DWORD)-1 ? s_profilePath : s_settingsPath;
+    if (s_netHiTex >= 0 || !path[0]) return;
+    if (!ConfigWriteKey(path, "hirestex", c->hiTex ? "1" : "0") || !ConfigWriteKey(path, "hirestexfile", c->hiTexFile))
+        H64_WARN("[main] HD textures: cannot write %s", path);
+    else H64_INFO("[main] HD textures %s kept in %s", c->hiTex ? "on" : "off", path);
+}
 static u32 s_netDelay = 3;
 static u32 s_netReads;              // controller reads so far
 static u32 s_netHave[NET_PLAYERS + 1];          // per port: its inputs received, reads [0, have)
@@ -1773,6 +1788,7 @@ static void NetConfig(H64System *sys)
         s_netPort = port;
         s_netPlayers = players;
         s_netMode = port == 1 ? 1 : 2;
+        s_netPlayed = 1;
         s_netDelay = NET_DELAY_RELAY;
         s_rumblePort = port - 1;
         s_rumbleLocal = local;
@@ -1788,6 +1804,7 @@ static void NetConfig(H64System *sys)
     s_netPeer[0] = 0;
     if (!strncmp(line, "host", 4)) { s_netMode = 1; d = atoi(line + 4); }
     else if (!strncmp(line, "join", 4) && sscanf(line + 4, "%63s %d", s_netPeer, &d) >= 1) s_netMode = 2;
+    if (s_netMode > 0) s_netPlayed = 1;
     if (d > 0 && d < 60) s_netDelay = (u32)d;
     s_netPort = s_netMode;
     s_netPlayers = 2;
@@ -2426,6 +2443,59 @@ static char s_npTitle[160];         // its name ...
 static u8 *s_npRgba;                // ... its picture, loaded as the menu opens, made a texture by the overlay
 static int s_npW, s_npH, s_npBox;
 static IDirect3DTexture9 *s_npTex;
+// The pause menu's own page (PauseDraw): the frame as it opened - large (its picture on the right) and tiny (stretched
+// over the screen: blurred behind the menu) - made textures on the menu's thread; the game's kind (hack...); when
+// the game started (the time played this session).
+static u8 *s_pauseShotRgba, *s_pauseBlurRgba;
+static int s_pauseShotW, s_pauseShotH, s_pauseBlurW, s_pauseBlurH, s_pauseKind = -1;
+static IDirect3DTexture9 *s_pauseShotTex, *s_pauseBlurTex;
+static DWORD s_playStart;
+static void PauseDraw(IDirect3DDevice9 *dev, int states);   // below, with the pause menu's rows
+static void PauseBackdrop(IDirect3DDevice9 *dev);
+static int PauseHack(void);
+static const char *PauseTitle(char *out, size_t size);
+// The States page's slots (PauseDraw): each one's picture small and how long ago it was saved (-1: empty), made as
+// the page opens (s_slotsMade), again after a save, freed as it closes.
+#define SLOT_TILE_W 64
+#define SLOT_TILE_H 48
+static IDirect3DTexture9 *s_slotTex[CONFIG_STATE_SLOTS + 1];
+static int s_slotMins[CONFIG_STATE_SLOTS + 1], s_slotsMade;
+// BACK held in a game (not online): how long (ms; 0 up). From BACK_COUNT_FROM a countdown shows (BackHoldDraw) and
+// at BACK_LEAVE_AT the game is left for the ROM list; let go before, nothing (a short press: the pause menu).
+#define BACK_COUNT_FROM 600.0
+#define BACK_LEAVE_AT 3600.0
+static volatile float s_backHeldMs;
+
+// The countdown: a panel in the middle, a ring filling round the seconds left (3, 2, 1), "Leaving the game" and how
+// to stay (let BACK go).
+static void BackHoldDraw(float held)
+{
+    const float t = (float)((held - BACK_COUNT_FROM) / (BACK_LEAVE_AT - BACK_COUNT_FROM)), a = held - BACK_COUNT_FROM < 200 ? (held - (float)BACK_COUNT_FROM) / 200 : 1.0f;
+    const float w = 460, h = 230, x = (UI_WIDTH - w) * 0.5f, y = (UI_HEIGHT - h) * 0.5f, cx = x + w * 0.5f, cy = y + 82, r = 46;
+    const D3DCOLOR ring = D3DCOLOR_ARGB((int)(255 * a), 240, 90, 80);
+    char num[4];
+    float pts[65 * 2];
+    int k, n = 3 - (int)(t * 3);
+    if (t < 0) return;
+    if (n < 1) n = 1;
+    UiRect(0, 0, UI_WIDTH, UI_HEIGHT, D3DCOLOR_ARGB((int)(110 * a), 0, 0, 0));
+    UiShadow(x, y + 8, w, h, 22, 24, D3DCOLOR_ARGB((int)(130 * a), 0, 0, 0));
+    UiRoundRect(x, y, w, h, 22, D3DCOLOR_ARGB((int)(240 * a), 22, 20, 36), D3DCOLOR_ARGB((int)(240 * a), 18, 16, 30));
+    UiRoundRing(x, y, w, h, 22, 2.0f, UiAlpha(ring, 0.6f));
+    UiRoundRing(cx - r, cy - r, r * 2, r * 2, r, 7.0f, D3DCOLOR_ARGB((int)(50 * a), 255, 255, 255));
+    for (k = 0; k <= 64; k++)
+    {
+        // the ring filling, clockwise from the top
+        const float ang = -1.5708f + 6.2832f * (t > 1 ? 1 : t) * k / 64;
+        pts[k * 2] = cx + cosf(ang) * (r - 3.5f);
+        pts[k * 2 + 1] = cy + sinf(ang) * (r - 3.5f);
+    }
+    if (t > 0.01f) UiPolyline(pts, 65, 7.0f, 1.0f, ring);
+    _snprintf(num, sizeof(num), "%d", n);
+    UiText(UI_BOLD, 44, cx, cy, D3DCOLOR_ARGB((int)(255 * a), 255, 255, 255), num, UI_CENTER);
+    UiText(UI_BOLD, 22, cx, y + 160, UiAlpha(UI_COL_TEXT, a), Tr(T_BACK_LEAVING), UI_CENTER);
+    UiText(UI_REGULAR, 16, cx, y + 192, UiAlpha(UI_COL_TEXT3, a), Tr(T_BACK_CANCEL), UI_CENTER);
+}
 static IDirect3DTexture9 *s_stateThumb;
 static int s_stateThumbSlot = -1;   // the slot s_stateThumb is of (-1: load again)
 
@@ -2600,7 +2670,7 @@ static void CheatsDraw(void)
 // server and its connection; xb_online.cpp's thread reads the list every few seconds meanwhile, so the
 // menu never waits for the server (an online game's consoles keep hearing this one).
 #define PLAYERS_ROWS 12
-static int s_playersOpen, s_playersTop;
+static int s_playersOpen, s_playersTop, s_playersPics;   // s_playersPics: their avatars and flags loaded (UiOnlinePicsLoad)
 
 static int PlayersAvailable(void) { return OnlineRegistered() && OnlineHasServer() && OnlineMyConn() != ONLINE_CONN_NONE; }
 
@@ -2653,9 +2723,11 @@ static void PlayersDraw(void)
             const float bh = 16 * (0.35f + 0.65f * b / 3.0f);
             UiRect(right + b * 6, cy + 8 - bh, 4, bh, b < lit ? pc : UiAlpha(UI_COL_TEXT3, 0.45f));
         }
-        UiText(UI_BOLD, 14, lx + 6, cy, UI_COL_TEXT3, u->country, UI_LEFT);
-        UiTextFit(UI_BOLD, 18, 250, u->name, fit, sizeof(fit));
-        UiText(UI_BOLD, 18, lx + 50, cy, me ? UI_COL_ACCENT_HI : UI_COL_TEXT, fit, UI_LEFT);
+        // the avatar, the country's flag (its code when there is none), the name
+        UiOnlineAvatar(lx + 14, cy, 14, u->avatar, u->name);
+        if (!UiOnlineFlag(lx + 36, cy, 14, u->country)) UiText(UI_BOLD, 13, lx + 36, cy, UI_COL_TEXT3, u->country, UI_LEFT);
+        UiTextFit(UI_BOLD, 18, 230, u->name, fit, sizeof(fit));
+        UiText(UI_BOLD, 18, lx + 70, cy, me ? UI_COL_ACCENT_HI : UI_COL_TEXT, fit, UI_LEFT);
         if (u->status[0])
         {
             _snprintf(line, sizeof(line) - 1, Tr(T_ONLINE_PLAYING), u->status);
@@ -2882,44 +2954,75 @@ static void OverlayHook(void *, IDirect3DDevice9 *dev)
     // Nothing to show (the usual case in play): no state change at all.
     s32 left = (s32)(s_osdUntil - GetTickCount());
     int fps = s_showFps && s_fpsText[0], osd = s_osd[0] && left >= 0, hpack = HiresPackBusy() && !s_menuOpen, net = s_netMode > 0;
-    if (!fps && !osd && !s_menuOpen && !hpack && !net) return;
+    const float backHeld = s_backHeldMs;
+    const int back = !s_menuOpen && backHeld >= BACK_COUNT_FROM;   // leaving the game: the countdown
+    if (s_playersPics && !(s_menuOpen && s_playersOpen))
+    {
+        UiOnlinePicsFree(dev);   // the Players online page closed: its avatars and flags go
+        s_playersPics = 0;
+    }
+    if (!(s_menuOpen && s_statesOpen) && s_slotsMade)
+    {
+        // the States page closed: its slots' pictures go
+        int k;
+        for (k = 1; k <= CONFIG_STATE_SLOTS; k++)
+            if (s_slotTex[k]) { UiImageRelease(dev, s_slotTex[k]); s_slotTex[k] = NULL; }
+        s_slotsMade = 0;
+    }
+    if (!s_menuOpen && (s_pauseShotTex || s_pauseBlurTex || s_pauseShotRgba || s_pauseBlurRgba))
+    {
+        // the pause menu closed: its pictures of the frame go
+        if (s_pauseShotTex) { UiImageRelease(dev, s_pauseShotTex); s_pauseShotTex = NULL; }
+        if (s_pauseBlurTex) { UiImageRelease(dev, s_pauseBlurTex); s_pauseBlurTex = NULL; }
+        free(s_pauseShotRgba);
+        free(s_pauseBlurRgba);
+        s_pauseShotRgba = s_pauseBlurRgba = NULL;
+    }
+    if (!fps && !osd && !s_menuOpen && !hpack && !net && !back) return;
     UiBegin(dev);
     if (net && !s_menuOpen) NetOverlayDraw(dev);   // online: the ping, the others' messages, the quick chat
     if (hpack) HiresBgDraw();
-    if (fps) UiPerfPanel(s_fpsText);   // one line: a pill, more: a panel (Settings > System > On-screen performance)
+    if (fps && !s_menuOpen) UiPerfPanel(s_fpsText);   // one line: a pill, more: a panel (not over the pause menu and its pages)
     if (s_menuOpen && s_hiresPreviewOpen) HiresPreviewDraw(dev);
     else if (s_menuOpen && s_aboutOpen) AboutDraw();
-    else if (s_menuOpen && s_cheatsOpen) CheatsDraw();
-    else if (s_menuOpen && s_playersOpen) PlayersDraw();
-    else if (s_menuOpen && s_texOpen) TexturesDraw();
+    else if (s_menuOpen && s_cheatsOpen) { PauseBackdrop(dev); CheatsDraw(); }   // (the pause menu's pages: over the blurred game)
+    else if (s_menuOpen && s_playersOpen)
+    {
+        if (!s_playersPics) { UiOnlinePicsLoad(dev); s_playersPics = 1; }   // each one's avatar and country's flag
+        PauseBackdrop(dev);
+        PlayersDraw();
+    }
+    else if (s_menuOpen && s_texOpen) { PauseBackdrop(dev); TexturesDraw(); }
     else if (s_menuOpen)
     {
-        UiMenuDraw(&s_menu);
-        if (s_pauseMain && !s_confirmOpen)
+        if (s_npRgba && !s_npTex)
         {
-            if (s_npRgba && !s_npTex)
-            {
-                s_npTex = UiImageCreate(dev, s_npRgba, s_npW, s_npH);   // on the menu's thread (the device is its own then)
-                free(s_npRgba);
-                s_npRgba = NULL;
-            }
-            UiMenuNowPlaying(&s_menu, s_npTex, s_npW, s_npH, s_npTitle, s_npBox);
+            s_npTex = UiImageCreate(dev, s_npRgba, s_npW, s_npH);   // on the menu's thread (the device is its own then)
+            free(s_npRgba);
+            s_npRgba = NULL;
         }
-        if (s_statesOpen)
+        if (s_pauseMain) PauseDraw(dev, 0);   // its own page: the game, the options in groups, the frame
+        else if (s_statesOpen) PauseDraw(dev, 1);   // the States page, in the same design: the slot's picture, all the slots
+        else if (s_menu.page == UI_PAGE_LIST && !strcmp(s_menu.title, Tr(T_SETTINGS))) PauseDraw(dev, 2);   // Settings' own page too
+        else
         {
-            char empty[160];
-            _snprintf(empty, sizeof(empty) - 1, Tr(T_NO_STATE), s_stateSlot);
-            empty[sizeof(empty) - 1] = 0;
-            StateThumbSync(dev);
-            UiMenuThumb(&s_menu, s_stateThumb, empty);
+            // Settings' pages (Graphics, Screen...): over the game itself, live (no blurred picture: the changes to
+            // its picture, brightness and effects show on it), their header the game's
+            char title[160];
+            const int controls = !strcmp(s_menu.title, Tr(T_CONTROLS)) || s_menu.page == UI_PAGE_CONTROLS || s_menu.page == UI_PAGE_CALIB ||
+                                 s_menu.page == UI_PAGE_HOTKEYS || s_menu.page == UI_PAGE_RUMBLE;
+            if (controls) PauseBackdrop(dev);   // Controls and its pages as they were: the whole width, over the blurred game
+            UiSetGameHeader(s_npTex, s_npW, s_npH, PauseTitle(title, sizeof(title)), PauseHack());
+            UiMenuDraw(&s_menu);
         }
-        if (s_confirmOpen == CONFIRM_DASHBOARD) UiConfirmDraw(T_QUIT_TITLE, T_QUIT_ASK, T_FOOT_QUIT);
-        else if (s_confirmOpen == CONFIRM_LIST) UiConfirmDraw(-1, T_LIST_ASK, T_FOOT_QUIT);
+        UiQuitLaikaDraw(dev, s_confirmOpen == CONFIRM_DASHBOARD);   // leaving to the dashboard: Laika asks, angry
+        if (s_confirmOpen == CONFIRM_LIST) UiConfirmDraw(-1, T_LIST_ASK, T_FOOT_QUIT);
         else if (s_confirmOpen == CONFIRM_RESET) UiConfirmDraw(-1, T_RESET_ASK, T_FOOT_RESET_ASK);
         else if (s_confirmOpen == CONFIRM_SAVE_GAME) UiConfirmDraw(-1, T_SAVE_GAME_ASK, T_FOOT_SAVE_ASK);
         else if (s_confirmOpen == CONFIRM_SAVE_ALL) UiConfirmDraw(-1, T_SAVE_ALL_ASK, T_FOOT_SAVE_ASK);
     }
     if (osd) UiToast(s_osd, (float)((s32)s_osdLen - left), (float)s_osdLen);
+    if (back) BackHoldDraw(backHeld);
     UiEnd();
 }
 
@@ -2957,6 +3060,7 @@ static void SaveStateThumb(H64System *sys, int slot)
     }
     free(small);
     s_stateThumbSlot = -1;   // the States page shows the new picture
+    s_slotsMade = 0;         // ... and its slot's small one
 }
 
 // The slot kept for the save made when a controller is unplugged (0: none):
@@ -3003,10 +3107,8 @@ static void LoadStateNow(H64System *sys)
 // margin, smoothing, FPS) or at the next start (CPU, RSP); they are saved
 // for all games (config\settings.ini) or for this game (config\<game>.ini).
 enum { RG_DASHBOARD = 0, RG_BROWSER, RG_CONTINUE };
-enum { M_RESUME = 0, M_STATES, M_CHEATS, M_TEXTURES, M_SETTINGS, M_PLAYERS, M_RESET, M_ROOM, M_ROMS, M_DASHBOARD };   // X opens About
+enum { M_RESUME = 0, M_STATES, M_CHEATS, M_TEXTURES, M_SETTINGS, M_PLAYERS, M_RESET, M_ROOM, M_ROMS, M_DASHBOARD };   // (About: Settings > About)
 enum { ST_SLOT = 0, ST_LOAD, ST_SAVE };   // the States page, opened from M_STATES; B goes back, no row for it
-static char s_settingsPath[160];    // <drive>:\config\settings.ini ("" when the menu files are not used)
-static char s_profilePath[160];     // <drive>:\config\<game>.ini
 
 static const Config *s_menuCfg;   // the settings the open menu shows (its HD textures row)
 
@@ -3024,7 +3126,7 @@ static int PauseRow(int action)
 
 static void BuildGameMenu(void)
 {
-    static const int labels[10] = { T_RESUME, T_STATES, T_CHEATS, T_HIRESTEX, T_SETTINGS, T_ONLINE_NOW, T_RESET_GAME, T_BACK_TO_ROOM, T_BACK_TO_LIST, T_QUIT_DASHBOARD };
+    static const int labels[10] = { T_RESUME, T_STATES, T_CHEATS, T_HIRESTEX, T_SETTINGS, T_ONLINE_NOW, T_RESET_GAME, T_BACK_TO_ROOM, T_BACK_TO_LIST, T_PAUSE_QUIT };
     static const unsigned char iconOf[10] = { UI_ICON_PLAY, UI_ICON_STATES, UI_ICON_SLIDERS, UI_ICON_HD, UI_ICON_GEAR, UI_ICON_GLOBE, UI_ICON_RESET, UI_ICON_FRIENDS,
                                               UI_ICON_LIST, UI_ICON_POWER };
     unsigned char icons[10];
@@ -3033,23 +3135,479 @@ static void BuildGameMenu(void)
     UiMenuClear(&s_menu, Tr(T_PAUSED), Tr(T_FOOT_PAUSED));
     s_menu.rowMax = 40;   // shorter rows: "Now playing" (the game's name and picture) fits under them
     s_pauseCount = 0;
-    for (a = M_RESUME; a <= M_DASHBOARD; a++)
+    static const int order[10] = { M_RESUME, M_STATES, M_CHEATS, M_RESET, M_TEXTURES, M_SETTINGS, M_PLAYERS, M_ROOM, M_ROMS, M_DASHBOARD };   // by group (PauseDraw)
+    int o;
+    for (o = 0; o < 10; o++)
     {
+        a = order[o];
         if (a == M_TEXTURES && HiresPackCount() == 0) continue;
         if (s_netMode > 0 && (a == M_STATES || a == M_CHEATS || a == M_TEXTURES || a == M_RESET)) continue;   // online: what would set this console apart
-        if (a == M_ROOM && !(s_netMode > 0 && s_netWs)) continue;
+        if (a == M_ROOM && !(s_netMode > 0 && s_netWs) && s_netMode != -1) continue;   // the room's lobby; online again once cut off
         if (a == M_PLAYERS && !PlayersAvailable()) continue;
         value[0] = 0;
         if (a == M_CHEATS) CheatsRowValue(value, sizeof(value));
         if (a == M_TEXTURES && s_menuCfg) TexturesRowValue(s_menuCfg, value, sizeof(value));
-        UiMenuAdd(&s_menu, Tr(labels[a]), value);
-        icons[s_pauseCount] = iconOf[a];
+        // (an online game cut off - put out, the connection lost: the room's row is Back to online)
+        UiMenuAdd(&s_menu, Tr(a == M_ROOM && s_netMode == -1 ? T_BACK_TO_ONLINE : labels[a]), value);
+        icons[s_pauseCount] = a == M_ROOM && s_netMode == -1 ? UI_ICON_GLOBE : iconOf[a];
         s_pauseRows[s_pauseCount++] = a;
     }
     UiMenuIcons(&s_menu, icons, s_pauseCount);
 }
 
-// The States page's slot value: "< 3 >", the reserved slot tagged "< 9 · auto >".
+// The pause menu's own page: the game behind blurred and dimmed; on the left a solid panel - the game's box, name,
+// kind (hack...), the time played this session, its HD pack - then the options in groups (the game, the picture,
+// online, leaving: the way out in red); on the right the frame as it was when the menu opened ("Paused"), and two
+// small cards (the quick save's slot and when it was saved; the controllers connected).
+// How long ago, as one would say it: "hace 5 min", "hace 3 h", "hace 2 días" (short: "5 min", "3 h", "2 días").
+static void AgoText(int mins, int shortForm, char *out, size_t size)
+{
+    if (mins < 60) _snprintf(out, size - 1, Tr(shortForm ? T_AGO_S_MIN : T_AGO_MIN), mins);
+    else if (mins < 48 * 60) _snprintf(out, size - 1, Tr(shortForm ? T_AGO_S_H : T_AGO_H), mins / 60);
+    else _snprintf(out, size - 1, Tr(shortForm ? T_AGO_S_D : T_AGO_D), mins / (24 * 60));
+    out[size - 1] = 0;
+}
+
+// When slot `slot`'s state was saved: minutes ago (-1: none there).
+static int SlotMinutes(int slot)
+{
+    char path[160];
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    FILETIME now;
+    ULARGE_INTEGER a, b;
+    StatePath(slot, path, sizeof(path));
+    if (!GetFileAttributesExA(path, GetFileExInfoStandard, &fa)) return -1;
+    GetSystemTimeAsFileTime(&now);
+    a.LowPart = now.dwLowDateTime; a.HighPart = now.dwHighDateTime;
+    b.LowPart = fa.ftLastWriteTime.dwLowDateTime; b.HighPart = fa.ftLastWriteTime.dwHighDateTime;
+    return a.QuadPart > b.QuadPart ? (int)((a.QuadPart - b.QuadPart) / 600000000ULL) : 0;
+}
+
+// The slots' small pictures and times (s_slotTex, s_slotMins), from their state's picture files.
+static void SlotsMake(IDirect3DDevice9 *dev)
+{
+    int k;
+    for (k = 1; k <= CONFIG_STATE_SLOTS; k++)
+    {
+        char path[160];
+        u32 size = 0;
+        u8 *data;
+        if (s_slotTex[k]) { UiImageRelease(dev, s_slotTex[k]); s_slotTex[k] = NULL; }
+        s_slotMins[k] = SlotMinutes(k);
+        if (s_slotMins[k] < 0) continue;
+        ThumbPath(k, path, sizeof(path));
+        data = LoadFile(path, &size);
+        if (data && size >= 12 && !memcmp(data, "H64T", 4))
+        {
+            u32 w, h;
+            memcpy(&w, data + 4, 4);
+            memcpy(&h, data + 8, 4);
+            if (w && h && w <= THUMB_W && h <= THUMB_H && size >= 12 + w * h * 4)
+            {
+                u8 *small = h64_image_scale(data + 12, (int)w, (int)h, SLOT_TILE_W, SLOT_TILE_H);
+                if (small) { s_slotTex[k] = UiImageCreate(dev, small, SLOT_TILE_W, SLOT_TILE_H); free(small); }
+            }
+        }
+        free(data);
+    }
+    s_slotsMade = 1;
+}
+
+// The States page (PauseDraw, states): under the game's header its rows - the slot "< 3 >", load (when it was
+// saved), save; the reserved slot told of; on the right the selected slot's picture, large, and all the slots in two
+// rows, each its small picture, number and time, the selected one ringed, the reserved one "auto".
+static void StatesBody(IDirect3DDevice9 *dev, float PX, float PY, float PW, float PH, float y)
+{
+    const float GX = 600, GY = 36, GW = 640, GH = 360;
+    const D3DCOLOR selHi = UiSelColor(0, 255), selLo = UiSelColor(1, 150);
+    static const D3DCOLOR iconCol[3] = { D3DCOLOR_ARGB(255, 240, 180, 80), D3DCOLOR_ARGB(255, 90, 170, 255), D3DCOLOR_ARGB(255, 120, 220, 140) };
+    char line[200], ago[64];
+    int i, k;
+    if (!s_slotsMade) SlotsMake(dev);
+    StateThumbSync(dev);
+    UiText(UI_BOLD, 12, PX + 30, y, UI_COL_TEXT3, Tr(T_STATES_HEAD), UI_LEFT);
+    y += 20;
+    for (i = 0; i < s_menu.count && i < 3; i++)
+    {
+        const float cy = y + 18;
+        const int sel = i == s_menu.sel;
+        if (sel)
+        {
+            UiRoundRect(PX + 16, cy - 20, PW - 32, 40, 12, selLo, selLo);
+            UiRoundRing(PX + 16, cy - 20, PW - 32, 40, 12, 2.0f, selHi);
+        }
+        UiIcon(s_menu.icon[i], PX + 46, cy, iconCol[i]);
+        UiText(sel ? UI_BOLD : UI_REGULAR, 20, PX + 70, cy, UI_COL_TEXT, s_menu.label[i], UI_LEFT);
+        if (i == 0) UiText(sel ? UI_BOLD : UI_REGULAR, 17, PX + PW - 40, cy, sel ? UI_COL_TEXT : UI_COL_TEXT3, s_menu.value[0], UI_RIGHT);
+        else if (i == 1)
+        {
+            // load: when the slot's state was saved (or there is none)
+            const int mins = s_slotMins[s_stateSlot];
+            if (mins >= 0) AgoText(mins, 0, ago, sizeof(ago));
+            else _snprintf(ago, sizeof(ago) - 1, "%s", Tr(T_STATE_EMPTY_LOW));
+            ago[sizeof(ago) - 1] = 0;
+            UiText(UI_REGULAR, 17, PX + PW - 40, cy, UI_COL_TEXT3, ago, UI_RIGHT);
+        }
+        y += 44;
+    }
+    if (s_reservedSlot > 0)
+    {
+        // the slot kept for the save made when a controller is unplugged
+        char wrapped[300];
+        int lines;
+        _snprintf(line, sizeof(line) - 1, Tr(T_STATES_RESERVED), s_reservedSlot);
+        line[sizeof(line) - 1] = 0;
+        lines = UiTextWrap(UI_REGULAR, 14, PW - 60, 3, line, wrapped, sizeof(wrapped));
+        UiText(UI_REGULAR, 14, PX + 30, y + 20 + (lines - 1) * 9.0f, UI_COL_TEXT3, wrapped, UI_LEFT);
+    }
+    UiRect(PX + 24, PY + PH - 52, PW - 48, 1, UI_COL_LINE);
+    UiFooter(PX + 30, PY + PH - 26, Tr(T_FOOT_STATES_PANEL));
+    // the selected slot's picture, large, and when it was saved
+    UiEdgeGlow(GX, GY, GW, GH, 18);
+    UiPanel(GX, GY, GW, GH, 18);
+    if (s_stateThumb)
+        UiImage(s_stateThumb, GX + 4, GY + 4, GW - 8, GH - 8, 16, D3DCOLOR_ARGB(255, 255, 255, 255));
+    else
+    {
+        UiIcon(UI_ICON_SAVE, GX + GW * 0.5f, GY + GH * 0.5f - 18, UI_COL_TEXT3);
+        UiText(UI_REGULAR, 18, GX + GW * 0.5f, GY + GH * 0.5f + 16, UI_COL_TEXT3, Tr(T_STATE_EMPTY), UI_CENTER);
+    }
+    if (s_slotMins[s_stateSlot] >= 0)
+    {
+        AgoText(s_slotMins[s_stateSlot], 0, ago, sizeof(ago));
+        _snprintf(line, sizeof(line) - 1, "%s %d  " UI_CH_MIDDOT "  %s", Tr(T_STATE_SLOT_WORD), s_stateSlot, ago);
+    }
+    else _snprintf(line, sizeof(line) - 1, "%s %d", Tr(T_STATE_SLOT_WORD), s_stateSlot);
+    line[sizeof(line) - 1] = 0;
+    {
+        const float pw = UiTextWidth(UI_BOLD, 15, line) + 28;
+        UiRoundRect(GX + 16, GY + 16, pw, 30, 15, D3DCOLOR_ARGB(170, 0, 0, 0), D3DCOLOR_ARGB(170, 0, 0, 0));
+        UiText(UI_BOLD, 15, GX + 30, GY + 31, UI_COL_TEXT, line, UI_LEFT);
+    }
+    // all the slots: two rows
+    UiText(UI_BOLD, 12, GX, GY + GH + 24, UI_COL_TEXT3, Tr(T_STATES_SLOTS), UI_LEFT);
+    for (k = 1; k <= CONFIG_STATE_SLOTS; k++)
+    {
+        const int col = (k - 1) % 9, row = (k - 1) / 9;
+        const float x = GX + col * (SLOT_TILE_W + 8), ty = GY + GH + 40 + row * 92;
+        UiPanel(x, ty, SLOT_TILE_W, SLOT_TILE_H + 32, 10);
+        if (s_slotTex[k]) UiImage(s_slotTex[k], x + 3, ty + 3, SLOT_TILE_W - 6, SLOT_TILE_H - 6, 6, D3DCOLOR_ARGB(255, 255, 255, 255));
+        else
+        {
+            UiRoundRect(x + 3, ty + 3, SLOT_TILE_W - 6, SLOT_TILE_H - 6, 6, D3DCOLOR_ARGB(14, 255, 255, 255), D3DCOLOR_ARGB(14, 255, 255, 255));
+            UiText(UI_REGULAR, 11, x + SLOT_TILE_W * 0.5f, ty + SLOT_TILE_H * 0.5f, UI_COL_TEXT3, Tr(T_STATE_EMPTY_LOW), UI_CENTER);
+        }
+        _snprintf(line, sizeof(line) - 1, "%d", k);
+        line[sizeof(line) - 1] = 0;
+        UiText(UI_BOLD, 14, x + SLOT_TILE_W * 0.5f, ty + SLOT_TILE_H + 9, k == s_stateSlot ? UI_COL_TEXT : UI_COL_TEXT2, line, UI_CENTER);
+        if (k == s_reservedSlot) UiText(UI_BOLD, 10, x + SLOT_TILE_W * 0.5f, ty + SLOT_TILE_H + 23, D3DCOLOR_ARGB(255, 240, 180, 80), Tr(T_AUTO_TAG), UI_CENTER);
+        else if (s_slotMins[k] >= 0)
+        {
+            AgoText(s_slotMins[k], 1, ago, sizeof(ago));
+            UiText(UI_REGULAR, 10, x + SLOT_TILE_W * 0.5f, ty + SLOT_TILE_H + 23, UI_COL_TEXT3, ago, UI_CENTER);
+        }
+        if (k == s_stateSlot) UiRoundRing(x - 3, ty - 3, SLOT_TILE_W + 6, SLOT_TILE_H + 38, 12, 3.0f, selHi);
+    }
+}
+
+// Settings' own page in a game (PauseDraw, 2): under the game's header its sections as rows - an icon of its colour,
+// its name, what it holds now - and the two ways to keep them; on the right the frame ("Paused") and a card with the
+// selected row: its name, what it is for, what it holds.
+static void SettingsBody(float PX, float PY, float PW, float PH, float y)
+{
+    const float GX = 600, GY = 36, GW = 640, GH = 360;
+    const D3DCOLOR selHi = UiSelColor(0, 255), selLo = UiSelColor(1, 150);
+    int i, saving = -1;
+    D3DCOLOR selCol = D3DCOLOR_ARGB(255, 120, 220, 170);
+    UiText(UI_BOLD, 12, PX + 30, y, UI_COL_TEXT3, Tr(T_SETTINGS_HEAD), UI_LEFT);
+    y += 20;
+    for (i = 0; i < s_menu.count; i++)
+    {
+        const int sel = i == s_menu.sel, save = s_menu.icon[i] == UI_ICON_SAVE;
+        const int ic = s_menu.icon[i];
+        const D3DCOLOR col = ic == UI_ICON_GRAPHICS ? D3DCOLOR_ARGB(255, 236, 110, 170) : ic == UI_ICON_SCREEN ? D3DCOLOR_ARGB(255, 90, 190, 255) :
+                             ic == UI_ICON_CONTROLS ? D3DCOLOR_ARGB(255, 110, 220, 130) : ic == UI_ICON_SOUND ? D3DCOLOR_ARGB(255, 250, 170, 60) :
+                             ic == UI_ICON_SYSTEM ? D3DCOLOR_ARGB(255, 110, 150, 255) : D3DCOLOR_ARGB(255, 120, 220, 170);
+        const float rh = save ? 38.0f : 48.0f;
+        float cy;
+        if (save && saving < 0)
+        {
+            // the ways to keep them, apart
+            saving = i;
+            y += 14;
+            UiText(UI_BOLD, 12, PX + 30, y, UI_COL_TEXT3, Tr(T_SETTINGS_KEEP_HEAD), UI_LEFT);
+            y += 20;
+        }
+        cy = y + rh * 0.5f;
+        if (sel)
+        {
+            selCol = col;
+            UiRoundRect(PX + 16, cy - rh * 0.5f + 1, PW - 32, rh - 2, 12, selLo, selLo);
+            UiRoundRing(PX + 16, cy - rh * 0.5f + 1, PW - 32, rh - 2, 12, 2.0f, selHi);
+        }
+        if (!save) UiCircle(PX + 46, cy, 16, UiAlpha(col, 0.18f));
+        UiIcon(ic, PX + 46, cy, col);
+        UiText(sel ? UI_BOLD : UI_REGULAR, save ? 18 : 19, PX + 76, cy, UI_COL_TEXT, s_menu.label[i], UI_LEFT);
+        if (!save && UiSettingsSub(i)[0])
+        {
+            char fit[120];
+            UiTextFit(UI_REGULAR, 14, PW - 260, UiSettingsSub(i), fit, sizeof(fit));
+            UiText(UI_REGULAR, 14, PX + PW - 40, cy, sel ? UI_COL_TEXT2 : UI_COL_TEXT3, fit, UI_RIGHT);
+        }
+        y += rh;
+    }
+    UiRect(PX + 24, PY + PH - 52, PW - 48, 1, UI_COL_LINE);
+    UiFooter(PX + 30, PY + PH - 26, Tr(T_FOOT_SETTINGS_PANEL));
+    // the frame as it was, "Paused"
+    if (s_pauseShotTex)
+    {
+        UiEdgeGlow(GX, GY, GW, GH, 18);
+        UiPanel(GX, GY, GW, GH, 18);
+        UiImage(s_pauseShotTex, GX + 4, GY + 4, GW - 8, GH - 8, 16, D3DCOLOR_ARGB(255, 255, 255, 255));
+        {
+            const char *t = Tr(T_PAUSE_PAUSED);
+            const float pw = UiTextWidth(UI_BOLD, 15, t) + 46;
+            UiRoundRect(GX + 16, GY + 16, pw, 30, 15, D3DCOLOR_ARGB(170, 0, 0, 0), D3DCOLOR_ARGB(170, 0, 0, 0));
+            UiRect(GX + 30, GY + 24, 4, 14, D3DCOLOR_ARGB(255, 255, 255, 255));
+            UiRect(GX + 38, GY + 24, 4, 14, D3DCOLOR_ARGB(255, 255, 255, 255));
+            UiText(UI_BOLD, 15, GX + 50, GY + 31, UI_COL_TEXT, t, UI_LEFT);
+        }
+    }
+    // the selected row's card: its name, what it is for, what it holds
+    if (s_menu.sel >= 0 && s_menu.sel < s_menu.count)
+    {
+        const float cy0 = GY + GH + 24, ch = 720 - 36 - cy0;
+        const char *desc = UiRowDesc(s_menu.label[s_menu.sel]), *sub = UiSettingsSub(s_menu.sel);
+        char wrapped[400];
+        int lines = 0;
+        UiEdgeGlow(GX, cy0, GW, ch, 18);
+        UiPanel(GX, cy0, GW, ch, 18);
+        UiRoundRect(GX + 20, cy0 + 18, 54, 3, 1.5f, selCol, selCol);
+        UiText(UI_BOLD, 20, GX + 20, cy0 + 42, UI_COL_TEXT, s_menu.label[s_menu.sel], UI_LEFT);
+        if (desc && desc[0])
+        {
+            lines = UiTextWrap(UI_REGULAR, 15, GW - 40, 3, desc, wrapped, sizeof(wrapped));
+            UiText(UI_REGULAR, 15, GX + 20, cy0 + 70 + (lines - 1) * 10.0f, UI_COL_TEXT3, wrapped, UI_LEFT);
+        }
+        if (s_menu.icon[s_menu.sel] != UI_ICON_SAVE && sub && sub[0])
+        {
+            char fit[160];
+            UiTextFit(UI_BOLD, 17, GW - 40, sub, fit, sizeof(fit));
+            UiText(UI_BOLD, 17, GX + 20, cy0 + 96 + (lines > 1 ? (lines - 1) * 20.0f : 0), UI_COL_TEXT, fit, UI_LEFT);
+        }
+    }
+}
+
+// Behind the pause menu's pages (its own, States, Settings and their pages): the frame as the menu opened, tiny and
+// stretched (blurred), dimmed - the game never showing through the menu.
+// The game's name as the pause menu shows it: a hack's (or a ROM the catalogue does not know: a newer hack) as its
+// file is named, its version in it - the databases' title is its game's ("Super Smash Bros." for Smash Remix).
+static int PauseHack(void)
+{
+    return s_pauseKind == H64_ROMKIND_HACK || s_pauseKind == H64_ROMKIND_OTHER || s_pauseKind == H64_ROMKIND_UNKNOWN;
+}
+
+static const char *PauseTitle(char *out, size_t size)
+{
+    const char *base = strrchr(s_romNow, '\\'), *dot;
+    base = base ? base + 1 : s_romNow;
+    dot = strrchr(base, '.');
+    if (PauseHack() && base[0]) _snprintf(out, size - 1, "%.*s", dot ? (int)(dot - base) : (int)strlen(base), base);
+    else _snprintf(out, size - 1, "%s", s_npTitle[0] ? s_npTitle : "LAIKA 64");
+    out[size - 1] = 0;
+    return out;
+}
+
+static void PauseBackdrop(IDirect3DDevice9 *dev)
+{
+    if (s_pauseShotRgba && !s_pauseShotTex) { s_pauseShotTex = UiImageCreate(dev, s_pauseShotRgba, s_pauseShotW, s_pauseShotH); free(s_pauseShotRgba); s_pauseShotRgba = NULL; }
+    if (s_pauseBlurRgba && !s_pauseBlurTex) { s_pauseBlurTex = UiImageCreate(dev, s_pauseBlurRgba, s_pauseBlurW, s_pauseBlurH); free(s_pauseBlurRgba); s_pauseBlurRgba = NULL; }
+    if (s_pauseBlurTex) UiImage(s_pauseBlurTex, 0, 0, UI_WIDTH, UI_HEIGHT, 0, D3DCOLOR_ARGB(255, 255, 255, 255));
+    UiRect(0, 0, UI_WIDTH, UI_HEIGHT, D3DCOLOR_ARGB(s_pauseBlurTex ? 165 : 200, 6, 7, 14));
+}
+
+static void PauseDraw(IDirect3DDevice9 *dev, int states)
+{
+    const float PX = 40, PY = 36, PW = 520, PH = 648, GX = 600, GY = 96, GW = 640, GH = 360;
+    const D3DCOLOR selHi = UiSelColor(0, 255), selLo = UiSelColor(1, 150);
+    const Config *c = s_menuCfg;
+    char line[200], fit[200];
+    float y, bx, by, cx;
+    int i, group = -1;
+    PauseBackdrop(dev);
+    // the panel, as the player's panels are (Interface: colour, opacity, border and its glow)
+    UiEdgeGlow(PX, PY, PW, PH, 24);
+    UiPanel(PX, PY, PW, PH, 24);
+    // the game: its box (or picture), name, kind, time, HD pack
+    bx = PX + 24;
+    by = PY + 24;
+    if (s_npTex && s_npW > 0 && s_npH > 0)
+    {
+        const float k = 78.0f / s_npW < 104.0f / s_npH ? 78.0f / s_npW : 104.0f / s_npH, w = s_npW * k, h = s_npH * k;
+        UiImage(s_npTex, bx + (78 - w) * 0.5f, by + (104 - h) * 0.5f, w, h, 8, D3DCOLOR_ARGB(255, 255, 255, 255));
+    }
+    else
+    {
+        UiRoundRect(bx, by, 78, 104, 8, UI_COL_CARD, UI_COL_CARD);
+        UiIcon(UI_ICON_PLAY, bx + 39, by + 52, UI_COL_TEXT3);
+    }
+    {
+        char name[160];
+        UiTextFit(UI_BOLD, 26, PW - 140, PauseTitle(name, sizeof(name)), fit, sizeof(fit));   // (a hack: its file's name)
+    }
+    UiText(UI_BOLD, 26, bx + 96, by + 18, UI_COL_TEXT, fit, UI_LEFT);
+    cx = bx + 96;
+    if (s_pauseKind == H64_ROMKIND_HACK || s_pauseKind == H64_ROMKIND_OTHER || s_pauseKind == H64_ROMKIND_UNKNOWN || s_pauseKind == H64_ROMKIND_TRANSLATION)
+    {
+        const char *t = Tr(s_pauseKind == H64_ROMKIND_TRANSLATION ? T_ROMKIND_TRANSLATION : T_ROMKIND_HACK);
+        const D3DCOLOR col = s_pauseKind == H64_ROMKIND_TRANSLATION ? D3DCOLOR_ARGB(255, 90, 170, 255) : D3DCOLOR_ARGB(255, 255, 150, 70);
+        const float w = UiTextWidth(UI_BOLD, 12, t) + 16;
+        UiRoundRect(cx, by + 40, w, 18, 9, UiAlpha(col, 0.18f), UiAlpha(col, 0.18f));
+        UiRoundRing(cx, by + 40, w, 18, 9, 1.0f, UiAlpha(col, 0.6f));
+        UiText(UI_BOLD, 12, cx + 8, by + 49, col, t, UI_LEFT);
+    }
+    {
+        const int mins = (int)((GetTickCount() - s_playStart) / 60000);
+        _snprintf(line, sizeof(line) - 1, Tr(T_PAUSE_PLAYING), mins < 1 ? 1 : mins);
+        line[sizeof(line) - 1] = 0;
+        UiText(UI_REGULAR, 15, bx + 96, by + 76 + (c && c->hiTex && HiresActiveIndex(c) >= 0 ? 0 : 10), UI_COL_TEXT3, line, UI_LEFT);
+    }
+    if (c && c->hiTex && HiresActiveIndex(c) >= 0)
+    {
+        char name[128];
+        TexturesRowValue(c, name, sizeof(name));
+        _snprintf(line, sizeof(line) - 1, Tr(T_PAUSE_PACK), name);
+        line[sizeof(line) - 1] = 0;
+        UiTextFit(UI_REGULAR, 13, PW - 140, line, fit, sizeof(fit));
+        UiText(UI_REGULAR, 13, bx + 96, by + 96, UI_COL_TEXT3, fit, UI_LEFT);
+    }
+    UiRect(PX + 24, by + 124, PW - 48, 1, UI_COL_LINE);
+    if (states == 1) { StatesBody(dev, PX, PY, PW, PH, by + 140); return; }   // the States page: its rows and slots
+    if (states == 2) { SettingsBody(PX, PY, PW, PH, by + 140); return; }        // Settings: its sections, keeping them
+    // the options, in their groups
+    for (i = 0, y = by + 140; i < s_pauseCount && i < s_menu.count; i++)
+    {
+        static const int groupOf[10] = { 0, 0, 0, 1, 1, 2, 0, 2, 3, 3 };   // by M_*: the game, the picture, online, leaving
+        static const int groupName[4] = { T_PAUSE_G_GAME, T_PAUSE_G_PICTURE, T_PAUSE_G_ONLINE, T_PAUSE_G_LEAVE };
+        static const D3DCOLOR iconCol[10] = { D3DCOLOR_ARGB(255, 120, 220, 140), D3DCOLOR_ARGB(255, 240, 180, 80), D3DCOLOR_ARGB(255, 180, 150, 250),
+                                              D3DCOLOR_ARGB(255, 240, 200, 70), D3DCOLOR_ARGB(255, 150, 170, 200), D3DCOLOR_ARGB(255, 80, 210, 120),
+                                              D3DCOLOR_ARGB(255, 250, 140, 120), D3DCOLOR_ARGB(255, 120, 170, 255), D3DCOLOR_ARGB(255, 120, 170, 255),
+                                              D3DCOLOR_ARGB(255, 240, 90, 80) };
+        const int a = s_pauseRows[i], sel = i == s_menu.sel;
+        float cy;
+        if (groupOf[a] != group)
+        {
+            if (group >= 0) y += 16;
+            group = groupOf[a];
+            UiText(UI_BOLD, 12, PX + 30, y, UI_COL_TEXT3, Tr(groupName[group]), UI_LEFT);
+            y += 20;
+        }
+        cy = y + 16;
+        if (sel)
+        {
+            UiRoundRect(PX + 16, cy - 18, PW - 32, 36, 12, selLo, selLo);
+            UiRoundRing(PX + 16, cy - 18, PW - 32, 36, 12, 2.0f, selHi);
+        }
+        UiIcon(s_menu.icon[i], PX + 46, cy, iconCol[a]);
+        UiText(sel ? UI_BOLD : UI_REGULAR, 19, PX + 70, cy, a == M_DASHBOARD ? D3DCOLOR_ARGB(255, 240, 90, 80) : UI_COL_TEXT, s_menu.label[i], UI_LEFT);
+        if (a == M_TEXTURES && c)
+        {
+            // a switch: on (green, the knob right) or off
+            const int on = c->hiTex && HiresActiveIndex(c) >= 0;
+            const float sx = PX + PW - 84;
+            UiRoundRect(sx, cy - 12, 44, 24, 12, on ? D3DCOLOR_ARGB(255, 80, 210, 120) : D3DCOLOR_ARGB(255, 70, 74, 92), on ? D3DCOLOR_ARGB(255, 80, 210, 120) : D3DCOLOR_ARGB(255, 70, 74, 92));
+            UiCircle(on ? sx + 31 : sx + 13, cy, 9, D3DCOLOR_ARGB(255, 255, 255, 255));
+        }
+        else if (a == M_STATES)
+        {
+            _snprintf(line, sizeof(line) - 1, Tr(T_PAUSE_SLOT), s_stateSlot);
+            line[sizeof(line) - 1] = 0;
+            UiText(UI_REGULAR, 15, PX + PW - 40, cy, UI_COL_TEXT3, line, UI_RIGHT);
+        }
+        else if (a == M_PLAYERS)
+        {
+            std::vector<OnlineUser> users;
+            if (OnlineWatchedUsers(&users) > 0 && !users.empty())
+            {
+                _snprintf(line, sizeof(line) - 1, "%d", (int)users.size());
+                line[sizeof(line) - 1] = 0;
+                {
+                    const float w = UiTextWidth(UI_BOLD, 13, line) + 18;
+                    UiRoundRect(PX + PW - 40 - w, cy - 11, w, 22, 11, D3DCOLOR_ARGB(255, 80, 210, 120), D3DCOLOR_ARGB(255, 80, 210, 120));
+                    UiText(UI_BOLD, 13, PX + PW - 40 - w * 0.5f, cy, D3DCOLOR_ARGB(255, 10, 30, 15), line, UI_CENTER);
+                }
+            }
+        }
+        else if (s_menu.value[i][0]) UiText(UI_REGULAR, 15, PX + PW - 40, cy, UI_COL_TEXT3, s_menu.value[i], UI_RIGHT);
+        y += 32;
+    }
+    UiRect(PX + 24, PY + PH - 52, PW - 48, 1, UI_COL_LINE);
+    UiFooter(PX + 30, PY + PH - 26, Tr(T_FOOT_PAUSE_PANEL));   // (shorter than the menu's: within the panel)
+    // the frame as it was, "Paused"
+    if (s_pauseShotTex)
+    {
+        const float k = (float)GW / s_pauseShotW < (float)GH / s_pauseShotH ? (float)GW / s_pauseShotW : (float)GH / s_pauseShotH;
+        const float w = s_pauseShotW * k, h = s_pauseShotH * k, fx = GX + (GW - w) * 0.5f, fy = GY + (GH - h) * 0.5f;
+        UiShadow(fx + 4, fy + 10, w, h, 18, 24, D3DCOLOR_ARGB(140, 0, 0, 0));
+        UiEdgeGlow(fx, fy, w, h, 18);
+        UiImage(s_pauseShotTex, fx, fy, w, h, 18, D3DCOLOR_ARGB(255, 255, 255, 255));
+        if (UiPanelEdgeWidth() > 0) UiRoundRing(fx, fy, w, h, 18, UiPanelEdgeWidth(), UiPanelEdgeColor());   // the player's border
+        {
+            const char *t = Tr(T_PAUSE_PAUSED);
+            const float pw = UiTextWidth(UI_BOLD, 15, t) + 46;
+            UiRoundRect(fx + 16, fy + 16, pw, 30, 15, D3DCOLOR_ARGB(170, 0, 0, 0), D3DCOLOR_ARGB(170, 0, 0, 0));
+            UiRect(fx + 30, fy + 24, 4, 14, D3DCOLOR_ARGB(255, 255, 255, 255));
+            UiRect(fx + 38, fy + 24, 4, 14, D3DCOLOR_ARGB(255, 255, 255, 255));
+            UiText(UI_BOLD, 15, fx + 50, fy + 31, UI_COL_TEXT, t, UI_LEFT);
+        }
+    }
+    // the quick save and the controllers
+    for (i = 0; i < 2; i++)
+    {
+        const float x0 = GX + i * (GW / 2 + 8), w = GW / 2 - 8, y0 = GY + GH + 26;
+        const D3DCOLOR col = i ? D3DCOLOR_ARGB(255, 90, 170, 255) : D3DCOLOR_ARGB(255, 240, 180, 80);
+        UiEdgeGlow(x0, y0, w, 84, 16);
+        UiPanel(x0, y0, w, 84, 16);
+        UiRoundRect(x0 + 16, y0 + 16, 54, 3, 1.5f, col, col);
+        UiText(UI_BOLD, 17, x0 + 16, y0 + 38, UI_COL_TEXT, Tr(i ? T_PAUSE_PADS : T_PAUSE_QUICK), UI_LEFT);
+        if (!i)
+        {
+            // the slot, and how long ago it was saved (or empty)
+            char path[160];
+            WIN32_FILE_ATTRIBUTE_DATA fa;
+            StatePath(s_stateSlot, path, sizeof(path));
+            if (GetFileAttributesExA(path, GetFileExInfoStandard, &fa))
+            {
+                FILETIME now;
+                ULARGE_INTEGER a, b;
+                GetSystemTimeAsFileTime(&now);
+                a.LowPart = now.dwLowDateTime; a.HighPart = now.dwHighDateTime;
+                b.LowPart = fa.ftLastWriteTime.dwLowDateTime; b.HighPart = fa.ftLastWriteTime.dwHighDateTime;
+                {
+                    // the slot, how long ago (minutes, hours or days)
+                    char ago[64];
+                    AgoText(a.QuadPart > b.QuadPart ? (int)((a.QuadPart - b.QuadPart) / 600000000ULL) : 0, 0, ago, sizeof(ago));
+                    _snprintf(line, sizeof(line) - 1, "%s %d  " UI_CH_MIDDOT "  %s", Tr(T_STATE_SLOT_WORD), s_stateSlot, ago);
+                }
+            }
+            else _snprintf(line, sizeof(line) - 1, Tr(T_PAUSE_SLOT_EMPTY), s_stateSlot);
+        }
+        else
+        {
+            // the controllers connected
+            XINPUT_STATE st;
+            int k, n = 0;
+            for (k = 0; k < 4; k++)
+                if (XInputGetState(k, &st) == ERROR_SUCCESS) n++;
+            if (n == 1) _snprintf(line, sizeof(line) - 1, "%s", Tr(T_PAUSE_PADS_1));
+            else _snprintf(line, sizeof(line) - 1, Tr(T_PAUSE_PADS_N), n);
+        }
+        line[sizeof(line) - 1] = 0;
+        UiText(UI_REGULAR, 14, x0 + 16, y0 + 62, UI_COL_TEXT3, line, UI_LEFT);
+    }
+}
+
+// The States page's slot value: "< 3 >", the reserved slot tagged "< 18 · auto >".
 static void SlotValue(char *out, size_t size)
 {
     if (s_stateSlot == s_reservedSlot) _snprintf(out, size - 1, "< %d " UI_CH_MIDDOT " %s >", s_stateSlot, Tr(T_AUTO_TAG));
@@ -3096,6 +3654,22 @@ static int GameMenu(H64System *sys, H64Renderer *renderer, Config *c)
     hiTexFileApplied[sizeof(hiTexFileApplied) - 1] = 0;
     if (s_gfxQ.thread) WorkWaitAll(NULL);   // the device is this thread's while the menu shows
     s_menuCfg = c;
+    if (renderer && !s_pauseShotTex && !s_pauseShotRgba)
+    {
+        // the frame as it is now: large for the pause menu's picture of it, tiny to blur it behind the menu
+        int fw = 0, fh = 0;
+        u8 *px = h64_xenos_grab_frame(renderer, &fw, &fh);
+        if (px)
+        {
+            h64_image_fit(fw, fh, 640, 360, &s_pauseShotW, &s_pauseShotH);
+            s_pauseShotRgba = h64_image_scale(px, fw, fh, s_pauseShotW, s_pauseShotH);
+            s_pauseBlurW = 48;
+            s_pauseBlurH = 27;
+            s_pauseBlurRgba = h64_image_scale(px, fw, fh, s_pauseBlurW, s_pauseBlurH);
+            free(px);
+        }
+    }
+    s_pauseKind = h64_rom_catalogue(sys->rom.crc1, sys->rom.crc2, NULL);
     BuildGameMenu();
     if (!s_npTitle[0] && s_romNow[0])
     {
@@ -3155,9 +3729,10 @@ static int GameMenu(H64System *sys, H64Renderer *renderer, Config *c)
             }
             else if (r == 2)
             {
-                // Another pack (or off): loaded now.
+                // Another pack (or off): loaded now, and kept for the next time.
                 ApplyGraphics(sys, renderer, c);
                 HiresOpen(sys, renderer, c);
+                HiresRemember(c);
                 hiTexApplied = c->hiTex;
                 strncpy(hiTexFileApplied, c->hiTexFile, sizeof(hiTexFileApplied) - 1);
                 hiTexFileApplied[sizeof(hiTexFileApplied) - 1] = 0;
@@ -3208,6 +3783,7 @@ static int GameMenu(H64System *sys, H64Renderer *renderer, Config *c)
                 if (c->hiTex != hiTexApplied || strcmp(c->hiTexFile, hiTexFileApplied) != 0)
                 {
                     HiresOpen(sys, renderer, c);   // picked a different pack (or toggled hiTex): reload it now, not at the next launch
+                    HiresRemember(c);              // ... and kept for the next one
                     hiTexApplied = c->hiTex;
                     strncpy(hiTexFileApplied, c->hiTexFile, sizeof(hiTexFileApplied) - 1);
                     hiTexFileApplied[sizeof(hiTexFileApplied) - 1] = 0;
@@ -3238,8 +3814,8 @@ static int GameMenu(H64System *sys, H64Renderer *renderer, Config *c)
             else if (sel == ST_SLOT && (down & (XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT | XINPUT_GAMEPAD_A)))
             {
                 s_stateSlot += (down & XINPUT_GAMEPAD_DPAD_LEFT) ? -1 : 1;
-                if (s_stateSlot < 1) s_stateSlot = 9;
-                if (s_stateSlot > 9) s_stateSlot = 1;
+                if (s_stateSlot < 1) s_stateSlot = CONFIG_STATE_SLOTS;
+                if (s_stateSlot > CONFIG_STATE_SLOTS) s_stateSlot = 1;
                 SlotValue(s_menu.value[ST_SLOT], sizeof(s_menu.value[ST_SLOT]));
             }
             else if (down & XINPUT_GAMEPAD_A)
@@ -3260,7 +3836,6 @@ static int GameMenu(H64System *sys, H64Renderer *renderer, Config *c)
             UiMenuNavigate(&s_menu, down);
             sel = s_menu.sel;
             if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_START)) result = RG_CONTINUE;
-            else if (down & XINPUT_GAMEPAD_X) s_aboutOpen = 1;   // the About panel (X, as in the ROM browser)
             else if (down & XINPUT_GAMEPAD_A)
             {
                 switch (sel >= 0 && sel < s_pauseCount ? s_pauseRows[sel] : -1)
@@ -3272,7 +3847,11 @@ static int GameMenu(H64System *sys, H64Renderer *renderer, Config *c)
                 case M_SETTINGS: settings = 1; SettingsBuild(&s_menu, c, s_profilePath[0] != 0); break;
                 case M_PLAYERS: s_playersOpen = 1; s_playersTop = 0; OnlineWatchUsers(1); break;
                 case M_RESET: s_confirmOpen = CONFIRM_RESET; break;      // asked first (above)
-                case M_ROOM: s_toRoom = 1; result = RG_BROWSER; break;   // the ROM list opens the room's lobby
+                case M_ROOM:
+                    if (s_netMode == -1) UiRequestOnline();   // cut off: Online play again (the room was left)
+                    else s_toRoom = 1;                        // the ROM list opens the room's lobby
+                    result = RG_BROWSER;
+                    break;
                 case M_ROMS: s_confirmOpen = CONFIRM_LIST; break;        // asked first (above)
                 case M_DASHBOARD: s_confirmOpen = CONFIRM_DASHBOARD; break;
                 }
@@ -3477,6 +4056,7 @@ static int RunGameBody(IDirect3DDevice9 *dev, Config *c, const char *romPath)
     // Online play's profile: the game being played, and at the end the minutes it was.
     char onlineGame[24], onlineCode[24];
     const DWORD onlineStart = GetTickCount();
+    s_playStart = onlineStart;   // (the pause menu: the time played this session)
     strncpy(onlineGame, sys->rom.name, sizeof(onlineGame) - 1);
     onlineGame[sizeof(onlineGame) - 1] = 0;
     _snprintf(onlineCode, sizeof(onlineCode) - 1, "%s / %08X", sys->rom.gameCode, sys->rom.crc1);
@@ -3611,7 +4191,6 @@ static int RunGameBody(IDirect3DDevice9 *dev, Config *c, const char *romPath)
     DWORD backSince = 0;
     int backUsed = 0;
     double backHeldMs = 0, backPolledAt = 0;   // time BACK was seen held, poll after poll
-    int backHinted = 0;
     WORD prevButtons = 0;
     u32 hkPrev = 0xFFFFFFFFu;   // the shortcuts' buttons a frame ago (all: nothing fires until released)
     // Settings > System > a controller unplugged: which ports were plugged at
@@ -3742,7 +4321,6 @@ static int RunGameBody(IDirect3DDevice9 *dev, Config *c, const char *romPath)
                 backSince = GetTickCount() | 1;
                 backUsed = 0;
                 backHeldMs = 0;
-                backHinted = 0;
                 H64_INFO("[pad] BACK down at VI %u", presented);
                 LogFlush();
             }
@@ -3754,14 +4332,11 @@ static int RunGameBody(IDirect3DDevice9 *dev, Config *c, const char *romPath)
                 // Online: BACK held a moment is the menu (a short press, the quick chat).
                 if (!backUsed && backHeldMs >= NET_BACK_MENU_MS) { backUsed = 1; s_qcOpen = 0; menuRequest = 1; }
             }
-            else if (!backUsed && backHeldMs >= 1000.0 && !backHinted)
+            else s_backHeldMs = backUsed ? 0.0f : (float)backHeldMs;   // the countdown (BackHoldDraw) while it is held
+            if (!backUsed && backHeldMs >= BACK_LEAVE_AT && !(s_netMode > 0 && s_netWs))
             {
-                OsdT(T_KEEP_HOLDING, 0);
-                backHinted = 1;
-            }
-            if (!backUsed && backHeldMs >= 3000.0 && !(s_netMode > 0 && s_netWs))
-            {
-                H64_INFO("[pad] BACK held 3 s: back to the ROM list");
+                H64_INFO("[pad] BACK held to the end of the countdown: back to the ROM list");
+                s_backHeldMs = 0;
                 result = RG_BROWSER;
                 break;
             }
@@ -3773,6 +4348,7 @@ static int RunGameBody(IDirect3DDevice9 *dev, Config *c, const char *romPath)
                 H64_INFO("[pad] BACK up after %u ms%s", GetTickCount() - backSince, backUsed ? " (used with RB/LB/D-pad)" : "");
                 LogFlush();
             }
+            s_backHeldMs = 0;   // let go: no countdown
             if (backSince && !backUsed && backHeldMs < 600.0)   // a short press
             {
                 if (s_netMode > 0 && s_netWs)
@@ -3816,8 +4392,8 @@ static int RunGameBody(IDirect3DDevice9 *dev, Config *c, const char *romPath)
                 case HK_SLOT_PREV:
                 case HK_SLOT_NEXT:
                     s_stateSlot += k == HK_SLOT_NEXT ? 1 : -1;
-                    if (s_stateSlot < 1) s_stateSlot = 9;
-                    if (s_stateSlot > 9) s_stateSlot = 1;
+                    if (s_stateSlot < 1) s_stateSlot = CONFIG_STATE_SLOTS;
+                    if (s_stateSlot > CONFIG_STATE_SLOTS) s_stateSlot = 1;
                     OsdT(T_SLOT, s_stateSlot);
                     break;
                 case HK_SHOT: if (!NetRefuse()) TakeManualScreenshot(sys, renderer); break;
@@ -3844,6 +4420,7 @@ static int RunGameBody(IDirect3DDevice9 *dev, Config *c, const char *romPath)
                     c->hiTex = !c->hiTex;
                     ApplyGraphics(sys, renderer, c);
                     HiresOpen(sys, renderer, c);
+                    HiresRemember(c);
                     OsdT(c->hiTex ? T_TEX_R3_ON : T_TEX_R3_OFF, 0);
                 }
                 else
@@ -4447,8 +5024,11 @@ int __cdecl main()
                     if (ConfigParseFile(&game, s_profilePath)) H64_INFO("[main] game profile %s", s_profilePath);
                 }
                 int rg;
+                DWORD playAt = GetTickCount();
                 HiresSetPlaying(1);   // a pack converting meanwhile: one thread only
+                s_netPlayed = 0;
                 rg = RunGame(dev, &game, path);
+                PlayStatsAdd(s_settingsPath, path, (int)((GetTickCount() - playAt) / 1000), s_netPlayed);
                 if (!OnlineRoomBack()) OnlineRoomClose();   // an online room the game never got to take (the ROM could not be read) - not one it gave back
                 HiresSetPlaying(0);
                 if (rg == RG_DASHBOARD) break;

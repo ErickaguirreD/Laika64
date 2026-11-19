@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""LAIKA 64 - the main logo and the title art, from "LAIKA VARIANTES.png".
+"""LAIKA 64 - the main logo and the title art, from "LOGO LAIKA 64.png" (one logo) or the older sheet of
+variants "LAIKA VARIANTES.png" (its top-left cell).
 
 Writes:
   platform/xbox360/tools/laika_logo.png   the original (multicolour) logo, 192 high: gen_logo.py makes xb_logo.h of it
   platform/xbox360/title/art/icon.png     64 x 64   the XEX's title image (X_IMAGEID_GAME): the wolf emblem
   platform/xbox360/title/art/cover.png    900 x 1270, cover_small.png 219 x 300, background.png 1280 x 720
 
-    python platform/xbox360/tools/gen_laika_art.py "LAIKA VARIANTES.png"
+    python platform/xbox360/tools/gen_laika_art.py "LOGO LAIKA 64.png"
     python platform/xbox360/tools/gen_logo.py platform/xbox360/tools/laika_logo.png
 """
 import os
@@ -70,8 +71,12 @@ def paste_fit(dst, img, box):
 
 def main():
     sheet = Image.open(sys.argv[1]).convert("RGBA")
-    logo = original_logo(sheet)
-    logo.save(os.path.join(HERE, "laika_logo.png"))
+    if sheet.width > sheet.height * 2.2:
+        # one logo: its transparent margins off
+        logo = sheet.crop(sheet.getchannel("A").point(lambda v: 255 if v > 8 else 0).getbbox())
+    else:
+        logo = original_logo(sheet)
+    logo.resize((round(logo.width * 192 / logo.height), 192), Image.LANCZOS).save(os.path.join(HERE, "laika_logo.png"), optimize=True)
     emb = emblem(logo)
     # The icon: the emblem on the dark background, rounded off.
     icon = backdrop(256, 256)

@@ -38,7 +38,9 @@ struct H64GameInfo
     char players[8];        // "1", "1-4"
     char region[32];        // "USA", "Europe", "Japan, USA"
     char rating[24];        // "E / 3+" (GameDB-N64)
-    char description[640];  // a few sentences (Wikipedia), ASCII
+    char description[640];  // a few sentences (Wikipedia, or ScreenScraper's for a hack)
+    char base[96];          // a hack: the game it is made from ("Super Smash Bros."), "" otherwise
+    int ss;                 // a hack: its own page on ScreenScraper (by its CRC): 1 found, 0 none, -1 not asked yet
 };
 
 void h64_gameinfo_clear(H64GameInfo *info);

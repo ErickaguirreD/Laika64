@@ -43,7 +43,15 @@ int PreviewBulkStatus(int *done, int *total);
 // "box-3D", "ss", "sstitle", "wheel,wheel-hd") into `out` (a PNG; from xb_art.cpp's thread), the game
 // found by its file, `altName` (the databases' file name for it, or NULL) or `title`.
 // 1: saved, 0: none, -1: no answer.
-int PreviewFetchMedia(const char *romPath, const char *altName, const char *title, const char *media, const char *out);
+// `crc`: the whole file's CRC32 in hex ("1A2B3C4D", a hack's), asked first: its own page when ScreenScraper has it.
+// `title2`: another title tried when nothing is found (a hack's name in its header: "MK64 - AMPED UP").
+int PreviewFetchMedia(const char *romPath, const char *altName, const char *title, const char *media, const char *out, const char *crc = NULL,
+                      const char *title2 = NULL);
+// A hack's own page on ScreenScraper, found by the whole file's CRC32 (hex) with its name and size only (never
+// by title: that finds its original): its name, description (in `lang`, else English), developer, publisher,
+// date, genre and players into the fields of *info that it has. 1 found, 0 not there, -1 no answer.
+struct H64GameInfo;
+int PreviewFetchInfo(const char *romPath, const char *crc, const char *lang, H64GameInfo *info);
 // Stops the video and frees its memory (before a game), waiting for the thread; the textures too.
 // The bulk pass waits until the list is back (PreviewWant of a game).
 void PreviewStop(IDirect3DDevice9 *dev);

@@ -53,4 +53,12 @@ const char *h64_cic_name(int cic);
 // TV type for the region byte: 0 = PAL, 1 = NTSC, 2 = MPAL.
 int h64_rom_tv_type(const H64Rom *rom);
 
+// What a ROM is by mupen64plus's catalogue (h64_romdb.inc, tests/scripts/gen_romdb.py): an original dump, a
+// translation, a hack, a bad dump, another modified dump (overdump, fix, trainer, pirate), homebrew; UNKNOWN when
+// the catalogue does not know its header CRCs (a newer hack keeps its game's code but not its CRCs). *name: its
+// GoodN64 name ("Mario Kart 64 (U) [!]"), or NULL when unknown.
+enum { H64_ROMKIND_UNKNOWN = -1, H64_ROMKIND_ORIGINAL = 0, H64_ROMKIND_TRANSLATION, H64_ROMKIND_HACK, H64_ROMKIND_BAD,
+       H64_ROMKIND_OTHER, H64_ROMKIND_HOMEBREW };
+int h64_rom_catalogue(u32 crc1, u32 crc2, const char **name);
+
 #endif

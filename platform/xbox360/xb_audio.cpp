@@ -702,6 +702,28 @@ int xb_audio_music_start(const char *folder, int mode, const char *track)
 
 void xb_audio_music_tick(void) {}   // the music's own thread moves on from track to track now
 
+int xb_audio_music_skip(int dir)
+{
+    int r;
+    music_lock();
+    if (!s_musicVoice || s_musicCount < 1) { music_unlock(); return -1; }
+    // this one stopped at once (its voice gone: the next opens its own), then the next or the one before
+    s_musicVoice->Stop(0);
+    s_musicVoice->FlushSourceBuffers();
+    s_musicVoice->DestroyVoice();
+    s_musicVoice = NULL;
+    if (s_musicMode == XB_MUSIC_TRACK) s_musicMode = XB_MUSIC_ORDER;
+    if (dir < 0 && s_musicMode == XB_MUSIC_ORDER) s_musicIndex = (s_musicIndex - 2 + 2 * s_musicCount) % s_musicCount;
+    r = music_next();
+    music_unlock();
+    return r;
+}
+
+const char *xb_audio_music_now(void)
+{
+    return s_musicVoice && s_musicIndex >= 0 && s_musicIndex < s_musicCount ? s_musicTracks[s_musicIndex] : "";
+}
+
 void xb_audio_music_pause(int on)
 {
     // The voice stopped keeps its queue: its thread waits, and Start goes on from the same place.
@@ -887,13 +909,14 @@ void xb_audio_set_mono(int on)
 #define SFX_VOICES 4
 #define SFX_GAIN 0.55f   // under the interface music's volume
 
+#include "xb_laika_bark.h"
 static s16 *s_sfx[XB_SFX_COUNT];
 static u32 s_sfxLen[XB_SFX_COUNT];
 static IXAudio2SourceVoice *s_sfxVoice[SFX_VOICES];
 static int s_sfxNext, s_sfxOn = 1, s_sfxStyle, s_sfxLastVoice = -1;
 static char s_sfxFolder[128];   // xb_audio_ui_folder
 static const char *const s_sfxFile[XB_SFX_COUNT] = { "move", "select", "back", "action", "page", "open", "tab", "value_up", "value_down",
-                                                     "fav_on", "fav_off", "launch", "save", "notify", "error", "saver" };
+                                                     "fav_on", "fav_off", "launch", "save", "notify", "error", "saver", "bark", "angry" };
 
 static DWORD s_sfxLastAt;
 
@@ -985,7 +1008,7 @@ static int sfx_load_file(int kind)
 
 static void sfx_make(void)
 {
-    static const float lengthMs[XB_SFX_COUNT] = { 40, 190, 120, 90, 80, 300, 130, 50, 50, 260, 190, 600, 330, 420, 230, 650 };
+    static const float lengthMs[XB_SFX_COUNT] = { 40, 190, 120, 90, 80, 300, 130, 50, 50, 260, 190, 600, 330, 420, 230, 650, 10, 10 };
     int k;
     for (k = 0; k < XB_SFX_COUNT; k++)
     {
@@ -1069,6 +1092,19 @@ static void sfx_make(void)
             sfx_tone(mix, len, 70, 230, 1568.0f, 1568.0f, 0.24f, 3, 100);
             sfx_tone(mix, len, 70, 230, 3136.0f, 3136.0f, 0.04f, 3, 60);
             break;
+        }
+        if (k == XB_SFX_BARK || k == XB_SFX_ANGRY)
+        {
+            // Laika's bark, or her angry growl and barks: her recordings (in the executable: there after an update
+            // from the console too)
+            const short *pcm = k == XB_SFX_BARK ? s_laikaBark : s_laikaAngry;
+            const u32 n = k == XB_SFX_BARK ? LAIKA_BARK_LEN : LAIKA_ANGRY_LEN;
+            free(mix);
+            s_sfx[k] = (s16 *)malloc(n * sizeof(s16));
+            if (s_sfx[k]) memcpy(s_sfx[k], pcm, n * sizeof(s16));
+            s_sfxLen[k] = s_sfx[k] ? n : 0;
+            if (s_sfxFolder[0]) sfx_load_file(k);   // the user's own bark.wav, when there is one
+            continue;
         }
         s_sfx[k] = (s16 *)malloc(len * sizeof(s16));
         if (s_sfx[k])

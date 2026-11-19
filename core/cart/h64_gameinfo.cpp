@@ -41,6 +41,7 @@ void h64_gameinfo_clear(H64GameInfo *info)
     info->cover = -1;
     info->wiki = -1;
     info->score = -1;
+    info->ss = -1;
 }
 
 void h64_gameinfo_key(const char *gameCode, u32 crc1, char *out)
@@ -154,7 +155,7 @@ static const InfoField s_fields[] = {
     INFO_FIELD("name", name), INFO_FIELD("title", title), INFO_FIELD("year", year), INFO_FIELD("date", date),
     INFO_FIELD("developer", developer), INFO_FIELD("publisher", publisher), INFO_FIELD("genre", genre),
     INFO_FIELD("players", players), INFO_FIELD("region", region), INFO_FIELD("rating", rating),
-    INFO_FIELD("description", description),
+    INFO_FIELD("description", description), INFO_FIELD("base", base),
 };
 
 int h64_gameinfo_format(const H64GameInfo *info, char *out, int outSize)
@@ -172,6 +173,7 @@ int h64_gameinfo_format(const H64GameInfo *info, char *out, int outSize)
         sprintf(sc, "score=%d\r\n", info->score);
         s += sc;
     }
+    if (info->ss >= 0) s += info->ss > 0 ? "ss=yes\r\n" : "ss=none\r\n";
     for (i = 0; i < H64_ARRAY_COUNT(s_fields); i++)
     {
         const char *v = (const char *)info + s_fields[i].offset;
@@ -206,6 +208,7 @@ int h64_gameinfo_parse(H64GameInfo *info, const char *text, u32 len)
             else if (key == "cover") info->cover = value == "yes" ? 1 : value == "none" ? 0 : -1;
             else if (key == "wiki") info->wiki = value == "yes" ? 1 : value == "none" ? 0 : -1;
             else if (key == "score") info->score = atoi(value.c_str());
+            else if (key == "ss") info->ss = value == "yes" ? 1 : value == "none" ? 0 : -1;
             else
                 for (i = 0; i < H64_ARRAY_COUNT(s_fields); i++)
                     // "???" (unknown in libretro-database): left out here too, for

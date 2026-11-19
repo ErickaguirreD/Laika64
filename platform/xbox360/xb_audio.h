@@ -48,6 +48,10 @@ void xb_audio_music_tick(void);
 void xb_audio_music_stop(void);
 // 1: the music stops where it is (the online intro plays); 0: it goes on from there.
 void xb_audio_music_pause(int on);
+// Another track at once: the next (dir 1) or the one before (-1) of the folder (a track chosen to play over and over
+// gives way to the folder in order). 0 when one plays. xb_audio_music_now: the file name playing ("" none).
+int xb_audio_music_skip(int dir);
+const char *xb_audio_music_now(void);
 // The folder's tracks, for the menu: their number (sorted by name), each one's file name.
 int xb_audio_music_scan(const char *folder);
 const char *xb_audio_music_track(int i);
@@ -78,6 +82,8 @@ enum { XB_SFX_MOVE = 0, XB_SFX_SELECT, XB_SFX_BACK, XB_SFX_ACTION, XB_SFX_PAGE, 
        XB_SFX_NOTIFY,     // a message (an update, box art, the battery)
        XB_SFX_ERROR,      // something that cannot be done
        XB_SFX_SAVER,      // the screen saver comes on
+       XB_SFX_BARK,       // Laika barks (her own recording, xb_laika_bark.h, whatever the style)
+       XB_SFX_ANGRY,      // ... growls and barks twice, angry (leaving LAIKA)
        XB_SFX_COUNT };
 // The sounds' style (Settings > Sound > Sound style): glass (the first ones),
 // soft, retro (8-bit square waves), digital.

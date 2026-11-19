@@ -276,11 +276,14 @@ int OnlineList(int kind, int offset, std::vector<OnlineUser> *out)
     size_t k;
     out->clear();
     if (kind != ONLINE_LIST_FRIENDS) add(&q, "offset", offset);
-    if (!request_me(kind == ONLINE_LIST_FRIENDS ? "friends" : kind == ONLINE_LIST_RANK ? "rank" : "users", q, &rows)) return 0;
+    if (kind == ONLINE_LIST_WEEK) add(&q, "list", 1);
+    if (!request_me(kind == ONLINE_LIST_FRIENDS ? "friends" : kind == ONLINE_LIST_RANK ? "rank" : kind == ONLINE_LIST_WEEK ? "week" : "users", q, &rows))
+        return 0;
     for (k = 0; k < rows.size(); k++)
     {
-        // users, friends: name country avatar online status friend. rank: position name country avatar minutes online.
-        const int r = kind == ONLINE_LIST_RANK;
+        // users, friends: name country avatar online status friend. rank: position name country avatar minutes online;
+        // week: the same with seconds (this week's, online).
+        const int r = kind == ONLINE_LIST_RANK || kind == ONLINE_LIST_WEEK;
         OnlineUser u;
         memset(&u, 0, sizeof(u));
         copy(u.name, sizeof(u.name), field(rows[k], r).c_str());
@@ -290,6 +293,7 @@ int OnlineList(int kind, int offset, std::vector<OnlineUser> *out)
         {
             u.pos = atoi(field(rows[k], 0).c_str());
             u.minutes = atoi(field(rows[k], 4).c_str());
+            if (kind == ONLINE_LIST_WEEK) u.minutes /= 60;
             u.online = atoi(field(rows[k], 5).c_str());
         }
         else
@@ -301,6 +305,35 @@ int OnlineList(int kind, int offset, std::vector<OnlineUser> *out)
             u.conn = atoi(field(rows[k], 7).c_str());
         }
         if (u.name[0]) out->push_back(u);
+    }
+    return 1;
+}
+
+int OnlineWeekGet(OnlineWeek *out)
+{
+    std::vector<std::string> rows;
+    std::string q, first;
+    size_t k;
+    out->daysLeft = out->myPos = out->mySeconds = 0;
+    out->top.clear();
+    if (!OnlineRegistered()) { set_error(s_error, "auth"); return 0; }
+    add(&q, "g", s_me.tag);
+    add(&q, "t", s_me.token);
+    if (!request("week", q, &rows, &first, s_error)) return 0;
+    // the first line: days left, this player's place (0: not in it), its seconds; then place name country avatar seconds
+    out->daysLeft = atoi(field(first, 0).c_str());
+    out->myPos = atoi(field(first, 1).c_str());
+    out->mySeconds = atoi(field(first, 2).c_str());
+    for (k = 0; k < rows.size(); k++)
+    {
+        OnlineWeekRow r;
+        memset(&r, 0, sizeof(r));
+        r.pos = atoi(field(rows[k], 0).c_str());
+        copy(r.name, sizeof(r.name), field(rows[k], 1).c_str());
+        copy(r.country, sizeof(r.country), field(rows[k], 2).c_str());
+        r.avatar = atoi(field(rows[k], 3).c_str());
+        r.seconds = atoi(field(rows[k], 4).c_str());
+        if (r.name[0]) out->top.push_back(r);
     }
     return 1;
 }
@@ -1069,7 +1102,7 @@ static void lobby_parse(const std::vector<std::string> &rows, std::vector<Online
         const std::string &r = rows[k];
         if (!r.compare(0, 2, "R\t"))
         {
-            // R code host avatar players game name locked max hostms
+            // R code host avatar players game name locked max hostms art crc
             OnlineRoomInfo m;
             memset(&m, 0, sizeof(m));
             m.code = (unsigned)atoi(field(r, 1).c_str());
@@ -1083,6 +1116,7 @@ static void lobby_parse(const std::vector<std::string> &rows, std::vector<Online
             if (m.max < 2 || m.max > ONLINE_ROOM_PLAYERS) m.max = ONLINE_ROOM_PLAYERS;
             m.hostMs = atoi(field(r, 9).c_str());
             copy(m.art, sizeof(m.art), field(r, 10).c_str());
+            m.hasCrc = sscanf(field(r, 11).c_str(), "%8x %8x", &m.crc1, &m.crc2) == 2;   // "CRC1 CRC2" (newer servers)
             if (!m.name[0]) copy(m.name, sizeof(m.name), m.host);
             if (m.code) rooms->push_back(m);
         }

@@ -56,10 +56,14 @@ struct OnlineUser
     int ms, conn;       // its time to the server and back (0: not known); its connection (ONLINE_CONN_*)
 };
 enum { ONLINE_CONN_NONE = 0, ONLINE_CONN_CABLE, ONLINE_CONN_WIFI, ONLINE_CONN_OLD };   // OLD: a LAIKA before 2.1 (tells neither)
-enum { ONLINE_LIST_USERS = 0, ONLINE_LIST_FRIENDS, ONLINE_LIST_RANK };
+enum { ONLINE_LIST_USERS = 0, ONLINE_LIST_FRIENDS, ONLINE_LIST_RANK, ONLINE_LIST_WEEK };   // WEEK: this week's ranking online
 int OnlineList(int kind, int offset, std::vector<OnlineUser> *out);   // 50 at a time from `offset` (friends: all)
 // add: asks for a friendship (*how "sent", or "accepted" when the other had asked too), else ends one.
 int OnlineFriend(const char *name, int add, char *how = NULL, size_t howSize = 0);
+// This week's ranking by time played online (from Monday 00:00 UTC): the top 10, this player's place and time.
+struct OnlineWeekRow { int pos; char name[ONLINE_TAG_MAX + 1]; char country[4]; int avatar, seconds; };
+struct OnlineWeek { int daysLeft, myPos, mySeconds; std::vector<OnlineWeekRow> top; };
+int OnlineWeekGet(OnlineWeek *out);
 int OnlineRequests(std::vector<OnlineUser> *out);   // the friendships asked of this player
 int OnlineAnswer(const char *name, int yes);
 // An invitation to the room `code` (waiting) for that player: told at once (*live 1) or when its console next
@@ -117,7 +121,8 @@ void OnlineSetNotify(int bits);
 #define ONLINE_ROOM_PASS 12
 // max: the players it is for (2-4); hostMs: the host's time to the server (0: not known); art: its game's box art key
 // (xb_art.cpp ArtKeyOf: "" when not known).
-struct OnlineRoomInfo { unsigned code; char host[ONLINE_TAG_MAX + 1]; int avatar, players, locked, max, hostMs; char game[44], name[ONLINE_ROOM_NAME + 4], art[16]; };
+struct OnlineRoomInfo { unsigned code; char host[ONLINE_TAG_MAX + 1]; int avatar, players, locked, max, hostMs; char game[44], name[ONLINE_ROOM_NAME + 4], art[16];
+                        u32 crc1, crc2; int hasCrc; };   // crc: its ROM's header CRCs (hasCrc 0: a server without them)
 int OnlineRooms(std::vector<OnlineRoomInfo> *out);   // the rooms waiting for players (locked: a password is asked)
 // A game being played in a room: who plays it, for how long.
 struct OnlineGameInfo { unsigned code; char game[44], art[16]; int seconds, count; char tag[4][ONLINE_TAG_MAX + 1]; };

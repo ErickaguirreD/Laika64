@@ -26,7 +26,7 @@
 //   /v1/dm?g=&t=&to=&text=                    a message to a friend
 //   /v1/conv?g=&t=&with=&since=               the messages with a friend after `since`: id mine text
 //   /v1/lobby?g=&t=&since=                    in one answer: the rooms waiting ("R" code host avatar players game
-//                                             name locked max hostms art), the games being played ("G" code game
+//                                             name locked max hostms art crc; crc: "CRC1 CRC2" of its ROM), the games being played ("G" code game
 //                                             seconds tag,tag... art; art: the box art's key), the players online ("U" name country avatar
 //                                             status room ms conn) and the general chat after `since`
 //                                             ("C" id tag avatar text ago)
@@ -40,6 +40,8 @@
 //                                             games played together, avatar, country, online, status, ms, conn, in a room;
 //                                             then "game minutes code" per game (the code "NALE / 1234ABCD": its box art)
 //   /v1/rank?g=&t=&offset=                    position name country avatar minutes online
+//   /v1/week?g=&t=&list=&offset=              this week's ranking by time online: days left, my place, my seconds; the
+//                                             top 10 (list=1: a page from offset) - place name country avatar seconds online
 //   /v1/news?lang=                            date title text
 //   /v1/rooms?g=&t=                           rooms waiting: code host avatar players game name locked
 //   /v1/chat?g=&t=&since=                     the general chat after message `since`: id tag avatar text ago (seconds)
@@ -51,6 +53,9 @@
 // limit how many one place can make.
 
 const ONLINE_S = 300;            // seen this recently: online (the consoles ping every two minutes)
+const ROOM_NAME_MAX = 16;        // a room's name at most (LAIKA's keyboard takes as many: its chips fit after it)
+const PLAY_STEP_S = 200;         // the time played counted from one ping to the next at most (they come each 90 s)
+const PLAY_BANK_S = 86400;       // the time played seen and not yet claimed (/v1/played) at most
 const PAGE = 50;                 // rows of users and rank per request
 const MAX_FRIENDS = 100;
 const MAX_REGISTER_PER_HOUR = 5; // per address
@@ -81,6 +86,10 @@ const INBOX_QUIET_MS = 90000;    // an inbox connection silent this long (no "p"
 const INBOX_SOCKETS = 3;         // connections kept per player (its newest)
 
 const now = () => Math.floor(Date.now() / 1000);
+// The weekly ranking (hours played online): weeks from Monday 00:00 UTC (1970-01-05 was one); a game counts from
+// its start to the moment each console leaves it, at most WEEK_GAME_S, nothing under WEEK_MIN_S.
+const WEEK_S = 7 * 86400, MONDAY0 = 4 * 86400, WEEK_GAME_S = 6 * 3600, WEEK_MIN_S = 30, WEEK_TOP = 10;
+const weekOf = (t) => Math.floor((t - MONDAY0) / WEEK_S);
 const clean = (text, limit) => String(text ?? "").replace(/[\t\r\n\x00-\x1f]/g, " ").trim().slice(0, limit);
 const country = (text) => (/^[A-Za-z]{2}$/.test(text ?? "") ? text.toUpperCase() : "--");
 const avatar = (text) => Math.max(0, Math.min(parseInt(text ?? "0", 10) || 0, 255));   // 63 the team's, the colour ones from 64
@@ -170,8 +179,12 @@ async function profiles(cmd, q, request, env) {
       const conn = q.has("conn") ? Math.max(0, Math.min(parseInt(q.get("conn"), 10) || 0, 2)) : 3;
       // The country: where the connection comes from, kept up to date (told back as "c").
       const cc = country(request.cf?.country);
-      await db.prepare("UPDATE users SET seen = ?, status = ?, ms = ?, conn = ?, room = ?, country = CASE WHEN ? <> '--' THEN ? ELSE country END WHERE id = ?")
-        .bind(t, clean(q.get("status"), 40), ms, conn, q.get("room") === "1" ? 1 : 0, cc, cc, me).run();
+      // The time played as the server sees it (playbank): the time since the last ping, when a game was open then or
+      // is now (at most PLAY_STEP_S a ping; the bank at most PLAY_BANK_S). /v1/played takes its minutes from it.
+      const status = clean(q.get("status"), 40);
+      await db.prepare("UPDATE users SET playbank = MIN(?, playbank + CASE WHEN status <> '' OR ? <> '' THEN MAX(0, MIN(? - seen, ?)) ELSE 0 END), " +
+        "seen = ?, status = ?, ms = ?, conn = ?, room = ?, country = CASE WHEN ? <> '--' THEN ? ELSE country END WHERE id = ?")
+        .bind(PLAY_BANK_S, status, t, PLAY_STEP_S, t, status, ms, conn, q.get("room") === "1" ? 1 : 0, cc, cc, me).run();
       const since = Math.max(0, parseInt(q.get("since") ?? "0", 10) || 0);
       const [friends, asked, msgs] = await db.batch([
         db.prepare("SELECT u.name, u.seen FROM friends f JOIN users u ON u.id = f.friend WHERE f.user = ?").bind(me),
@@ -269,7 +282,7 @@ async function profiles(cmd, q, request, env) {
       const since = Math.max(0, parseInt(q.get("since") ?? "0", 10) || 0);
       // The host's time to the server with each room waiting (a console adds its own: its time to the host).
       const [rooms, chat, online] = await db.batch([
-        db.prepare("SELECT r.code, r.host, r.avatar, r.players, r.game, r.name, r.locked, r.size, r.started, r.tags, r.art, " +
+        db.prepare("SELECT r.code, r.host, r.avatar, r.players, r.game, r.name, r.locked, r.size, r.started, r.tags, r.art, r.crc, " +
           "(SELECT u.ms FROM users u WHERE u.lower = lower(r.host)) AS ms FROM rooms r WHERE r.updated > ? ORDER BY r.started, r.updated DESC LIMIT 60")
           .bind(t - ROOM_LIST_S),
         db.prepare("SELECT id, tag, avatar, text, at FROM chat WHERE id > ? ORDER BY id DESC LIMIT 30").bind(since),
@@ -277,7 +290,7 @@ async function profiles(cmd, q, request, env) {
           .bind(t - ONLINE_S, LOBBY_USERS),
       ]);
       return ["OK",
-        ...rooms.results.filter((r) => !r.started).map((r) => ["R", r.code, r.host, r.avatar, r.players, r.game, r.name, r.locked, r.size, r.ms ?? 0, r.art].join("\t")),
+        ...rooms.results.filter((r) => !r.started).map((r) => ["R", r.code, r.host, r.avatar, r.players, r.game, r.name, r.locked, r.size, r.ms ?? 0, r.art, r.crc ?? ""].join("\t")),
         ...rooms.results.filter((r) => r.started).map((r) => ["G", r.code, r.game, Math.max(0, t - r.started), r.tags, r.art].join("\t")),
         ...online.results.map((u) => ["U", u.name, u.country, u.avatar, u.status, u.room, u.ms, u.conn].join("\t")),
         ...chat.results.reverse().map((m) => ["C", m.id, m.tag, m.avatar, m.text, Math.max(0, t - m.at)].join("\t"))];
@@ -291,15 +304,24 @@ async function profiles(cmd, q, request, env) {
         (await db.prepare("SELECT game, name FROM rooms WHERE code = ? AND started = 0 AND updated > ?").bind(code, t - ROOM_LIST_S).first());
       if (!room) return ["ERR none"];
       const who = await db.prepare("SELECT name FROM users WHERE id = ?").bind(me).first();
-      const line = ["invite", who.name, clean(room.game, 40), code, clean(room.name, 24)].join("\t");
+      const line = ["invite", who.name, clean(room.game, 40), code, clean(room.name, ROOM_NAME_MAX)].join("\t");
       const res = await env.INBOX.get(env.INBOX.idFromName("u" + other.id))
         .fetch("https://inbox/push?" + new URLSearchParams({ from: String(me), line }));
       const how = await res.text();
       return how === "busy" ? ["ERR busy"] : ["OK\t" + how];
     }
     case "played": {
-      const minutes = Math.max(0, Math.min(parseInt(q.get("minutes") ?? "0", 10) || 0, 24 * 60));   // one sitting: a day at most
+      const asked = Math.max(0, Math.min(parseInt(q.get("minutes") ?? "0", 10) || 0, 24 * 60));   // one sitting: a day at most
       const code = clean(q.get("code"), 24), game = clean(q.get("game"), 40);
+      // Only the time the server saw a game open (playbank, from the pings; the last stretch since the last ping
+      // counted now): minutes asked for by hand, without playing, are not given.
+      const u = await db.prepare("SELECT playbank, seen, status FROM users WHERE id = ?").bind(me).first();
+      const pending = u && u.status ? Math.max(0, Math.min(t - u.seen, PLAY_STEP_S)) : 0;
+      const bank = Math.min(PLAY_BANK_S, (u ? u.playbank : 0) + pending);
+      const minutes = Math.min(asked, Math.floor(bank / 60));
+      if (asked > minutes + 2) console.log("played: " + me + " asked " + asked + " min, the server saw " + Math.floor(bank / 60));
+      await db.prepare("UPDATE users SET playbank = ?, seen = CASE WHEN ? > 0 THEN ? ELSE seen END WHERE id = ?")
+        .bind(bank - minutes * 60, pending, t, me).run();
       if (minutes && code)
         await db.batch([
           db.prepare("INSERT INTO played (user, code, game, minutes) VALUES (?, ?, ?, ?) ON CONFLICT (user, code) DO UPDATE SET minutes = minutes + excluded.minutes")
@@ -347,6 +369,21 @@ async function profiles(cmd, q, request, env) {
         db.prepare("DELETE FROM chat WHERE id <= (SELECT MAX(id) FROM chat) - ?").bind(CHAT_KEEP),
       ]);
       return ["OK"];
+    }
+    case "week": {
+      // This week's ranking by time played online: the days left, this player's place and seconds, then the first
+      // WEEK_TOP (place name country avatar seconds online) - with &list=1 a page of PAGE from &offset= (Players' tab).
+      const week = weekOf(t), list = q.get("list") === "1";
+      const offset = list ? Math.max(0, parseInt(q.get("offset") ?? "0", 10) || 0) : 0;
+      const [top, mine] = await db.batch([
+        db.prepare("SELECT u.name, u.country, u.avatar, u.seen, w.seconds FROM weekly w JOIN users u ON u.id = w.user WHERE w.week = ? " +
+          "ORDER BY w.seconds DESC, w.user LIMIT ? OFFSET ?").bind(week, list ? PAGE : WEEK_TOP, offset),
+        db.prepare("SELECT seconds, (SELECT COUNT(*) FROM weekly o WHERE o.week = ?1 AND o.seconds > w.seconds) AS above " +
+          "FROM weekly w WHERE w.week = ?1 AND w.user = ?2").bind(week, me),
+      ]);
+      const m = mine.results[0], left = Math.max(1, Math.ceil((MONDAY0 + (week + 1) * WEEK_S - t) / 86400));
+      return ["OK\t" + [left, m ? m.above + 1 : 0, m ? m.seconds : 0].join("\t"),
+        ...top.results.map((u, i) => [offset + i + 1, u.name, u.country, u.avatar, u.seconds, t - u.seen < ONLINE_S ? 1 : 0].join("\t"))];
     }
     case "rank": {
       const offset = Math.max(0, parseInt(q.get("offset") ?? "0", 10) || 0);
@@ -444,7 +481,7 @@ async function room(request, url, env) {
     conn: String(Math.max(0, Math.min(parseInt(q.get("conn") ?? "0", 10) || 0, 2))) });
   args.set("pass", clean(q.get("pass"), 16));
   if (q.get("op") === "create") {
-    args.set("name", clean(q.get("name"), 24) || who.name);
+    args.set("name", clean(q.get("name"), ROOM_NAME_MAX) || who.name);
     args.set("game", clean(q.get("game"), 40));
     args.set("crc1", clean(q.get("crc1"), 8));
     args.set("crc2", clean(q.get("crc2"), 8));
@@ -657,11 +694,13 @@ export class Room {
     const db = this.env.DB;
     try {
       if (this.open && this.players.length)
-        await db.prepare("INSERT INTO rooms (code, host, avatar, players, game, name, locked, updated, size, started, tags, art) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+        await db.prepare("INSERT INTO rooms (code, host, avatar, players, game, name, locked, updated, size, started, tags, art, crc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
           "ON CONFLICT (code) DO UPDATE SET host = excluded.host, avatar = excluded.avatar, players = excluded.players, game = excluded.game, " +
-          "name = excluded.name, locked = excluded.locked, updated = excluded.updated, size = excluded.size, started = excluded.started, tags = excluded.tags, art = excluded.art")
+          "name = excluded.name, locked = excluded.locked, updated = excluded.updated, size = excluded.size, started = excluded.started, tags = excluded.tags, art = excluded.art, " +
+          "crc = excluded.crc")
           .bind(this.code, this.players[0].tag, this.players[0].avatar, this.total(), this.game.name, this.name, this.pass ? 1 : 0, now(),
-            this.size, this.started ? this.startedAt : 0, this.started ? this.playing().map((p) => p.tag).join(",") : "", this.game.art).run();
+            this.size, this.started ? this.startedAt : 0, this.started ? this.playing().map((p) => p.tag).join(",") : "", this.game.art,
+            (this.game.crc1 + " " + this.game.crc2).trim()).run();
       else if (this.code) await db.prepare("DELETE FROM rooms WHERE code = ?").bind(this.code).run();
     } catch (e) {
       console.log("room list: " + e);
@@ -767,15 +806,28 @@ export class Room {
     } catch (e) { /* a count missed changes nothing of the game */ }
   }
 
-  // A console out of the game: the others play on without it, its port's controller let go.
+  // A console out of the game: the others play on without it, its port's controller let go; its time in the game
+  // added to this week's ranking.
   quit(p) {
     if (!p.playing) return;
     p.playing = false;
+    if (this.startedAt) this.week(p.tag, now() - this.startedAt);
     const bye = new Uint8Array(16);
     bye[0] = p.port;
     bye[3] = 4;
     for (const o of this.playing()) this.send(o, bye);
     p.port = 0;
+  }
+
+  async week(tag, secs) {
+    secs = Math.min(secs, WEEK_GAME_S);
+    if (!tag || secs < WEEK_MIN_S) return;
+    try {
+      await this.env.DB.prepare("INSERT INTO weekly (week, user, seconds) SELECT ?, id, ? FROM users WHERE lower = ? " +
+        "ON CONFLICT (week, user) DO UPDATE SET seconds = seconds + excluded.seconds").bind(weekOf(now()), secs, tag.toLowerCase()).run();
+    } catch (e) {
+      console.log("week: " + e);
+    }
   }
 
   // Nobody plays any more: the room waits for its next game with whoever came back to it.

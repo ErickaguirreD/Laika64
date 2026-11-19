@@ -3,7 +3,8 @@
 CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, lower TEXT NOT NULL UNIQUE,
     token TEXT NOT NULL, country TEXT NOT NULL, avatar INTEGER NOT NULL, created INTEGER NOT NULL,
     seen INTEGER NOT NULL, status TEXT NOT NULL DEFAULT '', minutes INTEGER NOT NULL DEFAULT 0,
-    ms INTEGER NOT NULL DEFAULT 0, conn INTEGER NOT NULL DEFAULT 0, room INTEGER NOT NULL DEFAULT 0);
+    ms INTEGER NOT NULL DEFAULT 0, conn INTEGER NOT NULL DEFAULT 0, room INTEGER NOT NULL DEFAULT 0,
+    playbank INTEGER NOT NULL DEFAULT 0);   -- the time played the server saw (pings with a game open), not yet claimed
 CREATE INDEX IF NOT EXISTS users_minutes ON users (minutes DESC);
 -- A friendship, each way, and since when (0: before 2.2.2, not known).
 CREATE TABLE IF NOT EXISTS friends (user INTEGER NOT NULL, friend INTEGER NOT NULL, at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (user, friend));
@@ -19,7 +20,8 @@ CREATE TABLE IF NOT EXISTS news (id INTEGER PRIMARY KEY, date TEXT NOT NULL, lan
 -- Object keeps its own row.
 CREATE TABLE IF NOT EXISTS rooms (code TEXT PRIMARY KEY, host TEXT NOT NULL, avatar INTEGER NOT NULL, players INTEGER NOT NULL,
     game TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', locked INTEGER NOT NULL DEFAULT 0, updated INTEGER NOT NULL,
-    size INTEGER NOT NULL DEFAULT 4, started INTEGER NOT NULL DEFAULT 0, tags TEXT NOT NULL DEFAULT '', art TEXT NOT NULL DEFAULT '');
+    size INTEGER NOT NULL DEFAULT 4, started INTEGER NOT NULL DEFAULT 0, tags TEXT NOT NULL DEFAULT '', art TEXT NOT NULL DEFAULT '',
+    crc TEXT NOT NULL DEFAULT '');
 -- The general chat (the last messages), and when each player last wrote in it.
 CREATE TABLE IF NOT EXISTS chat (id INTEGER PRIMARY KEY, at INTEGER NOT NULL, tag TEXT NOT NULL, avatar INTEGER NOT NULL, text TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS said (user INTEGER PRIMARY KEY, at INTEGER NOT NULL);
@@ -31,3 +33,4 @@ CREATE INDEX IF NOT EXISTS dm_to ON dm (to_id, id);
 CREATE INDEX IF NOT EXISTS dm_from ON dm (from_id, at);
 -- Gamertags given up by a rename, kept for their old owner until `until` (index.js NAME_HOLD_S).
 CREATE TABLE IF NOT EXISTS held_names (lower TEXT PRIMARY KEY, owner INTEGER NOT NULL, until INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS weekly (week INTEGER NOT NULL, user INTEGER NOT NULL, seconds INTEGER NOT NULL, PRIMARY KEY (week, user));

@@ -149,3 +149,27 @@ void h64_rom_free(H64Rom *rom)
     rom->data = 0;
     rom->size = 0;
 }
+
+struct RomDbEntry { u32 crc1, crc2; int kind; const char *name; };
+static const RomDbEntry s_romDb[] = {
+#include "h64_romdb.inc"
+};
+
+int h64_rom_catalogue(u32 crc1, u32 crc2, const char **name)
+{
+    int lo = 0, hi = (int)(sizeof(s_romDb) / sizeof(s_romDb[0])) - 1;
+    if (name) *name = NULL;
+    while (lo <= hi)   // sorted by CRC1, then CRC2
+    {
+        int mid = (lo + hi) / 2;
+        const RomDbEntry *e = &s_romDb[mid];
+        if (e->crc1 == crc1 && e->crc2 == crc2)
+        {
+            if (name) *name = e->name;
+            return e->kind;
+        }
+        if (e->crc1 < crc1 || (e->crc1 == crc1 && e->crc2 < crc2)) lo = mid + 1;
+        else hi = mid - 1;
+    }
+    return H64_ROMKIND_UNKNOWN;
+}

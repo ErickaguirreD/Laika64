@@ -6,6 +6,8 @@
 #ifndef XB_CONFIG_H
 #define XB_CONFIG_H
 
+#define CONFIG_STATE_SLOTS 18   // the save state slots (1 to 18)
+
 #include "../../core/common/h64_types.h"
 #include "../../core/pif/h64_input_script.h"
 #include "../../core/pif/h64_padmap.h"
@@ -21,6 +23,7 @@ struct Config
     char rom[256];      // rom=PATH: run this ROM directly (no ROM browser)
     char lastRom[256];  // lastrom=PATH: the ROM browser's selection (written by the menu)
     char lastVersion[16];   // lastver=1.3: the version whose news were shown (a newer one shows its news once)
+    char updateSeen[16];    // updseen=3.1: the newer release already offered at a start (offered once a version)
     int hle;            // hle=0: RSP tasks on the LLE RSP
     int softRenderer;   // renderer=soft: the software RDP draws into RDRAM, Xenos only shows RDRAM (diagnosis)
     int xenosDebug;     // xenosdebug=1..4: renderer debug output (h64_xenos_set_debug)
@@ -127,8 +130,9 @@ struct Config
     int borderGlow;     // borderglow=0|1|2: the glow around the menus - pulsing, steady, none
     int panelOpacity;   // panelopacity=0..100: how solid the panels are, in % (default 30)
     int panelColor;     // panelcolor=0..13: the panels' body - the interface's own (0), or a tint of xb_menu.cpp's swatches
-    int settingsView;   // setview=0|1: the settings as the side list (0), or big icons with an explanation of each row (1)
     int statsShare;     // statsshare=-1|0|1: anonymous statistics on leaving a game (xb_stats.cpp) - not asked yet (-1), no, yes
+    int showNews;       // shownews=1 (default): the main menu's news ticker (Interface > Show news)
+    int startScreen;    // startscreen=0..2: when LAIKA opens, the main menu (0, default), the game list (1) or Online play (2)
     int intro;          // intro=0|1: the LAIKA 64 logo when the emulator starts (Interface > Welcome intro; default 1)
     int sharpLevel;     // sharplevel=0..100: sharpening as a bar (0 off); from sharpen= (1: 50, 2: 100) when a file has none
     int blurLevel;      // blurlevel=0..100: blur as a bar (0 off); from blur= likewise. Only one of the two is above 0
@@ -154,7 +158,7 @@ struct Config
     int lateParse;      // lateparse=0/1: graphics tasks end without waiting for their parse (experimental; -1: per game)
     int cpi;            // cpi=N: CPU cycles per instruction (2 by default; mupen64plus's CountPerOp N is 2N)
     int audioMs;        // audioms=N: audio queue target in ms (pacing threshold)
-    int stateSlot;      // stateslot=N: save state slot at start (1..9)
+    int stateSlot;      // stateslot=N: save state slot at start (1..CONFIG_STATE_SLOTS)
     int loadState;      // loadstate=1: load the slot's state at start (scripted runs)
     u32 saveStateAt;    // savestateat=N: save a state at VI N (scripted runs)
     u32 menuAt;         // menuat=N: open the in-game menu at VI N (remote checks; does not skip the ROM browser)
@@ -174,7 +178,7 @@ struct Config
     int rumble;         // rumble=0..100: the Rumble Pak's strength in % (0: off; default 100; an older file's 1 is 100)
     int padLoss;        // padloss=0|1|2: a controller unplugged during a game saves a state (autosaveslot) and
                         // pauses (1), or only pauses (2); 0: nothing (default)
-    int autoSaveSlot;   // autosaveslot=1..9: that save's slot (9 by default), kept for it while padloss=1
+    int autoSaveSlot;   // autosaveslot=1..CONFIG_STATE_SLOTS: that save's slot (the last by default), kept for it while padloss=1
     int batteryWarn;    // batterywarn=0|10|25|50: a message when a wireless controller's battery is at or under
                         // that percent (0: off, the default)
     int uiSounds;       // uisounds=0|1: the menus' button sounds (default 1)
@@ -219,5 +223,7 @@ int ConfigWriteMenuKeys(const Config *c, const char *path, int withLastRom);
 // Sets lang= in the menu's settings file (the other lines stay; the file is
 // made when missing). Returns 0 on failure.
 int ConfigWriteLang(const char *path, const char *code);
+// One key=value line of a settings file the menu wrote: replaced, or added; the other lines kept. 1 when written.
+int ConfigWriteKey(const char *path, const char *key, const char *value);
 
 #endif

@@ -16,6 +16,10 @@
 #define XB_ART_H
 
 #include "../../core/cart/h64_gameinfo.h"
+
+// A hack (for ScreenScraper's videos, xb_preview.cpp): 1 with its whole file's CRC32 (hex), its header's name
+// without its version ("MK64 - AMPED UP"; "" when it is its file's) and the game it is made from ("" unknown).
+int ArtSsHint(const char *romPath, char *crc, size_t crcSize, char *header, size_t headerSize, char *base, size_t baseSize);
 #include "../../core/common/h64_types.h"
 
 // The size covers are decoded to (UI pixels: the browser draws them 1:1 or smaller).
@@ -32,9 +36,14 @@
 // ScreenScraper's (pictures with their alpha) for one view each: the 3D box
 // (the 3D boxes and single game views) and the game's cartridge (the cartridges
 // view) - not in `kinds` below, downloaded only while their view asks for them.
-enum { ART_KIND_BOX = 0, ART_KIND_SNAP, ART_KIND_TITLE, ART_KIND_LOGO, ART_KIND_BOX3D, ART_KIND_CART, ART_KIND_COUNT };
+enum { ART_KIND_BOX = 0, ART_KIND_SNAP, ART_KIND_TITLE, ART_KIND_LOGO, ART_KIND_BOX3D, ART_KIND_CART, ART_KIND_MIX, ART_KIND_BACK, ART_KIND_FANART,
+       ART_KIND_COUNT };
 // The kinds only a view of their own asks for (ScreenScraper's alone, their alpha kept).
 #define ART_KIND_VIEW_ONLY(k) ((k) == ART_KIND_BOX3D || (k) == ART_KIND_CART)
+// ScreenScraper's composite (the screenshot, the 3D box, the cartridge and the logo in one), the back of the box and the
+// fanart: downloaded only when the detailed view's picker asks for them (ArtFetchKind), never by the list or "download all".
+#define ART_KIND_PICKER_ONLY(k) ((k) >= ART_KIND_MIX)
+#define ART_KIND_SS_ONLY(k) (ART_KIND_VIEW_ONLY(k) || ART_KIND_PICKER_ONLY(k))   // ScreenScraper's alone (libretro has none)
 
 struct ArtResult
 {
@@ -117,6 +126,16 @@ int ArtKindFor(const char *romPath);
 int ArtReadCover(const char *romPath, int kind, u8 **rgba, int *w, int *h, int *gotKind);   // gotKind: the one read (the box as a fallback)
 // The same by a game's cache key (ArtKeyOf's), without its ROM: another console's room's game.
 int ArtReadCoverKey(const char *key, int kind, u8 **rgba, int *w, int *h, int *gotKind);
+// One kind of a game's pictures deleted (the detailed view's "get it again"): its download (ArtBulkStart with retry)
+// then fetches it anew. From the browser's thread, after ArtStart.
+void ArtDropPicture(const char *romPath, int kind);
+// One kind of a game's pictures downloaded (the detailed view's picker), whatever Game images allows: libretro's
+// box, picture from the game, title screen, logo; ScreenScraper's 3D box and cartridge (and its box or logo where
+// libretro has none). Queued before the list's own downloads; ArtFetchBusy: 1 while one of that ROM waits or goes on.
+void ArtFetchKind(const char *romPath, int kind);
+int ArtFetchBusy(const char *romPath);
+int ArtFetchBusyKind(const char *romPath, int kind);   // that kind of it waits or goes on
+int ArtFetchCount(void);                              // how many have finished so far (a new one: read again)
 // One kind of a game's pictures exactly (no box instead), with its alpha, as
 // large as maxW x maxH (smaller ones as they are): the cinema view's picture
 // from the game and logo. Read on the calling thread; 0 when there is none.
