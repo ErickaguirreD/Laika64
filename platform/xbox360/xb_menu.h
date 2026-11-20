@@ -192,6 +192,7 @@ int BatteryCheck(const Config *c, char *msg, int size);
 // ---- Rumble ----
 // main.cpp: the menus set the controllers' motors themselves; the game's Rumble Pak sends its own again next frame.
 void RumbleForget(void);
+void MenuInGame(int on);   // main.cpp: a game runs (the right stick is the game's: no music volume or track then)
 void OnlineGameAvatar(float cx, float cy, float r, int avatar, const char *tag);   // between UiBegin and UiEnd
 
 // ---- ROM browser ----

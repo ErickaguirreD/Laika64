@@ -20,6 +20,7 @@
 #include <math.h>
 #include <stdarg.h>
 #include <share.h>
+#include <io.h>
 
 #include <string>
 #include <ppcintrinsics.h>
@@ -157,6 +158,8 @@ static HANDLE s_logThread;
 static volatile LONG s_logQuit;
 
 static CRITICAL_SECTION s_logFileLock;   // the file only: the buffer lock is never held while writing
+static volatile LONG s_logDurable;        // online: the log thread commits the file to the disk (a whole-console hang lost
+                                         // the log's last minute: the Fat, Smash Remix online 2026-11-19)
 
 static void LogFlush(void)
 {
@@ -176,10 +179,19 @@ static void LogFlush(void)
 
 static DWORD WINAPI LogThread(LPVOID)
 {
+    int beat = 0;
     while (!s_logQuit)
     {
         Sleep(500);
         LogFlush();
+        if (s_logDurable && s_log && ++beat >= 4)
+        {
+            // Every 2 s: fflush only hands the bytes to the system, whose cache a hard hang never writes.
+            EnterCriticalSection(&s_logFileLock);
+            _commit(_fileno(s_log));
+            LeaveCriticalSection(&s_logFileLock);
+            beat = 0;
+        }
     }
     return 0;
 }
@@ -1642,11 +1654,14 @@ static void NetPad(H64System *sys)
     {
         const DWORD waitAt = GetTickCount();
         DWORD shownAt = waitAt;
-        int told = 0;
+        int told = 0, still = 0;
         s_netWaits++;
         while (s_netMode > 0 && !NetReady(n))
         {
             NetPump(2);
+            // The motors stop while the game waits: no frame runs, so the last level stayed on (pads vibrating by
+            // themselves through every ~2 s wait, and through another player's menu).
+            if (!still && GetTickCount() - waitAt >= 150) { RumbleUpdate(sys, 1); still = 1; }
             // Still here. Directly, every NET_P2P_NUDGE_MS: each message carries this console's last inputs again, and
             // a packet lost on the way left both consoles waiting for each other until the next ping (~0.5 s
             // freezes at the same frame on both, Mario Kart 2026-11-18).
@@ -1913,6 +1928,15 @@ static void NetP2pSetup(u32 token)
     }
     // Not every way works: the room for everyone (a console that decided otherwise is told).
     NetWsSend(s_netWs, "p2p\toff", 7, 1);
+    if (s_netP2pOpen && mask)
+    {
+        // Some way works here (a verdict late, or one way not yet open): the probes go on and NetPump takes the direct
+        // way when every console reaches every other. Closing it kept a whole 3-player game on the server (Smash
+        // Remix 2026-11-19: one verdict missed the 2.5 s here while all three reached each other; ~2 s waits each 21 s).
+        s_netP2pOffAt = GetTickCount();
+        H64_INFO("[net] direct: through the room for now, probing goes on");
+        return;
+    }
     if (s_netP2pOpen) P2pClose();
     s_netP2pOpen = 0;
 }
@@ -3996,8 +4020,14 @@ static int RunGameBody(IDirect3DDevice9 *dev, Config *c, const char *romPath);
 // stats, the saves) went back to Aurora with nothing in the log.
 static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
 {
-    __try { return RunGameBody(dev, c, romPath); }
-    __except (CrashFilter(GetExceptionInformation())) { return RG_DASHBOARD; }
+    int r;
+    MenuInGame(1);
+    XEnableScreenSaver(FALSE);   // the system dimmed the picture after minutes without a press (watching, or the other player's turn)
+    __try { r = RunGameBody(dev, c, romPath); }
+    __except (CrashFilter(GetExceptionInformation())) { r = RG_DASHBOARD; }
+    MenuInGame(0);
+    XEnableScreenSaver(TRUE);
+    return r;
 }
 
 static int RunGameBody(IDirect3DDevice9 *dev, Config *c, const char *romPath)
@@ -4121,9 +4151,11 @@ static int RunGameBody(IDirect3DDevice9 *dev, Config *c, const char *romPath)
     H64_INFO("[main] running %s: cpu %s, RSP %s, %s renderer", rom, jit ? "recompiler" : "interpreter",
              c->hle ? "HLE" : "LLE", c->softRenderer ? "software" : "Xenos");
     if (c->hle && !c->trace)
-        // Online: the graphics HLE on the CPU thread too. On the workers, Smash Remix 2.0.1 went out of step at frame
-        // 420-780 on every game between two consoles; with both on the CPU thread, 8 minutes without one (59.5 VI/s).
-        WorkersStart(sys, dev, renderer, c->asyncGfx && !c->softRenderer && s_netMode <= 0, c->gfxCycles ? c->gfxCycles : 400000,
+        // Online: the graphics worker always, whatever harissa64v2.ini says (every console the same way). On the CPU
+        // thread (3.1-3.2 online) the whole console hung or powered off after 11-21 minutes of Smash Remix, offline as
+        // well with asyncgfx=0; the desync blamed on the worker was one console left with asyncgfx=0 - both on the
+        // worker, the whole RDRAM and the CPU agreed for every second of the game (2026-11-19).
+        WorkersStart(sys, dev, renderer, (c->asyncGfx || s_netMode > 0) && !c->softRenderer, c->gfxCycles ? c->gfxCycles : 400000,
                      // Online: the audio HLE on the CPU thread. On its worker it reads the game's RDRAM while
                      // the CPU goes on writing it, and the samples mixed came out a little different on the
                      // two consoles (state out of step, RDRAM 06E000-07C000 in Smash Remix).
@@ -4306,6 +4338,7 @@ static int RunGameBody(IDirect3DDevice9 *dev, Config *c, const char *romPath)
             menuRequest = 1;   // pause: the in-game menu, below
         }
         RumbleUpdate(sys, 0);
+        s_logDurable = s_netMode > 0;
         // BACK held for 3 s goes back to the ROM list (the dashboard is left
         // only from the in-game menu or the ROM list); with BACK held, RB/LB
         // save/load a state and the D-pad changes the slot. The hold time adds

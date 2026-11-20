@@ -7328,7 +7328,7 @@ static int update_run(IDirect3DDevice9 *dev, const char *version)
 
 // What is new in this version: NEWS_1..NEWS_COUNT (the menus' language), once after an update, in the ROM
 // list's card (news_card). Each release changes the NEWS_* texts (and NEWS_COUNT).
-#define NEWS_COUNT 7
+#define NEWS_COUNT 5
 
 // ---- About ----
 // Settings > About (and X in the ROM browser and the in-game menu): three tabs,
@@ -9030,6 +9030,7 @@ static int s_homeHeld;
 #define LAIKA_BARK_S 0.048f        // a frame of a bark: a bark each 0.43 s, as in her double bark's sound (xb_laika_bark.h)
 #define LAIKA_BARK_OPEN 3          // the frame her mouth opens: the bark heard
 #define LAIKA_FADE_S 0.15f         // standing into the barking pose and back (drawn apart: crossed over)
+#define LAIKA_GIVE_S 0.14f         // a frame of her sitting by the heart (the novelties asking for donations), as the GIF
 
 enum { LK_PLAY = 0, LK_BOUNDS, LK_TURN, LK_HOLD, LK_FADE, LK_BARK };
 struct LaikaClip { int kind, from, to, flip; float secs; };   // PLAY: frames from..to; BOUNDS: `from` jumps; HOLD: frame `from`;
@@ -9221,7 +9222,8 @@ static void laika_frame_wag(const Laika *lk, int f, int flip, float breathe, flo
 static void laika_still(const Laika *lk, int f, int flip, float now)
 {
     const int calm = f == LAIKA_SITTING || f == LAIKA_LYING || f == LAIKA_STANDING;
-    if (f == LAIKA_LYING) laika_frame_wag(lk, f, flip, 0.01f * sinf(now * 3.0f), now);
+    if (f == LAIKA_GIVE) laika_frame(lk, LAIKA_GIVE + (int)(now / LAIKA_GIVE_S) % LAIKA_GIVE_N, 1.0f, flip, 0);   // the heart beating
+    else if (f == LAIKA_LYING) laika_frame_wag(lk, f, flip, 0.01f * sinf(now * 3.0f), now);
     else laika_frame(lk, f, 1.0f, flip, calm ? 0.01f * sinf(now * 3.0f) : 0);
 }
 
@@ -15325,16 +15327,64 @@ static int online_play_run(IDirect3DDevice9 *dev)
 // (X opens the keyboard - it used to be always there, under half of the screen; B closes it, RT sends). Read again every
 // few seconds. Returns 1 when a game starts (the friend's room joined from here).
 #define QUICK_PHRASES 6
+
+// The conversation's requests on a thread of their own: each one a new HTTPS connection, up to a second or more, and
+// the screen stood still through each (every 5 s, and on each message sent - Slim E 2026-11-19). One at a time: a
+// message to send first, then the messages after `since`.
+static struct ConvJob
+{
+    HANDLE thread;
+    volatile LONG done;
+    char with[32], send[124];
+    int since, sent, readOk;
+    char sendError[32];
+    std::vector<OnlineDmLine> fresh;
+} s_conv;
+
+static DWORD WINAPI conv_thread(LPVOID)
+{
+    s_conv.sent = 1;
+    s_conv.sendError[0] = 0;
+    if (s_conv.send[0])
+    {
+        s_conv.sent = OnlineDm(s_conv.with, s_conv.send);
+        if (!s_conv.sent) { strncpy(s_conv.sendError, OnlineError(), sizeof(s_conv.sendError) - 1); s_conv.sendError[sizeof(s_conv.sendError) - 1] = 0; }
+    }
+    s_conv.readOk = OnlineConv(s_conv.with, s_conv.since, &s_conv.fresh);
+    InterlockedExchange(&s_conv.done, 1);
+    return 0;
+}
+
+static int conv_start(const char *with, int since, const char *send)
+{
+    if (s_conv.thread) return 0;
+    strncpy(s_conv.with, with, sizeof(s_conv.with) - 1);
+    s_conv.with[sizeof(s_conv.with) - 1] = 0;
+    strncpy(s_conv.send, send ? send : "", sizeof(s_conv.send) - 1);
+    s_conv.send[sizeof(s_conv.send) - 1] = 0;
+    s_conv.since = since;
+    s_conv.done = 0;
+    s_conv.thread = CreateThread(NULL, 256 * 1024, conv_thread, NULL, 0, NULL);
+    return s_conv.thread != NULL;
+}
+
+static void conv_join(void)
+{
+    if (!s_conv.thread) return;
+    WaitForSingleObject(s_conv.thread, INFINITE);
+    CloseHandle(s_conv.thread);
+    s_conv.thread = NULL;
+}
 static int online_conversation(IDirect3DDevice9 *dev, const char *with, int avatar)
 {
-    std::vector<OnlineDmLine> lines, fresh;
+    std::vector<OnlineDmLine> lines;
     std::vector<OnlineUser> friends;
     std::vector<OnlineRoomInfo> rooms;
     OnlineUser who;
     OnlineKbd kb;
     UiInput in;
     DWORD readAt;
-    char text[124] = "";
+    char text[124] = "", queued[124] = "";   // queued: a message waiting for the request in flight
     int last = 0, k, typing = 0, phrase = 0, room = -1;
     BYTE rtWas = 255, ltWas = 255;
     kbd_init(&kb, text, 1, 120, KBD_CHAT);
@@ -15374,7 +15424,7 @@ static int online_conversation(IDirect3DDevice9 *dev, const char *with, int avat
         }
         else
         {
-            if (down & XINPUT_GAMEPAD_B) { xb_audio_ui_sound(XB_SFX_BACK); return 0; }
+            if (down & XINPUT_GAMEPAD_B) { xb_audio_ui_sound(XB_SFX_BACK); conv_join(); return 0; }
             if (down & (XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT))
             {
                 phrase = (phrase + ((down & XINPUT_GAMEPAD_DPAD_RIGHT) ? 1 : QUICK_PHRASES - 1)) % QUICK_PHRASES;
@@ -15388,6 +15438,7 @@ static int online_conversation(IDirect3DDevice9 *dev, const char *with, int avat
                 // Into the friend's room (its password asked when it has one).
                 char pass[ONLINE_ROOM_PASS + 1] = "";
                 xb_audio_ui_sound(XB_SFX_SELECT);
+                conv_join();
                 if (!rooms[room].locked || online_keyboard(dev, rooms[room].name, Tr(T_ONLINE_PASSWORD_ASK), pass, 1, ONLINE_ROOM_PASS, KBD_NAME))
                 {
                     online_busy(dev, Tr(T_ONLINE_PLAY), T_ONLINE_CONNECTING);
@@ -15399,22 +15450,32 @@ static int online_conversation(IDirect3DDevice9 *dev, const char *with, int avat
             }
         }
         rtWas = rt;
-        if (sendText)
+        if (sendText && !queued[0])
         {
-            if (OnlineDm(with, sendText))
-            {
-                if (sendText == text) { text[0] = 0; typing = 0; }
-                xb_audio_ui_sound(XB_SFX_SELECT);
-                readAt = 0;
-            }
-            else online_message(dev, with, !strcmp(OnlineError(), "busy") ? Tr(T_ONLINE_CHAT_SOON) : online_error_text());
+            // Sent by the thread (with a reading after it): the bar empties at once.
+            strncpy(queued, sendText, sizeof(queued) - 1);
+            queued[sizeof(queued) - 1] = 0;
+            if (sendText == text) { text[0] = 0; typing = 0; }
+            xb_audio_ui_sound(XB_SFX_SELECT);
             UiInputInit(&in);
         }
-        if ((int)(GetTickCount() - readAt) >= 0)
+        if (s_conv.thread && s_conv.done)
         {
-            if (OnlineConv(with, last, &fresh))
-                for (k = 0; k < (int)fresh.size(); k++) { lines.push_back(fresh[k]); last = fresh[k].id; }
+            const int hadSend = s_conv.send[0] != 0;
+            conv_join();
+            if (s_conv.readOk)
+                for (k = 0; k < (int)s_conv.fresh.size(); k++)
+                    if (s_conv.fresh[k].id > last) { lines.push_back(s_conv.fresh[k]); last = s_conv.fresh[k].id; }
             OnlineUnreadClear(with);
+            if (hadSend && !s_conv.sent)
+            {
+                online_message(dev, with, !strcmp(s_conv.sendError, "busy") ? Tr(T_ONLINE_CHAT_SOON) : online_error_text());
+                UiInputInit(&in);
+            }
+        }
+        if (!s_conv.thread && (queued[0] || (int)(GetTickCount() - readAt) >= 0))
+        {
+            if (conv_start(with, last, queued)) queued[0] = 0;
             readAt = GetTickCount() + 5000;
         }
         dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
@@ -20064,6 +20125,8 @@ static void music_volume_stick(Config *c, const char *settingsPath, int tracks =
         if (settingsPath) ConfigWriteMenuKeys(c, settingsPath, 1);
     }
 }   // Config::notify, as the ROM list last read it (8: the controllers' pulse)
+static int s_inGame;
+void MenuInGame(int on) { s_inGame = on; }
 static char s_gNoteText[256];
 static int s_gNoteKind;
 static DWORD s_gNoteAt;
@@ -20072,7 +20135,8 @@ static void global_notes(void)
     note_buzz_tick();   // (first: a screen with its own notices returns below)
     arrive_frame_end();
     if (s_rsOwned) s_rsOwned = 0;   // a page using the right stick itself (Controls, calibration): no volume there
-    else if (s_browser && s_hookCfg)
+    else if (s_browser && s_hookCfg && !s_inGame)   // (in a game the stick is the game's: Smash's C buttons changed the
+                                                    // music's volume and track through the online overlays)
     {
         // Settings, Online play, the main menu, the other screens from the list: RS up and down the music's volume
         // there too; left and right the track, but online (its screens use the right stick: the players, inviting)
@@ -21071,58 +21135,16 @@ static void home_rise(float openAt, int k)
 static int s_homeNews;
 static void home_news_icon(int k, float cx, float cy)
 {
-    const D3DCOLOR wh = D3DCOLOR_ARGB(255, 255, 255, 255);
-    int i;
-    // (the novelties in order: online, LAIKA, the pause menu, the main menu, the slots, romhacks' box art, music)
-    if (k == 0) { menu_icon(UI_ICON_GLOBE, cx, cy, wh); return; }
-    if (k == 6) { menu_icon(UI_ICON_MUSIC, cx, cy, wh); return; }
-    if (k == 2)
-    {
-        // two bars (the pause menu)
-        UiRoundRect(cx - 8, cy - 9, 5, 18, 2, wh, wh);
-        UiRoundRect(cx + 3, cy - 9, 5, 18, 2, wh, wh);
-        return;
-    }
-    if (k == 4)
-    {
-        // a grid of slots
-        int a, b;
-        for (a = 0; a < 3; a++)
-            for (b = 0; b < 2; b++) UiRoundRect(cx - 11 + a * 8, cy - 8 + b * 9, 6, 6, 1, wh, wh);
-        return;
-    }
-    k = k == 1 ? 0 : k == 3 ? 1 : 3;   // LAIKA: a paw; the main menu: tiles; romhacks: a picture
-    if (k == 0)
-    {
-        // a paw (LAIKA)
-        static const float toe[4][2] = { { -11, -8 }, { -4, -13 }, { 4, -13 }, { 11, -8 } };
-        UiCircle(cx, cy + 5, 9, wh);
-        for (i = 0; i < 4; i++) UiCircle(cx + toe[i][0], cy + toe[i][1], 4, wh);
-    }
-    else if (k == 1)
-    {
-        // four tiles (the main menu)
-        UiRoundRect(cx - 10, cy - 10, 8, 8, 2, wh, wh);
-        UiRoundRect(cx + 2, cy - 10, 8, 8, 2, wh, wh);
-        UiRoundRect(cx - 10, cy + 2, 8, 8, 2, wh, wh);
-        UiRoundRect(cx + 2, cy + 2, 8, 8, 2, wh, wh);
-    }
-    else if (k == 2) UiText(UI_BOLD, 17, cx, cy, D3DCOLOR_ARGB(255, 30, 24, 10), "HD", UI_CENTER);   // the HD packs
-    else
-    {
-        // a picture (the games' images)
-        const float m[10] = { cx - 9, cy + 6, cx - 2, cy - 2, cx + 3, cy + 3, cx + 6, cy, cx + 10, cy + 6 };
-        UiRoundRing(cx - 12, cy - 9, 24, 18, 3, 3.0f, wh);
-        fill_convex(m, 3, wh);
-        fill_convex(m + 4, 3, wh);
-    }
+    // (the novelties in order: online without hangs, the direct way, the chat, the rumble, the screen and the stick)
+    static const int icon[NEWS_COUNT] = { UI_ICON_GLOBE, UI_ICON_FRIENDS, UI_ICON_CHAT, UI_ICON_CONTROLS, UI_ICON_SUN };
+    menu_icon(icon[k], cx, cy, D3DCOLOR_ARGB(255, 255, 255, 255));
 }
 
 static void home_news(float a, Laika *nlk)
 {
-    static const D3DCOLOR col[NEWS_COUNT] = { D3DCOLOR_ARGB(255, 80, 200, 140), D3DCOLOR_ARGB(255, 146, 97, 238), D3DCOLOR_ARGB(255, 240, 110, 120),
-                                              D3DCOLOR_ARGB(255, 90, 200, 255), D3DCOLOR_ARGB(255, 240, 180, 80), D3DCOLOR_ARGB(255, 255, 150, 70),
-                                              D3DCOLOR_ARGB(255, 180, 140, 255) };
+    static const D3DCOLOR col[NEWS_COUNT] = { D3DCOLOR_ARGB(255, 80, 200, 140), D3DCOLOR_ARGB(255, 90, 200, 255), D3DCOLOR_ARGB(255, 240, 180, 80),
+                                              D3DCOLOR_ARGB(255, 180, 140, 255), D3DCOLOR_ARGB(255, 255, 150, 70) };
+    const D3DCOLOR red = D3DCOLOR_ARGB(255, 240, 70, 95);
     const float x = 390, y = 36, w = 780, h = 648;
     char t[64];
     float bx, bw, cy;
@@ -21142,23 +21164,41 @@ static void home_news(float a, Laika *nlk)
     UiRoundRect(bx, y + 36, bw, 28, 14, SEL_HI(255), SEL_LO(255));
     UiText(UI_BOLD, 15, bx + bw * 0.5f, y + 50, D3DCOLOR_ARGB(255, 255, 255, 255), t, UI_CENTER);
     UiText(UI_REGULAR, 16, x + 34, y + 88, UI_COL_TEXT3, Tr(T_NEWS_SUB), UI_LEFT);
+    {
+        // Donations first: why (LAIKA needs them: the servers, the next updates), PayPal's address and its QR code
+        const float dy = y + 112, dh = 150, qs = 130, qx = x + w - 40 - qs, mod = qs / 33.0f;
+        char body[600];
+        int r, c2;
+        UiRoundRect(x + 24, dy, w - 48, dh, 16, D3DCOLOR_ARGB(40, 240, 70, 95), D3DCOLOR_ARGB(40, 240, 70, 95));
+        UiRoundRing(x + 24, dy, w - 48, dh, 16, 2.0f, red);
+        UiCircle(x + 62, dy + 40, 20, red);
+        menu_icon(UI_ICON_HEART, x + 62, dy + 40, D3DCOLOR_ARGB(255, 255, 255, 255));
+        UiText(UI_BOLD, 22, x + 98, dy + 30, UI_COL_TEXT, Tr(T_NEWS_DONATE_H), UI_LEFT);
+        UiTextWrap(UI_REGULAR, 15, qx - x - 112, 3, Tr(T_NEWS_DONATE), body, sizeof(body));
+        UiText(UI_REGULAR, 15, x + 98, dy + 60, UI_COL_TEXT2, body, UI_LEFT);
+        UiText(UI_BOLD, 15, x + 98, dy + 130, D3DCOLOR_ARGB(255, 255, 150, 165), DONATE_URL, UI_LEFT);
+        UiRoundRect(qx, dy + 10, qs, qs, 10, 0xFFFFFFFF, 0xFFFFFFFF);
+        for (r = 0; r < 29; r++)
+            for (c2 = 0; s_donateQr[r][c2]; c2++)
+                if (s_donateQr[r][c2] == '1') UiRect(qx + (c2 + 2) * mod, dy + 10 + (r + 2) * mod, mod, mod, D3DCOLOR_ARGB(255, 0, 0, 0));
+    }
     // the novelties
-    for (k = 0, cy = y + 118; k < NEWS_COUNT; k++, cy += 66)
+    for (k = 0, cy = y + 278; k < NEWS_COUNT; k++, cy += 61)
     {
         char fit[200];
-        UiRoundRect(x + 24, cy, w - 48, 58, 14, (col[k] & 0x00FFFFFF) | 0x22000000, (col[k] & 0x00FFFFFF) | 0x22000000);
-        UiCircle(x + 62, cy + 29, 20, col[k]);
-        home_news_icon(k, x + 62, cy + 29);
-        UiText(UI_BOLD, 19, x + 98, cy + 18, UI_COL_TEXT, Tr(T_NEWS_H1 + k), UI_LEFT);
+        UiRoundRect(x + 24, cy, w - 48, 54, 14, (col[k] & 0x00FFFFFF) | 0x22000000, (col[k] & 0x00FFFFFF) | 0x22000000);
+        UiCircle(x + 62, cy + 27, 20, col[k]);
+        home_news_icon(k, x + 62, cy + 27);
+        UiText(UI_BOLD, 19, x + 98, cy + 16, UI_COL_TEXT, Tr(T_NEWS_H1 + k), UI_LEFT);
         UiTextFit(UI_REGULAR, 15, w - 140, Tr(T_NEWS_1 + k), fit, sizeof(fit));
-        UiText(UI_REGULAR, 15, x + 98, cy + 42, UI_COL_TEXT2, fit, UI_LEFT);
+        UiText(UI_REGULAR, 15, x + 98, cy + 39, UI_COL_TEXT2, fit, UI_LEFT);
     }
     UiRect(x + 24, y + h - 50, w - 48, 1, UI_COL_LINE);
     UiFooter(x + 34, y + h - 25, Tr(T_FOOT_NEWS_PLAY));
     // Laika sitting by it, and what she says
     laika_draw(nlk, UiTime());
     {
-        const char *q = Tr(T_LAIKA_NEWS);
+        const char *q = Tr(T_LAIKA_DONATE);
         const float qw = UiTextWidth(UI_BOLD, 19, q) + 40, qx = 60, qy = 270;
         const float tail[6] = { qx + qw - 90, qy + 44, qx + qw - 54, qy + 44, qx + qw - 40, qy + 88 };
         UiRoundRect(qx, qy, qw, 46, 16, D3DCOLOR_ARGB(195, 250, 248, 255), D3DCOLOR_ARGB(195, 238, 234, 250));
@@ -21381,12 +21421,12 @@ static int home_screen(IDirect3DDevice9 *dev, Config *c, const std::vector<RomEn
     s_homeNews = 0;
     if (news)
     {
-        // Laika sitting by the novelties, facing them
+        // Laika by the novelties, facing them
         memset(&newsLk, 0, sizeof(newsLk));
         newsLk.x = 200;
-        newsLk.ground = 600;
-        newsLk.scale = 0.9f;
-        newsLk.still = LAIKA_SITTING;
+        newsLk.ground = 640;
+        newsLk.scale = 0.95f;
+        newsLk.still = LAIKA_GIVE;   // sitting by a beating heart (the novelties ask for donations)
         xb_audio_ui_sound(XB_SFX_NOTIFY);
     }
     for (;;)

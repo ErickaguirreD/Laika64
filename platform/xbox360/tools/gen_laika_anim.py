@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """LAIKA 64 - Laika's animations for the setup assistant and the main menu (xb_laika_anim.h), from the drawings in
 "LAIKA ANIMADA": the jump and the turn (LAIKA GIRANDO.gif, frames 0..15 and 16..24), standing to sitting and back
-(DE PIE SENTADA.gif), lying down (ACOSTADA.gif) and barking (LAIKA LADRANDO.gif: drawn bigger, 508 wide, so
-scaled by BARK_K and set on a 380 x 239 picture as the others, its paws on their line).
+(DE PIE SENTADA.gif), lying down (ACOSTADA.gif), barking (LAIKA LADRANDO.gif: drawn bigger, 508 wide, so
+scaled by BARK_K and set on a 380 x 239 picture as the others, its paws on their line) and sitting by a beating heart
+(LAIKA DONACION.gif: the novelties asking for donations; its background not pure black but almost, cut by DARK).
 
 Each frame is cut out of its black background (pure black reaching the border, and enclosed pure black holes over 60
 pixels: the gaps between the legs; smaller ones are the fur's own darkest bits), scaled to LAIKA_W wide and kept as a
@@ -27,7 +28,10 @@ W = 240                # the frames' width as kept
 K = W / SRC_W
 
 
-def cut(frame):
+DARK = 22             # LAIKA DONACION.gif's background: any channel up to this
+
+
+def cut(frame, dark=0):
     x = frame.convert("RGB")
     w, h = x.size
     px = x.load()
@@ -36,7 +40,7 @@ def cut(frame):
     seen = [[False] * w for _ in range(h)]
     for sy in range(h):
         for sx in range(w):
-            if seen[sy][sx] or px[sx, sy] != (0, 0, 0):
+            if seen[sy][sx] or max(px[sx, sy]) > dark:
                 continue
             q = deque([(sx, sy)])
             seen[sy][sx] = True
@@ -47,10 +51,10 @@ def cut(frame):
                 if cx in (0, w - 1) or cy in (0, h - 1):
                     edge = True
                 for nx, ny in ((cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)):
-                    if 0 <= nx < w and 0 <= ny < h and not seen[ny][nx] and px[nx, ny] == (0, 0, 0):
+                    if 0 <= nx < w and 0 <= ny < h and not seen[ny][nx] and max(px[nx, ny]) <= dark:
                         seen[ny][nx] = True
                         q.append((nx, ny))
-            if edge or len(region) > 60:
+            if edge or (len(region) > 60 and not dark):
                 for cx, cy in region:
                     pa[cx, cy] = 0
     a = a.filter(ImageFilter.MinFilter(3)).filter(ImageFilter.GaussianBlur(0.6))
@@ -59,8 +63,8 @@ def cut(frame):
     return out
 
 
-def frames_of(path):
-    return [cut(f) for f in ImageSequence.Iterator(Image.open(path))]
+def frames_of(path, dark=0):
+    return [cut(f, dark) for f in ImageSequence.Iterator(Image.open(path))]
 
 
 def main():
@@ -76,14 +80,16 @@ def main():
         canvas.alpha_composite(g, ((SRC_W - g.width) // 2, 239 - g.height))
         bark.append(canvas)
     bark_ground = 239 - round(337 * BARK_K) + 329 * BARK_K   # the GIF's paws at 329 of its 337
+    give = frames_of(os.path.join(src, "LAIKA DONACION.gif"), DARK)
+    give_ground = give[0].getchannel("A").getbbox()[3]
     # the jump's ground: its frames on the ground set on line 240, those in the air between take-off and landing
     feet = [f.getchannel("A").getbbox()[3] for f in jump]
     off = {i: 240 - feet[i] for i in (0, 1, 2, 3, 11, 12, 13, 14, 15)}
     for i in range(4, 11):
         t = (i - 3) / 8.0
         off[i] = off[3] * (1 - t) + off[11] * t
-    grounds = [240 - off[i] for i in range(16)] + [228] * len(turn) + [244] * len(sit) + [239] * len(lie) + [bark_ground] * len(bark)
-    all_frames = jump + turn + sit + lie + bark
+    grounds = [240 - off[i] for i in range(16)] + [228] * len(turn) + [244] * len(sit) + [239] * len(lie) + [bark_ground] * len(bark) + [give_ground] * len(give)
+    all_frames = jump + turn + sit + lie + bark + give
     pngs, mids = [], []
     for f in all_frames:
         bb = f.getchannel("A").getbbox()
@@ -97,9 +103,10 @@ def main():
              "#ifndef XB_LAIKA_ANIM_H", "#define XB_LAIKA_ANIM_H", "",
              "#define LAIKA_W %d                // the frames' width (their height: their own)" % W,
              "#define LAIKA_K %.6ff         // the frames' scale to the drawings' (380 wide)" % K,
-             "enum { LAIKA_JUMP = 0, LAIKA_TURN = %d, LAIKA_SIT = %d, LAIKA_LIE = %d, LAIKA_BARK = %d, LAIKA_FRAMES = %d };" % (
-                 16, 16 + len(turn), 16 + len(turn) + len(sit), 16 + len(turn) + len(sit) + len(lie), len(all_frames)),
-             "#define LAIKA_TURN_N %d" % len(turn), "#define LAIKA_BARK_N %d" % len(bark), ""]
+             "enum { LAIKA_JUMP = 0, LAIKA_TURN = %d, LAIKA_SIT = %d, LAIKA_LIE = %d, LAIKA_BARK = %d, LAIKA_GIVE = %d, LAIKA_FRAMES = %d };" % (
+                 16, 16 + len(turn), 16 + len(turn) + len(sit), 16 + len(turn) + len(sit) + len(lie),
+                 16 + len(turn) + len(sit) + len(lie) + len(bark), len(all_frames)),
+             "#define LAIKA_TURN_N %d" % len(turn), "#define LAIKA_BARK_N %d" % len(bark), "#define LAIKA_GIVE_N %d" % len(give), ""]
     for i, p in enumerate(pngs):
         lines.append("static const unsigned char s_laikaPng%d[%d] = {" % (i, len(p)))
         for j in range(0, len(p), 24):
