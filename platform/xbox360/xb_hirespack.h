@@ -93,6 +93,9 @@ int HiresPackInfoGet(int i, HiresPackInfo *out, int ask);
 int HiresPackImage(int i, const unsigned char **rgba, int *w, int *h);
 void HiresPackImageDone(int i);
 void HiresPackImageForget(void);
+void HiresPackImageRetry(void);                 // the failed ones asked for again
+void HiresPackImageCache(const char *artDir);   // kept on disk in <artDir>\packs (the store's first screen)
+void HiresPackImagePrefetch(void);              // every picture into that cache, on a thread, once a session
 
 // Installed packs: the name a pack's .hts gets in its game's folder ("<title> - <author>.hts"),
 // and that folder's active.txt, the pack in use (1: its file in *file; -1: none, HD off for

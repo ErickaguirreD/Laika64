@@ -3,10 +3,10 @@
 "LAIKA ANIMADA": the jump and the turn (LAIKA GIRANDO.gif, frames 0..15 and 16..24), standing to sitting and back
 (DE PIE SENTADA.gif), lying down (ACOSTADA.gif), barking (LAIKA LADRANDO.gif: drawn bigger, 508 wide, so
 scaled by BARK_K and set on a 380 x 239 picture as the others, its paws on their line) and sitting by a beating heart
-(LAIKA DONACION.gif: the novelties asking for donations; its background not pure black but almost, cut by DARK).
+(LAIKA DONACION.gif: the novelties asking for donations; kept as drawn, its own size and black background).
 
 Each frame is cut out of its black background (pure black reaching the border, and enclosed pure black holes over 60
-pixels: the gaps between the legs; smaller ones are the fur's own darkest bits), scaled to LAIKA_W wide and kept as a
+pixels reaching down to the paws: the gaps between the legs; the others are the fur's own black), scaled to LAIKA_W wide and kept as a
 PNG. With each frame: where its paws stand (its ground, the jump's re-anchored so it takes off and lands on the same
 line as the rest) and the middle of her body (so one pose follows another without a jump sideways). She faces right
 in every frame; the code mirrors her to face left.
@@ -28,7 +28,9 @@ W = 240                # the frames' width as kept
 K = W / SRC_W
 
 
-DARK = 22             # LAIKA DONACION.gif's background: any channel up to this
+LEG_GAP = 6           # an enclosed black region reaching this close (pixels) to the paws' line is a gap between legs
+FRINGE_DARK = 40       # her outline's near-black fringe: any channel up to this ...
+FRINGE_STEPS = 3       # ... up to this many pixels in from the background
 
 
 def cut(frame, dark=0):
@@ -38,6 +40,7 @@ def cut(frame, dark=0):
     a = Image.new("L", (w, h), 255)
     pa = a.load()
     seen = [[False] * w for _ in range(h)]
+    paws = max(y for y in range(h) if any(max(px[xx, y]) > dark for xx in range(0, w, 2)))   # her lowest row
     for sy in range(h):
         for sx in range(w):
             if seen[sy][sx] or max(px[sx, sy]) > dark:
@@ -54,9 +57,24 @@ def cut(frame, dark=0):
                     if 0 <= nx < w and 0 <= ny < h and not seen[ny][nx] and max(px[nx, ny]) <= dark:
                         seen[ny][nx] = True
                         q.append((nx, ny))
-            if edge or (len(region) > 60 and not dark):
+            # an enclosed one only when it reaches down to the paws (the gap between the legs): her black fur's
+            # patches higher up were cut as holes too, the background seen through her body
+            if edge or (len(region) > 60 and max(cy for _, cy in region) >= paws - LEG_GAP):
                 for cx, cy in region:
                     pa[cx, cy] = 0
+    # The near-black fringe along her outline (the drawing's dithered dark edge: black specks round the tail, the paws,
+    # the teeth): FRINGE_STEPS rounds, each dropping the pixels up to FRINGE_DARK next to the background - only the
+    # edge, her black fur further in stays.
+    for _ in range(FRINGE_STEPS):
+        drop = []
+        for cy in range(h):
+            for cx in range(w):
+                if pa[cx, cy] and max(px[cx, cy]) <= FRINGE_DARK and any(
+                        0 <= nx < w and 0 <= ny < h and not pa[nx, ny]
+                        for nx, ny in ((cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1))):
+                    drop.append((cx, cy))
+        for cx, cy in drop:
+            pa[cx, cy] = 0
     a = a.filter(ImageFilter.MinFilter(3)).filter(ImageFilter.GaussianBlur(0.6))
     out = x.convert("RGBA")
     out.putalpha(a)
@@ -80,8 +98,9 @@ def main():
         canvas.alpha_composite(g, ((SRC_W - g.width) // 2, 239 - g.height))
         bark.append(canvas)
     bark_ground = 239 - round(337 * BARK_K) + 329 * BARK_K   # the GIF's paws at 329 of its 337
-    give = frames_of(os.path.join(src, "LAIKA DONACION.gif"), DARK)
-    give_ground = give[0].getchannel("A").getbbox()[3]
+    # as drawn: neither cut out nor scaled (the novelties show it at its own size, its black background and all)
+    give = [f.convert("RGBA") for f in ImageSequence.Iterator(Image.open(os.path.join(src, "LAIKA DONACION.gif")))]
+    give_ground = give[0].height
     # the jump's ground: its frames on the ground set on line 240, those in the air between take-off and landing
     feet = [f.getchannel("A").getbbox()[3] for f in jump]
     off = {i: 240 - feet[i] for i in (0, 1, 2, 3, 11, 12, 13, 14, 15)}
@@ -94,7 +113,7 @@ def main():
     for f in all_frames:
         bb = f.getchannel("A").getbbox()
         mids.append((bb[0] + bb[2]) / 2.0)
-        g = f.resize((W, round(f.height * K)), Image.LANCZOS)
+        g = f if len(pngs) >= len(all_frames) - len(give) else f.resize((W, round(f.height * K)), Image.LANCZOS)
         b = io.BytesIO()
         g.save(b, "PNG", optimize=True)
         pngs.append(b.getvalue())
@@ -106,7 +125,8 @@ def main():
              "enum { LAIKA_JUMP = 0, LAIKA_TURN = %d, LAIKA_SIT = %d, LAIKA_LIE = %d, LAIKA_BARK = %d, LAIKA_GIVE = %d, LAIKA_FRAMES = %d };" % (
                  16, 16 + len(turn), 16 + len(turn) + len(sit), 16 + len(turn) + len(sit) + len(lie),
                  16 + len(turn) + len(sit) + len(lie) + len(bark), len(all_frames)),
-             "#define LAIKA_TURN_N %d" % len(turn), "#define LAIKA_BARK_N %d" % len(bark), "#define LAIKA_GIVE_N %d" % len(give), ""]
+             "#define LAIKA_TURN_N %d" % len(turn), "#define LAIKA_BARK_N %d" % len(bark), "#define LAIKA_GIVE_N %d" % len(give),
+             "#define LAIKA_GIVE_W %d             // its frames as drawn (not LAIKA_W wide): %d x %d" % (give[0].width, give[0].width, give[0].height), ""]
     for i, p in enumerate(pngs):
         lines.append("static const unsigned char s_laikaPng%d[%d] = {" % (i, len(p)))
         for j in range(0, len(p), 24):

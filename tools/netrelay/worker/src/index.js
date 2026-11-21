@@ -187,11 +187,11 @@ async function profiles(cmd, q, request, env) {
         .bind(PLAY_BANK_S, status, t, PLAY_STEP_S, t, status, ms, conn, q.get("room") === "1" ? 1 : 0, cc, cc, me).run();
       const since = Math.max(0, parseInt(q.get("since") ?? "0", 10) || 0);
       const [friends, asked, msgs] = await db.batch([
-        db.prepare("SELECT u.name, u.seen FROM friends f JOIN users u ON u.id = f.friend WHERE f.user = ?").bind(me),
+        db.prepare("SELECT u.name, u.seen, u.avatar FROM friends f JOIN users u ON u.id = f.friend WHERE f.user = ?").bind(me),
         db.prepare("SELECT u.name, u.avatar FROM requests r JOIN users u ON u.id = r.from_id WHERE r.to_id = ? ORDER BY r.at LIMIT 20").bind(me),
         db.prepare("SELECT d.id, u.name, d.text FROM dm d JOIN users u ON u.id = d.from_id WHERE d.to_id = ? AND d.id > ? ORDER BY d.id LIMIT 20").bind(me, since),
       ]);
-      return ["OK", ...(cc !== "--" ? ["c\t" + cc] : []), ...(latest ? ["u\t" + latest] : []), ...friends.results.map((f) => ["f", f.name, t - f.seen < ONLINE_S ? 1 : 0].join("\t")),
+      return ["OK", ...(cc !== "--" ? ["c\t" + cc] : []), ...(latest ? ["u\t" + latest] : []), ...friends.results.map((f) => ["f", f.name, t - f.seen < ONLINE_S ? 1 : 0, f.avatar].join("\t")),
         ...asked.results.map((r) => ["r", r.name, r.avatar].join("\t")), ...msgs.results.map((m) => ["m", m.id, m.name, m.text].join("\t"))];
     }
     case "rename": {
@@ -433,6 +433,8 @@ export default {
       return reply(await profiles(m[1], url.searchParams, request, env));
     } catch (e) {
       console.log("request failed: " + e);
+      // The free plan's daily reads used up (D1 code 7500): said so, the consoles show when it comes back.
+      if (/7500|daily row read limit/i.test(String(e))) return reply(["ERR quota"], 503);
       return reply(["ERR server"], 500);
     }
   },

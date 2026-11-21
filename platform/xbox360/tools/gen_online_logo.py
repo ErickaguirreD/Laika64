@@ -2,9 +2,12 @@
 """LAIKA 64 - writes platform/xbox360/xb_online_logo.h, the LAIKA 64 ONLINE logo at the top of Play online,
 from the artwork (LAIKA ONLINE.png: the logo on black, "ONLINE" smaller beside it).
 
-The black becomes transparent (each pixel's alpha from its brightest channel), "ONLINE" is made as tall as
-"LAIKA64" and set on the same top and baseline a small gap after the "4", the margins are cropped and the
-result is kept 192 pixels high (the intro shows it large) as PNG bytes (xb_ui.cpp decodes it with h64_png_decode).
+"LAIKA64" and the wolf are the main logo (tools/laika_logo.png, cut by gen_laika_art.py): keyed by brightness, the
+wolf's black fur and shadows were see-through, and they touch the black around him, so no fill from the border
+keeps them apart. Only "ONLINE" comes from the artwork (bright chrome letters: its black becomes transparent, each
+pixel's alpha from its brightest channel). It is made as tall as "LAIKA64" and set on the same top and baseline a
+small gap after the "4", the margins are cropped and the result is kept 192 pixels high (the intro shows it large)
+as PNG bytes (xb_ui.cpp decodes it with h64_png_decode).
 
     python platform/xbox360/tools/gen_online_logo.py "LAIKA ONLINE.png" [preview.png]
 """
@@ -30,6 +33,21 @@ def keyed(img):
     return Image.fromarray(np.dstack([rgb, alpha * 255]).astype(np.uint8), "RGBA")
 
 
+LETTER_RIM = 9   # the letters' dark rim kept solid: this wide a grow of their bright part (pixels of the artwork)
+
+
+def solid_letters(keyed_img, art):
+    """"ONLINE" solid: keyed by brightness its letters' dark rim and shading were see-through. Their bright part grown
+    by LETTER_RIM (the rim, not the O's hole) is opaque, in the artwork's own colours; outside it as keyed."""
+    from PIL import ImageFilter
+    k = np.asarray(keyed_img).astype(np.float32)
+    grow = keyed_img.getchannel("A").point(lambda v: 255 if v > 128 else 0).filter(ImageFilter.MaxFilter(LETTER_RIM))
+    grow = np.asarray(grow.filter(ImageFilter.GaussianBlur(1.0))).astype(np.float32) / 255
+    alpha = np.maximum(k[..., 3] / 255, grow)
+    rgb = k[..., :3] * (1 - grow[..., None]) + np.asarray(art).astype(np.float32) * grow[..., None]
+    return Image.fromarray(np.dstack([rgb, alpha * 255]).clip(0, 255).astype(np.uint8), "RGBA")
+
+
 def spans(mask):
     """Runs of True in a 1-D mask: [(start, end)]."""
     out, start = [], None
@@ -53,17 +71,22 @@ def main():
     # The widest gap between runs right of the middle splits "LAIKA64" (with the emblem) from "ONLINE".
     gaps = [(runs[i + 1][0] - runs[i][1], i) for i in range(len(runs) - 1) if runs[i][1] > src.width * 0.6]
     split = max(gaps)[1]
-    left_end, online_x0, online_x1 = runs[split][1], runs[split + 1][0], runs[-1][1]
-    # "LAIKA64": the letters' rows (left of the split, right of the emblem's first run).
-    letters = np.where(alpha[:, runs[1][0]:left_end].any(axis=1))[0]
+    online_x0, online_x1 = runs[split + 1][0], runs[-1][1]
+    main_logo = Image.open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "laika_logo.png")).convert("RGBA")
+    ma = np.asarray(main_logo)[..., 3] > 128
+    mruns = [r for r in spans(ma.any(axis=0)) if r[1] - r[0] > 2]
+    left_end = mruns[-1][1]
+    # "LAIKA64": the letters' rows (right of the emblem: its first run).
+    letters = np.where(ma[:, mruns[1][0]:left_end].any(axis=1))[0]
     top, bottom = letters.min(), letters.max() + 1
     word = np.where(alpha[:, online_x0:online_x1].any(axis=1))[0]
-    online = src.crop((online_x0, word.min(), online_x1, word.max() + 1))
+    box = (online_x0, word.min(), online_x1, word.max() + 1)
+    online = solid_letters(src.crop(box), Image.open(sys.argv[1]).convert("RGB").crop(box))
     scale = (bottom - top) / online.height
     online = online.convert("RGBa").resize((round(online.width * scale), bottom - top), Image.LANCZOS).convert("RGBA")
     gap = round((bottom - top) * 0.16)
-    canvas = Image.new("RGBA", (left_end + gap + online.width + 8, src.height), (0, 0, 0, 0))
-    canvas.paste(src.crop((0, 0, left_end, src.height)), (0, 0))
+    canvas = Image.new("RGBA", (left_end + gap + online.width + 8, main_logo.height), (0, 0, 0, 0))
+    canvas.paste(main_logo.crop((0, 0, left_end, main_logo.height)), (0, 0))
     canvas.alpha_composite(online, (left_end + gap, top))
     canvas = canvas.crop(canvas.getchannel("A").point(lambda v: 255 if v > 8 else 0).getbbox())
     w = round(canvas.width * HEIGHT / canvas.height)

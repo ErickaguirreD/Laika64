@@ -2180,6 +2180,15 @@ void UiScreenFooter(const char *hints)
     UiFooter(UI_SAFE_X, 664, hints);
 }
 
+void UiScreenFooterSmall(const char *hints)
+{
+    // The same, its buttons and words three quarters the size (the main menu)
+    UiRect(UI_SAFE_X, 636, UI_WIDTH - 2 * UI_SAFE_X, 1, UI_COL_LINE);
+    UiSetScale(UI_SAFE_X, 664, 0.75f);
+    UiFooter(UI_SAFE_X, 664, hints);
+    UiSetScale(0, 0, 1.0f);
+}
+
 void UiScreenFooterGlow(const char *hints, const char *glow)
 {
     UiRect(UI_SAFE_X, 636, UI_WIDTH - 2 * UI_SAFE_X, 1, UI_COL_LINE);

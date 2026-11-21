@@ -138,6 +138,27 @@ int OnlineLobbyGet(int since, std::vector<OnlineRoomInfo> *rooms, std::vector<On
 // time (a stutter every 8 s). Watch(1, since): from the chat's message `since`; Take: 1 with a new read (the chat's
 // lines after the last ones taken), 0 none yet.
 #define ONLINE_LOBBY_MS 8000
+// Nobody at the controllers: the lobby and the players read every ONLINE_LOBBY_SLOW_MS after ONLINE_IDLE_SLOW_MS without
+// a press, not at all after ONLINE_IDLE_STOP_MS (a console left on Play online read the server all day: the free plan's
+// daily reads ran out, 2026-11-20); a press reads again at once.
+#define ONLINE_IDLE_SLOW_MS 120000
+#define ONLINE_IDLE_STOP_MS 600000
+#define ONLINE_LOBBY_SLOW_MS 60000
+// The server as the last "still here" found it (no request of its own: that one is timed, its answer read): reached
+// and quick, slow, not answering (an answer that is no answer, or "ERR quota": the free plan's daily reads used up -
+// back at midnight UTC, `backAt` that hour and minute here, -1 not known), or nothing reached at all (no internet).
+enum { ONLINE_SRV_UNKNOWN = 0, ONLINE_SRV_OK, ONLINE_SRV_SLOW, ONLINE_SRV_DOWN, ONLINE_SRV_NONET };
+#define ONLINE_SRV_SLOW_MS 600
+int OnlineServerState(int *ms, int *backAt);
+// Internet, as Google's generate_204 answered (LAIKA's start, and again when the server is not reached): 0 still
+// checking, 1 there, 2 not (no answer from Google either).
+enum { ONLINE_NET_CHECKING = 0, ONLINE_NET_YES, ONLINE_NET_NO };
+int OnlineInternetState(void);
+// The friends online as the last "still here" told (name and avatar): no request of its own.
+struct OnlineFriendOn { char name[ONLINE_TAG_MAX + 1]; int avatar; };
+int OnlineFriendsOnline(OnlineFriendOn *out, int max);
+DWORD OnlineIdleMs(void);        // since the last press on any controller (the online thread watches them)
+DWORD OnlineLobbyAgeMs(void);    // since the lobby was last read (0: not yet)
 void OnlineLobbyWatch(int on, int since);
 void OnlineLobbyRefresh(void);
 int OnlineLobbyTake(std::vector<OnlineRoomInfo> *rooms, std::vector<OnlineGameInfo> *games, std::vector<OnlineUser> *users,

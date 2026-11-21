@@ -134,6 +134,7 @@ static NetProgress s_dlNet;                // the download's bytes (HPACK_DOWNLO
 
 static int fail(int error)
 {
+    if (error != HPERR_CANCELLED) H64_WARN("[hirespack] failed: error %d", error);   // (it said nothing: downloaded, then silence)
     InterlockedExchange(&s_error, error);
     InterlockedExchange(&s_state, HPACK_FAILED);
     return 0;
@@ -387,6 +388,7 @@ static void shrink_next(Shrink *s)
 
 static int shrink_write(Shrink *s, const void *p, size_t n)
 {
+    if (s->written + n >= 0xFFFFFFFFull) { s->err = HPERR_TOOBIG; return 0; }   // FAT32: the .hts made under 4 GB
     if (fwrite(p, 1, n, s->out) != n) { s->err = HPERR_SPACE; return 0; }
     s->written += n;
     return 1;
@@ -458,7 +460,8 @@ static int shrink_feed(Shrink *s, const u8 *p, size_t n)
         if (s->state == SH_HEADER)
         {
             s->indexPos = rd64le(&s->buf[8]);
-            if (s->indexPos < 16 || s->indexPos > 0x7FFFFFFFu) return 0;
+            // (its offsets are 48 bits: a .hts over 2 GB was refused here - MK64-Reloaded's 3.6 GB one, 2026-11-20)
+            if (s->indexPos < 16 || s->indexPos > 0x0000FFFFFFFFFFFFull) return 0;
             if (!shrink_write(s, &s->buf[0], 16)) return 0;   // its indexPos set at the end
             s->recStart = 16;
             shrink_next(s);
@@ -581,8 +584,9 @@ static int unpack(const char *archive, const char *dir, char *name, size_t nameS
         if (SzGetNextFolderItem(&f, &sd) != SZ_OK || f.NumCoders != 1 || f.NumPackStreams != 1) goto end;
         if (f.Coders[0].MethodID == 0x21 && f.Coders[0].PropsSize == 1) lzma2 = 1;
         else if (f.Coders[0].MethodID != 0x30101 || f.Coders[0].PropsSize != 5) goto end;
-        // FAT32 holds files under 4 GB; the space for it, the archive still there.
-        if (fileSize >= 0xFFFFFFFFull) { err = HPERR_TOOBIG; goto end; }
+        // The space for it, the archive still there. Not its size against FAT32's 4 GB: it is read from the archive,
+        // never written whole - what is written is the DXT .hts, some 4 times smaller (RE2-Reloaded's and OoT
+        // Reloaded's, over 4 GB as packed, were refused, 2026-11-20); that one is held under 4 GB (shrink_write).
         if (!space_for(dir, fileSize / 4)) { err = HPERR_SPACE; goto end; }   // about what it comes to as DXT
         InterlockedExchange(&s_doneKb, 0);
         InterlockedExchange(&s_totalKb, (LONG)(fileSize >> 10));
@@ -604,7 +608,7 @@ static int unpack(const char *archive, const char *dir, char *name, size_t nameS
         decoder = 1;
         _snprintf(path, sizeof(path) - 1, "%s\\%s", dir, name);
         path[sizeof(path) - 1] = 0;
-        _snprintf(part, sizeof(part) - 1, "%s.part", path);
+        _snprintf(part, sizeof(part) - 1, "%s\\convert.part", dir);   // (a short name: see png_open)
         part[sizeof(part) - 1] = 0;
         out = fopen(part, "wb");
         if (!out || fseek(in, (long)packPos, SEEK_SET)) { err = HPERR_FILE; goto end; }
@@ -955,10 +959,16 @@ static int png_batch_turn(PngOut *o, PngRun run[2], int *cur, std::vector<PngJob
 }
 
 // The output file: <dest>\<file> written as .part, renamed when whole.
+// The .hts written under a short name of its own, renamed to its own when done (png_close): FATX names stop at 42
+// characters, and "<its name>.hts.part" went over them - Super Mario Kart 64 HD - BFrancois.hts.part could not be made:
+// downloaded, never converted (2026-11-20).
+static char s_partFinal[256];
 static FILE *png_open(const char *dest, const char *file, char *part, size_t partSize)
 {
     FILE *f;
-    _snprintf(part, partSize - 1, "%s\\%s.part", dest, file);
+    _snprintf(s_partFinal, sizeof(s_partFinal) - 1, "%s\\%s", dest, file);
+    s_partFinal[sizeof(s_partFinal) - 1] = 0;
+    _snprintf(part, partSize - 1, "%s\\convert.part", dest);
     part[partSize - 1] = 0;
     f = fopen(part, "wb");
     if (f) setvbuf(f, NULL, _IOFBF, UNPACK_WRITE);
@@ -967,14 +977,10 @@ static FILE *png_open(const char *dest, const char *file, char *part, size_t par
 
 static int png_close(FILE *f, const char *part, int ok)
 {
-    char path[256];
-    size_t n = strlen(part) - 5;   // without ".part"
     if (fclose(f)) ok = 0;
     if (!ok) { DeleteFileA(part); return 0; }
-    memcpy(path, part, n);
-    path[n] = 0;
-    DeleteFileA(path);
-    return MoveFileA(part, path) != 0;
+    DeleteFileA(s_partFinal);
+    return MoveFileA(part, s_partFinal) != 0;
 }
 
 static u8 *read_whole(const char *path, u32 *size)
@@ -1555,6 +1561,54 @@ struct PackImage { volatile LONG state; u8 *rgba; int w, h; };
 static PackImage s_img[PACK_COUNT];
 static volatile LONG s_imgBusy;
 static int s_imgWant = -1;
+// The pictures kept as downloaded in <art>\packs\<crc32 of the URL>.img: the store opens with them, none downloaded
+// again (a new picture is a new URL, a new file). "": not kept.
+static char s_imgCache[80];
+
+void HiresPackImageCache(const char *artDir)
+{
+    _snprintf(s_imgCache, sizeof(s_imgCache) - 1, "%s\\packs", artDir);
+    s_imgCache[sizeof(s_imgCache) - 1] = 0;
+    CreateDirectoryA(artDir, NULL);
+    CreateDirectoryA(s_imgCache, NULL);
+}
+
+static void image_cache_path(const char *url, char *out, size_t size)
+{
+    const uLong crc = crc32(0L, (const Bytef *)url, (uInt)strlen(url));
+    _snprintf(out, size - 1, "%s\\%08lx.img", s_imgCache, crc);
+    out[size - 1] = 0;
+}
+
+static u8 *image_cache_read(const char *path, u32 *len)
+{
+    FILE *f = fopen(path, "rb");
+    long n;
+    u8 *data = NULL;
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (n > 0 && n < (4L << 20) && (data = (u8 *)malloc(n)) != NULL && fread(data, 1, n, f) != (size_t)n) { free(data); data = NULL; }
+    fclose(f);
+    *len = data ? (u32)n : 0;
+    return data;
+}
+
+static void image_cache_write(const char *path, const u8 *data, u32 len)
+{
+    // through a .part: a picture cut short (the console turned off) is never kept
+    char part[200];
+    FILE *f;
+    _snprintf(part, sizeof(part) - 1, "%s.part", path);
+    part[sizeof(part) - 1] = 0;
+    f = fopen(part, "wb");
+    if (!f) return;
+    if (fwrite(data, 1, len, f) != len) { fclose(f); DeleteFileA(part); return; }
+    fclose(f);
+    DeleteFileA(path);
+    if (!MoveFileA(part, path)) DeleteFileA(part);
+}
 
 static DWORD WINAPI image_thread(LPVOID)
 {
@@ -1562,17 +1616,23 @@ static DWORD WINAPI image_thread(LPVOID)
     {
         int i = s_imgWant;
         const char *url, *h, *slash;
-        char host[128];
+        char host[128], cached[200];
         u8 *data = NULL;
         u32 len = 0;
-        int st = 0;
+        int st = 0, fromDisk = 0;
         PackImage *im;
         if (i < 0 || i >= PACK_COUNT || s_img[i].state != HPINFO_LOADING) break;
         im = &s_img[i];
         url = s_packs[i].image;
+        cached[0] = 0;
+        if (s_imgCache[0] && url)
+        {
+            image_cache_path(url, cached, sizeof(cached));
+            if ((data = image_cache_read(cached, &len)) != NULL) { st = 200; fromDisk = 1; }
+        }
         h = url && !strncmp(url, "https://", 8) ? url + 8 : NULL;
         slash = h ? strchr(h, '/') : NULL;
-        if (slash && (size_t)(slash - h) < sizeof(host) && NetStart(0))
+        if (!data && slash && (size_t)(slash - h) < sizeof(host) && NetStart(0))
         {
             memcpy(host, h, slash - h);
             host[slash - h] = 0;
@@ -1583,6 +1643,8 @@ static DWORD WINAPI image_thread(LPVOID)
             int w = 0, hh = 0;
             u8 *px = UiDecodeImage(data, (long)len, PACK_IMAGE_W, PACK_IMAGE_H, &w, &hh);
             if (px) { im->rgba = px; im->w = w; im->h = hh; }
+            if (px && !fromDisk && cached[0]) image_cache_write(cached, data, len);
+            if (!px && fromDisk) DeleteFileA(cached);   // a kept file that does not decode: downloaded again next time
             InterlockedExchange(&im->state, px ? HPINFO_OK : HPINFO_FAILED);
         }
         else
@@ -1627,10 +1689,60 @@ void HiresPackImageDone(int i)
 
 void HiresPackImageForget(void)
 {
-    // The screen closed and its textures went: loaded again the next time.
+    // The screen closed and its textures went: loaded again the next time (from the disk), the failed ones asked again.
     int i;
     for (i = 0; i < PACK_COUNT; i++)
-        if (s_img[i].state == HPINFO_OK && !s_img[i].rgba) s_img[i].state = HPINFO_NONE;
+        if ((s_img[i].state == HPINFO_OK && !s_img[i].rgba) || s_img[i].state == HPINFO_FAILED) s_img[i].state = HPINFO_NONE;
+}
+
+// Every pack's picture brought into the disk's cache, one after another on a thread, once a session (the main menu's
+// Store card shows them all, the store opens with them); one there already is not asked for.
+static volatile LONG s_prefetchStarted;
+
+static DWORD WINAPI image_prefetch_thread(LPVOID)
+{
+    int i;
+    for (i = 0; i < PACK_COUNT; i++)
+    {
+        const char *url = s_packs[i].image, *h, *slash;
+        char host[128], cached[200];
+        u8 *data = NULL;
+        u32 len = 0;
+        DWORD attr;
+        if (!url || !s_imgCache[0]) continue;
+        image_cache_path(url, cached, sizeof(cached));
+        attr = GetFileAttributesA(cached);
+        if (attr != (DWORD)-1) continue;   // there already
+        h = !strncmp(url, "https://", 8) ? url + 8 : NULL;
+        slash = h ? strchr(h, '/') : NULL;
+        if (!slash || (size_t)(slash - h) >= sizeof(host) || !NetStart(0)) continue;
+        memcpy(host, h, slash - h);
+        host[slash - h] = 0;
+        if (NetGet(host, slash, 1, &data, &len, 4u << 20, NULL, 0) == 200 && data && len) image_cache_write(cached, data, len);
+        else H64_INFO("[hirespack] %s: picture not cached", s_packs[i].title);
+        free(data);
+    }
+    return 0;
+}
+
+void HiresPackImagePrefetch(void)
+{
+    HANDLE t;
+    if (!s_imgCache[0] || InterlockedExchange(&s_prefetchStarted, 1)) return;
+    t = CreateThread(NULL, 256 * 1024, image_prefetch_thread, NULL, CREATE_SUSPENDED, NULL);
+    if (!t) { InterlockedExchange(&s_prefetchStarted, 0); return; }
+    XSetThreadProcessor(t, 3);
+    SetThreadPriority(t, THREAD_PRIORITY_BELOW_NORMAL);
+    ResumeThread(t);
+    CloseHandle(t);
+}
+
+void HiresPackImageRetry(void)
+{
+    // The pictures that failed (a pack downloading took the network): asked for again as they come into view.
+    int i;
+    for (i = 0; i < PACK_COUNT; i++)
+        if (s_img[i].state == HPINFO_FAILED) s_img[i].state = HPINFO_NONE;
 }
 
 // ---- Installed packs: their names, the one in use ----
@@ -1646,6 +1758,8 @@ void HiresPackFileName(const HiresPackEntry *e, char *out, size_t size)
     else _snprintf(raw, sizeof(raw) - 1, "%s - %s", e->title, e->author);
     raw[sizeof(raw) - 1] = 0;
     HiresFolderName(raw, clean, sizeof(clean));
+    for (n = 0; clean[n]; n++)
+        if (strchr(",+;=", clean[n])) clean[n] = '-';   // not in FATX names either (Retexture - Ambar, PDK, Lepascals)
     n = strlen(clean);
     if (n > 38) n = 38;   // + ".hts"
     while (n && (clean[n - 1] == ' ' || clean[n - 1] == '.')) n--;

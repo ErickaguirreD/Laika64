@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, lo
     ms INTEGER NOT NULL DEFAULT 0, conn INTEGER NOT NULL DEFAULT 0, room INTEGER NOT NULL DEFAULT 0,
     playbank INTEGER NOT NULL DEFAULT 0);   -- the time played the server saw (pings with a game open), not yet claimed
 CREATE INDEX IF NOT EXISTS users_minutes ON users (minutes DESC);
+CREATE INDEX IF NOT EXISTS users_seen ON users (seen);   -- the players online (/v1/lobby): without it every request read every user
 -- A friendship, each way, and since when (0: before 2.2.2, not known).
 CREATE TABLE IF NOT EXISTS friends (user INTEGER NOT NULL, friend INTEGER NOT NULL, at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (user, friend));
 -- How many games two players started together (a < b, their ids).
@@ -16,6 +17,7 @@ CREATE TABLE IF NOT EXISTS played (user INTEGER NOT NULL, code TEXT NOT NULL, ga
 CREATE TABLE IF NOT EXISTS registered (place TEXT NOT NULL, at INTEGER NOT NULL);
 -- The news, the newest first; a language without items of its own gets the English ones.
 CREATE TABLE IF NOT EXISTS news (id INTEGER PRIMARY KEY, date TEXT NOT NULL, lang TEXT NOT NULL, title TEXT NOT NULL, text TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS news_lang ON news (lang, date DESC, id DESC);
 -- The rooms, waiting for players or playing (started: since when; tags: who plays). Each room's Durable
 -- Object keeps its own row.
 CREATE TABLE IF NOT EXISTS rooms (code TEXT PRIMARY KEY, host TEXT NOT NULL, avatar INTEGER NOT NULL, players INTEGER NOT NULL,
@@ -27,6 +29,7 @@ CREATE TABLE IF NOT EXISTS chat (id INTEGER PRIMARY KEY, at INTEGER NOT NULL, ta
 CREATE TABLE IF NOT EXISTS said (user INTEGER PRIMARY KEY, at INTEGER NOT NULL);
 -- Friendships asked and not answered yet (a friendship itself is a row of friends each way).
 CREATE TABLE IF NOT EXISTS requests (from_id INTEGER NOT NULL, to_id INTEGER NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (from_id, to_id));
+CREATE INDEX IF NOT EXISTS requests_to ON requests (to_id, at);
 -- Messages between friends.
 CREATE TABLE IF NOT EXISTS dm (id INTEGER PRIMARY KEY, from_id INTEGER NOT NULL, to_id INTEGER NOT NULL, at INTEGER NOT NULL, text TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS dm_to ON dm (to_id, id);

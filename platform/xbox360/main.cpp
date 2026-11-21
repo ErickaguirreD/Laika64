@@ -4032,6 +4032,7 @@ static int RunGame(IDirect3DDevice9 *dev, Config *c, const char *romPath)
 
 static int RunGameBody(IDirect3DDevice9 *dev, Config *c, const char *romPath)
 {
+    int resumeAt = 0;   // the main menu's Continue: its state loaded as the game starts
     int result = RG_DASHBOARD, menuRequest = 0;
     u32 fpsFrames = 0;
     double fpsStart = QpcMs();
@@ -4205,10 +4206,15 @@ static int RunGameBody(IDirect3DDevice9 *dev, Config *c, const char *romPath)
     CheatsOpen(sys);
     s_stateSlot = c->stateSlot >= 1 && c->stateSlot <= 9 ? c->stateSlot : 1;
     s_statePending = 0;
+    {
+        // The main menu's "Continue": the game started at its last save state.
+        const int resume = MenuTakeResume();
+        if (resume && s_netMode <= 0) { s_stateSlot = resume; resumeAt = 1; }
+    }
     s_reservedSlot = c->padLoss == PADLOSS_SAVE ? c->autoSaveSlot : 0;
     s_osd[0] = 0;
     h64_xenos_set_overlay(renderer, OverlayHook, NULL);
-    if (c->loadState) LoadStateNow(sys);
+    if (c->loadState || resumeAt) LoadStateNow(sys);
     s_scriptBase = sys->vi.frames;
     QueryPerformanceFrequency(&freq);
     QueryPerformanceCounter(&frameStart);

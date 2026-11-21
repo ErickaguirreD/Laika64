@@ -499,6 +499,89 @@ unsigned OnlineInvitedTo(void)
 }
 
 // The news a ping answered with (the thread's): friends coming online, friendships asked, messages.
+static std::map<std::string, int> s_friendAvatar;   // under s_lock (the ping's friends' avatars)
+static volatile int s_srvState, s_srvMs, s_srvBackAt = -1;
+static volatile int s_inetState;   // ONLINE_NET_*
+
+// Internet: Google's generate_204 (what Android and Chrome ask; an empty answer). 1 when it answered.
+static int internet_ask(void)
+{
+    int st;
+    if (!NetStart(0)) return 0;
+    st = NetGet("www.google.com", "/generate_204", 0, NULL, NULL, 0, NULL, 0);
+    return st == 204 || st == 200;
+}
+
+int OnlineInternetState(void) { return s_inetState; }
+static volatile int s_inboxRtt;   // the inbox's "p" answered "q" (by the server at once, waking nothing): its time, on a
+                                  // connection already open - the time to the server, for nothing (0: none yet)
+
+// The server's state from a request's outcome: `ok` with its time, else why (err: "net" nothing reached, "quota" the
+// daily reads used up, anything else an answer that was none).
+static void server_seen(int ok, int ms, const char *err)
+{
+    if (ok)
+    {
+        s_inetState = ONLINE_NET_YES;
+        // Slow by the inbox's time when there is one (a request's own counts the handshake of its connection).
+        s_srvMs = s_inboxRtt ? s_inboxRtt : ms;
+        s_srvBackAt = -1;
+        s_srvState = (s_inboxRtt ? s_inboxRtt > ONLINE_SRV_SLOW_MS : ms > 4 * ONLINE_SRV_SLOW_MS) ? ONLINE_SRV_SLOW : ONLINE_SRV_OK;
+        return;
+    }
+    if (!strcmp(err, "net"))
+    {
+        // Nothing from the server: no internet only when Google does not answer either (a server down said "check
+        // your Wi-Fi" on a console well connected - and so did the first ping, as the network came up).
+        if (internet_ask()) { s_inetState = ONLINE_NET_YES; s_srvState = ONLINE_SRV_DOWN; s_srvBackAt = -1; }
+        else { s_inetState = ONLINE_NET_NO; s_srvState = ONLINE_SRV_NONET; }
+        return;
+    }
+    s_inetState = ONLINE_NET_YES;   // (the server answered something: the way there works)
+    s_srvBackAt = -1;
+    if (!strcmp(err, "quota"))
+    {
+        // Back at midnight UTC: that moment on this console's clock.
+        SYSTEMTIME utc, local;
+        FILETIME fu, fl;
+        GetSystemTime(&utc);
+        utc.wHour = utc.wMinute = utc.wSecond = utc.wMilliseconds = 0;
+        if (SystemTimeToFileTime(&utc, &fu))
+        {
+            ULARGE_INTEGER u;
+            u.LowPart = fu.dwLowDateTime; u.HighPart = fu.dwHighDateTime;
+            u.QuadPart += 864000000000ull;   // the next midnight
+            fu.dwLowDateTime = u.LowPart; fu.dwHighDateTime = u.HighPart;
+            if (FileTimeToLocalFileTime(&fu, &fl) && FileTimeToSystemTime(&fl, &local)) s_srvBackAt = local.wHour * 60 + local.wMinute;
+        }
+    }
+    s_srvState = ONLINE_SRV_DOWN;
+}
+
+int OnlineServerState(int *ms, int *backAt)
+{
+    if (ms) *ms = s_srvMs;
+    if (backAt) *backAt = s_srvBackAt;
+    return s_srvState;
+}
+
+int OnlineFriendsOnline(OnlineFriendOn *out, int max)
+{
+    int n = 0;
+    std::map<std::string, int>::const_iterator it;
+    EnterCriticalSection(&s_lock);
+    for (it = s_friendOnline.begin(); it != s_friendOnline.end() && n < max; ++it)
+        if (it->second)
+        {
+            std::map<std::string, int>::const_iterator a = s_friendAvatar.find(it->first);
+            copy(out[n].name, sizeof(out[n].name), it->first.c_str());
+            out[n].avatar = a != s_friendAvatar.end() ? a->second : 0;
+            n++;
+        }
+    LeaveCriticalSection(&s_lock);
+    return n;
+}
+
 static void ping_news(const std::vector<std::string> &rows)
 {
     static int first = 1;   // the first ping only learns who is online (no notice for everyone at once)
@@ -520,6 +603,7 @@ static void ping_news(const std::vector<std::string> &rows)
                 notice_add(t, 0, ONLINE_NOTE_FRIEND);
             }
             s_friendOnline[name] = on;
+            s_friendAvatar[name] = atoi(field(rows[k], 3).c_str());
         }
         else if (kind == "r")
         {
@@ -661,24 +745,6 @@ int OnlineMyConn(void)
     return (link & XNET_ETHERNET_LINK_WIRELESS) ? ONLINE_CONN_WIFI : ONLINE_CONN_CABLE;
 }
 
-// The time to the server and back: the quickest of two answers without work (whereami) on a connection
-// already made by a first one - the handshake not counted. 0 when it could not be reached.
-static int measure_ms(char *err)
-{
-    int best = 0, k;
-    if (!request("whereami", std::string(), NULL, NULL, err)) return 0;
-    for (k = 0; k < 2; k++)
-    {
-        const DWORD t0 = GetTickCount();
-        int ms;
-        if (!request("whereami", std::string(), NULL, NULL, err)) break;
-        ms = (int)(GetTickCount() - t0);
-        if (ms < 1) ms = 1;
-        if (!best || ms < best) best = ms;
-    }
-    return best;
-}
-
 // The players online, read by the thread every few seconds while a screen watches them (the pause menu's).
 #define ONLINE_WATCH_MS 8000
 static volatile int s_watch;
@@ -738,6 +804,36 @@ static std::vector<OnlineRoomInfo> s_lobbyRooms;
 static std::vector<OnlineGameInfo> s_lobbyGames;
 static std::vector<OnlineUser> s_lobbyUsers;
 static std::vector<OnlineChatLine> s_lobbyChat;
+
+// Presses on the controllers, watched by the online thread: buttons, triggers and sticks coarsely (a stick's jitter is
+// not a press).
+static volatile DWORD s_activeAt, s_lobbyReadAt;
+static DWORD s_padKey[4];
+
+static void activity_poll(void)
+{
+    DWORD i;
+    for (i = 0; i < 4; i++)
+    {
+        XINPUT_STATE st;
+        DWORD key;
+        if (XInputGetState(i, &st) != ERROR_SUCCESS) continue;
+        key = st.Gamepad.wButtons | (st.Gamepad.bLeftTrigger > 64 ? 0x10000u : 0) | (st.Gamepad.bRightTrigger > 64 ? 0x20000u : 0) |
+              ((DWORD)((st.Gamepad.sThumbLX + 32768) >> 14) << 18) | ((DWORD)((st.Gamepad.sThumbLY + 32768) >> 14) << 20) |
+              ((DWORD)((st.Gamepad.sThumbRX + 32768) >> 14) << 22) | ((DWORD)((st.Gamepad.sThumbRY + 32768) >> 14) << 24);
+        if (key != s_padKey[i]) { s_padKey[i] = key; s_activeAt = GetTickCount(); }
+    }
+}
+
+DWORD OnlineIdleMs(void) { return GetTickCount() - s_activeAt; }
+DWORD OnlineLobbyAgeMs(void) { return s_lobbyReadAt ? GetTickCount() - s_lobbyReadAt : 0; }
+
+// How long until the next read of a list watched on screen: as usual, slower, or none (0) while nobody is there.
+static DWORD idle_every(DWORD usual)
+{
+    const DWORD idle = OnlineIdleMs();
+    return idle < ONLINE_IDLE_SLOW_MS ? usual : idle < ONLINE_IDLE_STOP_MS ? ONLINE_LOBBY_SLOW_MS : 0;
+}
 
 void OnlineLobbyWatch(int on, int since)
 {
@@ -860,7 +956,19 @@ static DWORD WINAPI online_thread(LPVOID)
 {
     DWORD pingAt = GetTickCount();   // the first one at once
     DWORD roomsAt = GetTickCount() + 5000;   // the rooms first looked at a little after the start
-    char sent[44] = "\1";            // the status last told (never this one)
+    int away = 0;                    // nobody at the controllers (the lists not read)
+    char sent[44] = "\1";
+    s_activeAt = GetTickCount();     // (LAIKA just started: someone is there)
+    {
+        // Internet first, as LAIKA loads (the intro shows it): Google, a few tries while the network comes up.
+        int k;
+        for (k = 0; k < 6; k++)
+        {
+            if (internet_ask()) { s_inetState = ONLINE_NET_YES; break; }
+            Sleep(2500);
+        }
+        if (s_inetState != ONLINE_NET_YES) { s_inetState = ONLINE_NET_NO; s_srvState = ONLINE_SRV_NONET; }
+    }            // the status last told (never this one)
     int sentRoom = -1;               // ... and whether in a room
     for (;;)
     {
@@ -869,26 +977,44 @@ static DWORD WINAPI online_thread(LPVOID)
         Played p;
         int have = 0;
         Sleep(s_watch || s_lobbyWatch ? 100 : 2000);
+        activity_poll();
+        if (away && OnlineIdleMs() < ONLINE_IDLE_SLOW_MS)
+        {
+            // Someone back: the lists read again at once.
+            EnterCriticalSection(&s_lock);
+            s_lobbyAt = GetTickCount();
+            LeaveCriticalSection(&s_lock);
+            s_watchAt = GetTickCount();
+        }
+        away = OnlineIdleMs() >= ONLINE_IDLE_STOP_MS;
+        if (!OnlineRegistered() && s_me.server[0] && s_srvState == ONLINE_SRV_UNKNOWN && NetStart(0))
+        {
+            // No profile (no pings): one look, for the server's state on the screens.
+            const DWORD t0 = GetTickCount();
+            const int ok = request("whereami", std::string(), NULL, NULL, err);
+            server_seen(ok, (int)(GetTickCount() - t0), err);
+        }
         if (!OnlineRegistered() || !s_me.server[0]) continue;
-        if ((s_notify & 1) && !s_lobbyWatch && !s_watch && !s_inRoom && (int)(GetTickCount() - roomsAt) >= 0)
+        if ((s_notify & 1) && !s_lobbyWatch && !s_watch && !s_inRoom && !away && (int)(GetTickCount() - roomsAt) >= 0)
         {
             // New rooms (Settings > Interface > Notifications): a look every 20 s (the lobby's reads do it while open).
             roomsAt = GetTickCount() + ONLINE_ROOMS_LOOK_MS;
             rooms_look();
             continue;
         }
-        if (s_lobbyWatch && (int)(GetTickCount() - s_lobbyAt) >= 0)
+        if (s_lobbyWatch && !away && (int)(GetTickCount() - s_lobbyAt) >= 0)
         {
             EnterCriticalSection(&s_lock);
-            s_lobbyAt = GetTickCount() + ONLINE_LOBBY_MS;
+            s_lobbyAt = GetTickCount() + idle_every(ONLINE_LOBBY_MS);
             LeaveCriticalSection(&s_lock);
             lobby_read();
+            s_lobbyReadAt = GetTickCount();
             continue;
         }
-        if (s_watch && (int)(GetTickCount() - s_watchAt) >= 0)
+        if (s_watch && !away && (int)(GetTickCount() - s_watchAt) >= 0)
         {
             watch_read();
-            s_watchAt = GetTickCount() + ONLINE_WATCH_MS;
+            s_watchAt = GetTickCount() + idle_every(ONLINE_WATCH_MS);
             continue;
         }
         EnterCriticalSection(&s_lock);
@@ -913,22 +1039,31 @@ static DWORD WINAPI online_thread(LPVOID)
         if ((int)(GetTickCount() - pingAt) < 0 && !strcmp(status, sent) && sentRoom == s_inRoom) continue;
         {
             // In a room its own pings measure the time; in a game none is measured (the game's time is not to be taken).
-            const int room = s_inRoom, ms = room && s_roomRtt ? s_roomRtt : status[0] ? s_myMs : measure_ms(err);
+            // The time to the server: this ping's own (three "whereami" before each one measured it: four requests
+            // where one does). In a room its pings' time; in a game the last one (the game's time is not to be taken).
+            const int room = s_inRoom;
             std::vector<std::string> rows;
-            if (ms) s_myMs = ms;
+            DWORD t0;
+            int ok;
+            if (room && s_roomRtt) s_myMs = s_roomRtt;
             add(&q, "status", status);
             add(&q, "since", s_dmSeen);
             add(&q, "ms", s_myMs);
             add(&q, "conn", OnlineMyConn());
             add(&q, "room", room);
-            if (request_me("ping", q, &rows, err))
+            t0 = GetTickCount();
+            ok = request_me("ping", q, &rows, err);
+            server_seen(ok, (int)(GetTickCount() - t0), err);
+            if (ok && !room && !status[0] && s_inboxRtt) s_myMs = s_inboxRtt;   // (not the request's: its handshake counted)
+            if (ok)
             {
                 strcpy(sent, status);
                 sentRoom = room;
                 ping_news(rows);
             }
         }
-        pingAt = GetTickCount() + ONLINE_PING_MS;
+        // The server down (or not reached): looked at again sooner, so its coming back shows soon.
+        pingAt = GetTickCount() + (s_srvState == ONLINE_SRV_DOWN || s_srvState == ONLINE_SRV_NONET ? ONLINE_PING_MS / 3 : ONLINE_PING_MS);
     }
 }
 
@@ -959,7 +1094,7 @@ static DWORD WINAPI inbox_thread(LPVOID)
         std::string q;
         char tag[ONLINE_TAG_MAX + 1], line[512];
         NetWs *w;
-        DWORD openAt, keepAt;
+        DWORD openAt, keepAt, sentAt = 0;
         Sleep(wait);
         if (!OnlineRegistered() || !s_me.server[0] || !NetStart(0)) { wait = 10000; continue; }
         copy(tag, sizeof(tag), s_me.tag);
@@ -969,17 +1104,23 @@ static DWORD WINAPI inbox_thread(LPVOID)
         // Not reached, or refused at once: again later and later (up to two minutes).
         if (!w) { wait = wait < 60000 ? wait * 2 : 120000; continue; }
         openAt = GetTickCount();
-        keepAt = openAt + ONLINE_INBOX_KEEP_MS;
+        keepAt = openAt;   // a "p" at once: its "q" gives the time to the server from the start
         for (;;)
         {
             int text = 0;
             const int n = NetWsRecv(w, line, sizeof(line) - 1, 1000, &text);
             if (n < 0) break;
-            if (n > 0 && text) { line[n] = 0; inbox_line(line); }
+            if (n > 0 && text)
+            {
+                line[n] = 0;
+                if (!strcmp(line, "q")) { if (sentAt) { s_inboxRtt = (int)(GetTickCount() - sentAt) > 0 ? (int)(GetTickCount() - sentAt) : 1; sentAt = 0; } }
+                else inbox_line(line);
+            }
             if (strcmp(tag, s_me.tag)) break;   // another gamertag: its own inbox
             if ((int)(GetTickCount() - keepAt) >= 0)
             {
                 if (!NetWsSend(w, "p", 1, 1)) break;
+                sentAt = GetTickCount();   // its "q" times the way to the server
                 keepAt = GetTickCount() + ONLINE_INBOX_KEEP_MS;
             }
         }
