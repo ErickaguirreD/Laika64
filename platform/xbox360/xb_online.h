@@ -92,6 +92,11 @@ int OnlineStatsOf(const char *name, OnlineStats *out);
 
 struct OnlineNews { std::string date, title, text; };
 int OnlineNewsGet(const char *lang, std::vector<OnlineNews> *out);
+// The most played games online (/v1/top): period 'w' this week, 'm' the last four weeks, 'a' all time. Each: its place,
+// its code ("NALE / 34EE4749": its box art), its name (a hack's with its version), minutes, players, its place a week
+// before (0: none, this week's only) and this player's own minutes with it.
+struct OnlineTopGame { int place, minutes, players, last, mine; std::string code, game; };
+int OnlineTopGames(char period, std::vector<OnlineTopGame> *out);
 
 // ---- The thread's ----
 void OnlineSetStatus(const char *game);   // the game being played ("": in the menus), told at the next ping

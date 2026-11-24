@@ -1,4 +1,4 @@
-// Harissa64 V2 - game information for the ROM browser (see h64_gameinfo.h).
+// LAIKA 64 - game information for the ROM browser (see h64_gameinfo.h).
 #include "h64_gameinfo.h"
 
 #include <stdio.h>
@@ -160,7 +160,7 @@ static const InfoField s_fields[] = {
 
 int h64_gameinfo_format(const H64GameInfo *info, char *out, int outSize)
 {
-    std::string s = "# Harissa64 game information (sources: libretro-database CC BY-SA 4.0, GameDB-N64, Wikipedia CC BY-SA)\r\n";
+    std::string s = "# LAIKA 64 game information (sources: libretro-database CC BY-SA 4.0, GameDB-N64, Wikipedia CC BY-SA)\r\n";
     unsigned i;
     int n;
     if (outSize <= 0) return 0;

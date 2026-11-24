@@ -1,4 +1,4 @@
-// Harissa64 V2 - front-end configuration (see xb_config.h).
+// LAIKA 64 - front-end configuration (see xb_config.h).
 #include "xb_config.h"
 
 #include <stdio.h>
@@ -181,8 +181,9 @@ void ConfigDefaults(Config *c)
     c->audioCheck = 0;
     c->texR3 = 1;   // R3 x2: the HD textures on and off in game
     ConfigHotkeyDefaults(c);
-    c->stretch = 0;
+    c->stretch = 1;   // "16:9 by software" (the wider 3D) off: the 4:3 picture stretched, no graphics errors
     c->asyncGfx = 1;
+    c->netBlackhole = 0;
     c->parseWorker = 1;
     c->asyncAudio = 1;
     c->audioCycles = 100000;
@@ -207,15 +208,16 @@ int ConfigParseFile(Config *c, const char *path)
     static char line[8192];   // input= scripts run long (one line)
     // Menu files written before settingsver=2 saved V-Sync on by default
     // (2.0.2-2.0.4): their vsync=1 is not a choice, and V-Sync made busy
-    // games slower (Mario Tennis); it is off by default again.
-    int menuFile = 0, settingsVer = 0, vsync = -1;
+    // games slower (Mario Tennis); it is off by default again. Before settingsver=3 the same with stretch=0:
+    // "16:9 by software" (the wider 3D, graphics errors in some games) was on by default; off now.
+    int menuFile = 0, settingsVer = 0, vsync = -1, stretch = -1;
     int shotSeen = 0, hkShotSeen = 0;   // an old screenshot combo, and the shortcut that replaces it
     if (!f) return 0;
     while (fgets(line, sizeof(line), f))
     {
         char *eq = strchr(line, '=');
         trim(line);
-        if (!strncmp(line, "# Written by the Harissa64 V2 menu", 34)) menuFile = 1;
+        if (!strncmp(line, "# Written by the LAIKA 64 menu", 30) || !strncmp(line, "# Written by the Harissa64 V2 menu", 34)) menuFile = 1;   // (the latter until 3.4)
         if (line[0] == '#' || line[0] == ';' || !eq) continue;
         *eq = 0;
         // Outside the chain below: it is at the compiler's limit of nested else-ifs.
@@ -251,6 +253,7 @@ int ConfigParseFile(Config *c, const char *path)
         if (!strcmp(line, "wallrec")) c->wallRecommend = atoi(eq + 1) != 0;
         if (!strcmp(line, "res169")) c->res169 = atoi(eq + 1);
         if (!strcmp(line, "reswide")) c->resWide = atoi(eq + 1) != 0;
+        if (!strcmp(line, "netblackhole")) c->netBlackhole = atoi(eq + 1);   // (out of the long chain below: VS2010's nesting limit)
         if (!strcmp(line, "resolution"))
         {
             // Older files: 1-3 native x1, x2, x3 (4:3), 4 HD 1280x720 (16:9).
@@ -416,7 +419,7 @@ int ConfigParseFile(Config *c, const char *path)
         else if (!strcmp(line, "zoom")) c->zoom = atoi(eq + 1);
         else if (!strcmp(line, "posx")) c->offsetX = atoi(eq + 1);
         else if (!strcmp(line, "posy")) c->offsetY = atoi(eq + 1);
-        else if (!strcmp(line, "stretch")) c->stretch = atoi(eq + 1);
+        else if (!strcmp(line, "stretch")) stretch = atoi(eq + 1);
         else if (!strcmp(line, "blur")) c->blur = atoi(eq + 1);
         else if (!strcmp(line, "asyncgfx")) c->asyncGfx = atoi(eq + 1);
         else if (!strcmp(line, "parseworker")) c->parseWorker = atoi(eq + 1);
@@ -445,6 +448,7 @@ int ConfigParseFile(Config *c, const char *path)
     }
     fclose(f);
     if (vsync >= 0 && !(menuFile && settingsVer < 2 && vsync == 1)) c->vsync = vsync;
+    if (stretch >= 0 && !(menuFile && settingsVer < 3 && stretch == 0)) c->stretch = stretch;
     if (c->vsync == 1) c->vsync = 2;   // the "normal" mode is gone: V-Sync on is the one that always waits
     if (c->brightLevel < 0 || c->brightLevel > 100)
     {
@@ -482,7 +486,7 @@ int ConfigWriteMenuKeys(const Config *c, const char *path, int withLastRom)
     FILE *f = fopen(path, "w");
     int i;
     if (!f) return 0;
-    fprintf(f, "# Written by the Harissa64 V2 menu\nsettingsver=2\ncpu=%s\nhle=%d\naudioms=%d\nsmooth=%d\nshowfps=%d\n", c->cpu, c->hle, c->audioMs,
+    fprintf(f, "# Written by the LAIKA 64 menu\nsettingsver=3\ncpu=%s\nhle=%d\naudioms=%d\nsmooth=%d\nshowfps=%d\n", c->cpu, c->hle, c->audioMs,
             c->smooth, c->perfItems ? 1 : 0);
     fprintf(f, "perfitems=%d\nperfpos=%d\nperfsize=%d\nperfcolor=%d\nperfbox=%d\nperffahrenheit=%d\n", c->perfItems, c->perfPos, c->perfSize,
             c->perfColor, c->perfBox, c->perfFahrenheit);

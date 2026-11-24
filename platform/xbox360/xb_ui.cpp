@@ -1,4 +1,4 @@
-// Harissa64 V2 - screen drawing for the front end (see xb_ui.h).
+// LAIKA 64 - screen drawing for the front end (see xb_ui.h).
 #include "xb_ui.h"
 
 #include <math.h>
@@ -855,6 +855,13 @@ unsigned char *UiDecodeImage(const unsigned char *enc, long size, int maxW, int 
     stbi_image_free(img);
     if (out) { *wOut = tw; *hOut = th; }
     return out;
+}
+
+int UiImageSize(const unsigned char *enc, long size, int *w, int *h)
+{
+    int n = 0;
+    *w = *h = 0;
+    return enc && size > 0 && stbi_info_from_memory(enc, (int)size, w, h, &n);
 }
 
 static int wall_pixels(const unsigned char *enc, long size, WallPixels *px)
@@ -2193,6 +2200,15 @@ void UiScreenFooterGlow(const char *hints, const char *glow)
 {
     UiRect(UI_SAFE_X, 636, UI_WIDTH - 2 * UI_SAFE_X, 1, UI_COL_LINE);
     footer_impl(UI_SAFE_X, 664, hints, 1, glow);
+}
+
+void UiScreenFooterGlowSmall(const char *hints, const char *glow)
+{
+    // The same, three quarters the size as the main menu's (the ROM list)
+    UiRect(UI_SAFE_X, 636, UI_WIDTH - 2 * UI_SAFE_X, 1, UI_COL_LINE);
+    UiSetScale(UI_SAFE_X, 664, 0.75f);
+    footer_impl(UI_SAFE_X, 664, hints, 1, glow);
+    UiSetScale(0, 0, 1.0f);
 }
 
 // ---- Notifications ----

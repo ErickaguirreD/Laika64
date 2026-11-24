@@ -1,4 +1,4 @@
-// Harissa64 V2 - RDP and VI lookup tables, data from ParaLLEl-RDP's
+// LAIKA 64 - RDP and VI lookup tables, data from ParaLLEl-RDP's
 // parallel-rdp/luts.hpp (commit 1cecd042), MIT licence:
 //
 // Copyright (c) 2020 Themaister

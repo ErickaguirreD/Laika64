@@ -41,8 +41,8 @@ $version = (Get-Content (Join-Path $repo 'VERSION') -TotalCount 1).Trim()
 if ($version -notmatch '^\d+\.\d+(\.\d+)?$') { throw "VERSION must look like 1.2 or 1.2.3 (got '$version')." }
 
 $build = Join-Path $repo 'platform\xbox360\Release'
-$built = Join-Path $build 'harissa64v2.xex'   # what the XDK's packaging step names it
-$xex = Join-Path $build 'LAIKA64.xex'        # the executable's name, copied from it
+$built = Join-Path $build 'laika64.xex'   # what the XDK's packaging step names it (the project's name)
+$xex = $built
 $art = Join-Path $repo 'platform\xbox360\title\art'
 $releaseDir = Join-Path $repo 'release'
 $stage = Join-Path $releaseDir 'LAIKA 64'
@@ -61,8 +61,8 @@ if (-not $NoBuild) {
     }
     if (-not (Test-Path $vcvars)) { throw "Visual Studio 2010 (vcvarsall.bat) not found." }
     $msbuild = Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319\MSBuild.exe'
-    $sln = Join-Path $repo 'platform\xbox360\harissa64v2.sln'
-    $log = Join-Path $env:TEMP 'harissa64_release_build.log'
+    $sln = Join-Path $repo 'platform\xbox360\laika64.sln'
+    $log = Join-Path $env:TEMP 'laika64_release_build.log'
     $started = Get-Date
     # The XEX packaging step does not always run again on its own: start from no xex.
     if (Test-Path $built) { Remove-Item -LiteralPath $built -Force }
@@ -71,7 +71,6 @@ if (-not $NoBuild) {
     if (-not (Test-Path $built) -or (Get-Item $built).LastWriteTime -lt $started) {
         throw "Build finished but $built was not regenerated (see $log)."
     }
-    Copy-Item $built $xex -Force
 }
 
 # ---------------------------------------------------------------- checks --

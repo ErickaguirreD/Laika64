@@ -1,4 +1,4 @@
-// Harissa64 V2 - cartridge save media (EEPROM, SRAM, FlashRAM) and the
+// LAIKA 64 - cartridge save media (EEPROM, SRAM, FlashRAM) and the
 // Controller Pak on port 1.
 //
 // The core keeps the contents and marks what the game writes; the platform

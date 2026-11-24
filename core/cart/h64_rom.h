@@ -1,4 +1,4 @@
-// Harissa64 V2 - cartridge ROM image.
+// LAIKA 64 - cartridge ROM image.
 //
 // Loads a ROM from memory in any of the three common dump orders and keeps it
 // in N64 (big-endian, ".z64") order. Parses the header and identifies the CIC

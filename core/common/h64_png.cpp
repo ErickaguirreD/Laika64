@@ -1,4 +1,4 @@
-// Harissa64 V2 - PNG decoding and image downscaling (see h64_png.h).
+// LAIKA 64 - PNG decoding and image downscaling (see h64_png.h).
 // Written from the PNG specification (W3C, second edition): chunk layout,
 // filters 0-4 with the Paeth predictor, Adam7 passes, sample scaling.
 #include "h64_png.h"

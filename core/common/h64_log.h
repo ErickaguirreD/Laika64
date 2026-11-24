@@ -1,4 +1,4 @@
-// Harissa64 V2 - logging.
+// LAIKA 64 - logging.
 //
 // The core never prints directly: it formats a line and hands it to a sink
 // installed by the platform layer (stdout for h64test, a log file on the

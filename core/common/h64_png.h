@@ -1,4 +1,4 @@
-// Harissa64 V2 - PNG decoding and image downscaling, for the box art shown by
+// LAIKA 64 - PNG decoding and image downscaling, for the box art shown by
 // the ROM browser (the pictures come from the network or the user's files:
 // every size and offset is checked, a bad file is only refused).
 //

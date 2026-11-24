@@ -1,4 +1,4 @@
-// Harissa64 V2 - RDP triangle setup: builds the RDP triangle command
+// LAIKA 64 - RDP triangle setup: builds the RDP triangle command
 // (edge, shade, texture and depth coefficients) from three screen-space
 // vertices, as the graphics microcode does on the RSP.
 //

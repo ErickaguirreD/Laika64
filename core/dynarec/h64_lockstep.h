@@ -1,4 +1,4 @@
-// Harissa64 V2 - lockstep check: runs a recompiler system one dispatch at a
+// LAIKA 64 - lockstep check: runs a recompiler system one dispatch at a
 // time and a reference (interpreter) system up to the same cycle, and
 // compares the whole CPU state after every dispatch and RDRAM regularly.
 #ifndef H64_LOCKSTEP_H

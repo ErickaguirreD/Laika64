@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Downloads harissa64v2.log from the Xbox 360 over FTP and summarizes the
+    Downloads laika64.log from the Xbox 360 over FTP and summarizes the
     [hts] lines (hi-res texture pack lookups), so you don't have to pull the
     whole file by hand and paste it into chat every time.
 
@@ -13,8 +13,8 @@
     IP address of the console, e.g. 192.168.1.50
 
 .PARAMETER RemotePath
-    FTP path to harissa64v2.log on the console, next to the .xex (for example
-    "/Hdd1:/Emulators/Harissa64/harissa64v2.log" if that's where you installed
+    FTP path to laika64.log on the console, next to the .xex (for example
+    "/Hdd1:/Emulators/LAIKA64/laika64.log" if that's where you installed
     it). Defaults to the INSTALL.txt example path.
 
 .PARAMETER User / -Password
@@ -31,12 +31,12 @@
 
 .EXAMPLE
     .\pull_hts_log.ps1 -ConsoleIP 192.168.1.50
-    .\pull_hts_log.ps1 -ConsoleIP 192.168.1.50 -RemotePath "/Hdd1:/Emulators/Harissa64/harissa64v2.log"
+    .\pull_hts_log.ps1 -ConsoleIP 192.168.1.50 -RemotePath "/Hdd1:/Emulators/LAIKA64/laika64.log"
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)] [string] $ConsoleIP,
-    [string] $RemotePath = "/Hdd1:/Emulators/Harissa64/harissa64v2.log",
+    [string] $RemotePath = "/Hdd1:/Emulators/LAIKA64/laika64.log",
     [string] $User = "",
     [string] $Password = "",
     [string] $OutDir = (Join-Path $PSScriptRoot "logs"),
@@ -51,8 +51,8 @@ function Step($text) { Write-Host "==> $text" -ForegroundColor Cyan }
 Step "Downloading $RemotePath from $ConsoleIP"
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
-$localFile = Join-Path $OutDir "harissa64v2_$stamp.log"
-$latestFile = Join-Path $OutDir "harissa64v2_latest.log"
+$localFile = Join-Path $OutDir "laika64_$stamp.log"
+$latestFile = Join-Path $OutDir "laika64_latest.log"
 
 $uri = "ftp://$ConsoleIP$RemotePath"
 $request = [System.Net.FtpWebRequest]::Create($uri)

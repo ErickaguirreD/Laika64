@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run Harissa64 in Xenia (the user's build with the dynarec patch) and collect its screenshots.
+"""Run LAIKA 64 in Xenia (the user's build with the dynarec patch) and collect its screenshots.
 
 Usage:
   python tests/scripts/xenia_run.py NAME ROM [--input SCRIPT] [--shots 100,200] [--exit N] [--ini key=value ...]
@@ -39,7 +39,7 @@ def main():
     game, work = os.path.join(a.dir, 'game'), os.path.join(a.dir, 'work')
     cache = os.path.join(work, 'cache')
     os.makedirs(OUT, exist_ok=True)
-    shutil.copyfile(os.environ.get('H64_XEX') or os.path.join(ROOT, 'platform', 'xbox360', 'Release', 'harissa64v2.xex'), os.path.join(game, 'harissa64v2.xex'))
+    shutil.copyfile(os.environ.get('H64_XEX') or os.path.join(ROOT, 'platform', 'xbox360', 'Release', 'laika64.xex'), os.path.join(game, 'laika64.xex'))
     ext = os.path.splitext(a.rom)[1].lower()
     romname = 'rom' + ext
     shutil.copyfile(os.path.join(ROOT, 'xbox64', 'Release', 'roms', a.rom), os.path.join(game, romname))
@@ -56,17 +56,17 @@ def main():
         shutil.copyfile(a.state, os.path.join(sd, 'state9.h64s'))
         ini += ['stateslot=9', 'loadstate=1']
     ini += a.ini
-    open(os.path.join(game, 'harissa64v2.ini'), 'w', newline='').write('\r\n'.join(ini) + '\r\n')
-    for f in glob.glob(os.path.join(cache, 'shot_*.bmp')) + [os.path.join(cache, 'harissa64v2.log')]:
+    open(os.path.join(game, 'laika64dev.ini'), 'w', newline='').write('\r\n'.join(ini) + '\r\n')
+    for f in glob.glob(os.path.join(cache, 'shot_*.bmp')) + [os.path.join(cache, 'laika64.log')]:
         if os.path.exists(f):
             os.remove(f)
     t0 = time.time()
     p = subprocess.Popen([a.xenia, '--log_file=' + os.path.join(work, 'xenia.log'), '--mount_cache=true',
                           '--d3d12_readback_resolve=true',
-                          '--d3d12_readback_resolve_skip_write_combined=true', os.path.join(game, 'harissa64v2.xex')], cwd=work)
+                          '--d3d12_readback_resolve_skip_write_combined=true', os.path.join(game, 'laika64.xex')], cwd=work)
     try:
         while p.poll() is None and time.time() - t0 < a.timeout:
-            log = os.path.join(cache, 'harissa64v2.log')
+            log = os.path.join(cache, 'laika64.log')
             if a.exit and os.path.exists(log) and b'exitafter reached' in open(log, 'rb').read():
                 time.sleep(3)
                 break
@@ -74,7 +74,7 @@ def main():
     finally:
         if p.poll() is None:
             p.kill()
-    log = os.path.join(cache, 'harissa64v2.log')
+    log = os.path.join(cache, 'laika64.log')
     if os.path.exists(log):
         shutil.copyfile(log, os.path.join(OUT, a.name + '.log'))
     shots = sorted(glob.glob(os.path.join(cache, 'shot_*.bmp')))

@@ -1,4 +1,4 @@
-// Harissa64 V2 - RSP (Reality Signal Processor), low-level emulation.
+// LAIKA 64 - RSP (Reality Signal Processor), low-level emulation.
 //
 // Reference interpreter: scalar unit (a 32-bit MIPS subset), vector unit
 // (32 registers of 8 x 16-bit elements, 48-bit accumulators, flags,

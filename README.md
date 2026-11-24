@@ -173,7 +173,7 @@ When a new version is published on [GitHub](https://github.com/ErickaguirreD/Lai
 
 ## Building
 
-You need Visual Studio 2010 and the Xbox 360 SDK. Open `platform/xbox360/harissa64v2.sln` and build the Release configuration for the Xbox 360 platform, or run `build_release.ps1`, which also packs the release folder.
+You need Visual Studio 2010 and the Xbox 360 SDK. Open `platform/xbox360/laika64.sln` and build the Release configuration for the Xbox 360 platform, or run `build_release.ps1`, which also packs the release folder.
 
 ## Support the project
 

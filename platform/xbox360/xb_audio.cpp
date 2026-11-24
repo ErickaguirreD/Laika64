@@ -1,4 +1,4 @@
-// Harissa64 V2 - XAudio2 output (see xb_audio.h).
+// LAIKA 64 - XAudio2 output (see xb_audio.h).
 //
 // Continuity, as V1 does it (xenon/xbox360_audio.cpp on master):
 //  - Rate control: when the emulation runs a little slow (or fast), the

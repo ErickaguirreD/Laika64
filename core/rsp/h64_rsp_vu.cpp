@@ -1,4 +1,4 @@
-// Harissa64 V2 - RSP vector unit (COP2) and vector loads/stores (LWC2/SWC2).
+// LAIKA 64 - RSP vector unit (COP2) and vector loads/stores (LWC2/SWC2).
 // Ported from ares (ISC licence): ares/n64/rsp/interpreter-vpu.cpp, the
 // SISD (scalar) paths, and the decode tables of interpreter.cpp
 // (commit a776c509). See THIRD_PARTY.md.

@@ -1,4 +1,4 @@
-// Harissa64 V2 - minimal unit test support.
+// LAIKA 64 - minimal unit test support.
 //
 // Tests are plain functions listed in tests/unit/unit_tests.cpp, so the same
 // binary runs them on every target (host, big-endian PowerPC under QEMU, and

@@ -1,4 +1,4 @@
-// Harissa64 V2 - controller remapping (see h64_padmap.h).
+// LAIKA 64 - controller remapping (see h64_padmap.h).
 #include "h64_padmap.h"
 
 #include <math.h>

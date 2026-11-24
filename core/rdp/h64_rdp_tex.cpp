@@ -1,4 +1,4 @@
-// Harissa64 V2 - software RDP: TMEM loads, texture sampling and LOD.
+// LAIKA 64 - software RDP: TMEM loads, texture sampling and LOD.
 //
 // Sampling and LOD are ported from ParaLLEl-RDP's shaders/texture.h (MIT,
 // see h64_rdp_state.h). The shader addresses TMEM "physically" (bytes XOR 3,

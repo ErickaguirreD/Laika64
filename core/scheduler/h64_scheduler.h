@@ -1,4 +1,4 @@
-// Harissa64 V2 - event scheduler.
+// LAIKA 64 - event scheduler.
 //
 // One timeline in CPU cycles (PClock, 93.75 MHz). Every timed device event
 // (Count/Compare, VI lines, AI/PI/SI DMA completion, RSP/RDP tasks) is an

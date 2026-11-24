@@ -1,4 +1,4 @@
-// Harissa64 V2 - PowerPC instruction encoder for the dynarec.
+// LAIKA 64 - PowerPC instruction encoder for the dynarec.
 //
 // 64-bit PowerPC (Xenon, and ppc64 big-endian Linux under QEMU for tests).
 // Encodings from the PowerPC ISA (Book I); each function appends one 32-bit

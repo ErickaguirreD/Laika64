@@ -1,4 +1,4 @@
-// Harissa64 - box art and game information for the ROM browser.
+// LAIKA 64 - box art and game information for the ROM browser.
 //
 // Everything lives in <drive>:\art\games\ (game:\ on the console, cache:\ in
 // Xenia), one pair of files per game, named by its cache key (the header's
@@ -129,6 +129,11 @@ int ArtReadCoverKey(const char *key, int kind, u8 **rgba, int *w, int *h, int *g
 // One kind of a game's pictures deleted (the detailed view's "get it again"): its download (ArtBulkStart with retry)
 // then fetches it anew. From the browser's thread, after ArtStart.
 void ArtDropPicture(const char *romPath, int kind);
+// A box of one's own (the detailed view's "Your own picture"): written as the game's box (RGBA in, kept as RGB),
+// marked as one's own; the downloads leave it. ArtDropPicture(ART_KIND_BOX) takes it away (the download brings the
+// box back). After ArtStart; both read the ROM's header.
+int ArtSetOwnBox(const char *romPath, const u8 *rgba, int w, int h);
+int ArtHasOwnBox(const char *romPath);
 // One kind of a game's pictures downloaded (the detailed view's picker), whatever Game images allows: libretro's
 // box, picture from the game, title screen, logo; ScreenScraper's 3D box and cartridge (and its box or logo where
 // libretro has none). Queued before the list's own downloads; ArtFetchBusy: 1 while one of that ROM waits or goes on.

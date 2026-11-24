@@ -1,4 +1,4 @@
-// Harissa64 V2 - VR4300 reference interpreter: integer unit, COP0, TLB,
+// LAIKA 64 - VR4300 reference interpreter: integer unit, COP0, TLB,
 // exceptions and interrupts. COP1 is in h64_fpu.cpp.
 //
 // Sources: NEC VR4300 user's manual (instruction set, chapter 6 "Exception

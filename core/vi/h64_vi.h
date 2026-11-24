@@ -1,4 +1,4 @@
-// Harissa64 V2 - VI output.
+// LAIKA 64 - VI output.
 //
 // h64_vi_render: the VI stage (fetch with coverage, anti-alias, dither and
 // divot filters, scaling, gamma), producing what the console sends to the TV:

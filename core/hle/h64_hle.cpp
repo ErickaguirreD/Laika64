@@ -21,7 +21,7 @@
  *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.          *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-// Harissa64 V2: task detection from mupen64plus-rsp-hle's hle.c (audio
+// LAIKA 64: task detection from mupen64plus-rsp-hle's hle.c (audio
 // tasks only; everything else goes to the LLE RSP), plus the memory helpers
 // of its memory.c rewritten for guest memory in N64 byte order.
 #include <stdarg.h>

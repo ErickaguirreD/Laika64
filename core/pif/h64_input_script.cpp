@@ -1,4 +1,4 @@
-// Harissa64 V2 - scripted controller input (see h64_input_script.h).
+// LAIKA 64 - scripted controller input (see h64_input_script.h).
 #include "h64_input_script.h"
 
 #include <stdlib.h>

@@ -16,11 +16,11 @@ tests/console/data/:
   <name>.png                       the reference capture (--update)
   out/<name>.png, out/report.txt   the last run
 Console settings, never committed: tests/console/console.local, lines key=value:
-  ip=...  ftpuser=...  ftppass=...  dir=/Hdd1/Emulators/Harissa64v2  (FTP path of the emulator)
-  xdir=hdd:\\Emulators\\Harissa64v2  (the same folder as the console sees it)
+  ip=...  ftpuser=...  ftppass=...  dir=/Hdd1/Emulators/LAIKA64  (FTP path of the emulator)
+  xdir=hdd:\\Emulators\\LAIKA64  (the same folder as the console sees it)
 
 The console's saves folder is backed up first and put back afterwards; nothing
-runs if the backup is incomplete. The user's harissa64v2.ini is put back too.
+runs if the backup is incomplete. The user's laika64dev.ini is put back too.
 """
 import argparse, ftplib, io, os, shutil, subprocess, sys, time
 
@@ -238,13 +238,13 @@ def run_case(con, c, update, log):
     if events:
         ini.append('input=' + ','.join(events))
     ini += c['extra']
-    con.put(('\r\n'.join(ini) + '\r\n').encode(), 'harissa64v2.ini')
-    con.delete('harissa64v2.log')
+    con.put(('\r\n'.join(ini) + '\r\n').encode(), 'laika64dev.ini')
+    con.delete('laika64.log')
     tmp = os.path.join(OUT, 'tmp')
     if os.path.isdir(tmp):
         shutil.rmtree(tmp)
     os.makedirs(tmp)
-    con.xb('xbreboot.exe', con.cfg['xdir'] + '\\harissa64v2.xex')
+    con.xb('xbreboot.exe', con.cfg['xdir'] + '\\default.xex')
     # Captures for ~90 s; the frozen frame is the longest run of near-identical
     # captures that does not look like the dashboard (taken before launch).
     # Captures stop the title for ~300 ms each, so none is taken while it
@@ -283,10 +283,10 @@ def run_case(con, c, update, log):
             best, bestLen = i, j - i
         i = j
     try:
-        logtxt = con.get('harissa64v2.log') or b''
+        logtxt = con.get('laika64.log') or b''
     except Exception:
         time.sleep(5)
-        logtxt = con.get('harissa64v2.log') or b''
+        logtxt = con.get('laika64.log') or b''
     open(os.path.join(OUT, name + '.log'), 'wb').write(logtxt)
     if best < 0 or bestLen < 2 or (not browser and b'paused at VI' not in logtxt):
         log('%-24s FAIL (no frozen frame captured)' % name)
@@ -341,7 +341,7 @@ def run():
         sys.exit('console not answering')
     # The user's ini: a test ini left by an interrupted run (pauseat=,
     # exitafter=) is never taken for it; the last clean copy is kept locally.
-    user_ini = con.get('harissa64v2.ini')
+    user_ini = con.get('laika64dev.ini')
     keep = os.path.join(DATA, 'user_ini.txt')
     if user_ini is not None and (b'pauseat=' in user_ini or b'exitafter=' in user_ini or b'loadstate=' in user_ini):
         log('the console has a test ini: the saved copy of the user ini will be put back')
@@ -362,7 +362,7 @@ def run():
     dpath = os.path.join(OUT, 'dashboard.bmp')
     run.dashboard = small(dpath) if con.capture(dpath) else None
     if a.xex:
-        con.put(open(a.xex, 'rb').read(), 'harissa64v2.xex')
+        con.put(open(a.xex, 'rb').read(), 'default.xex')
         log('xex uploaded: ' + a.xex)
     results = []
     try:
@@ -374,13 +374,13 @@ def run():
         if user_ini is not None:
             for attempt in range(3):
                 try:
-                    con.put(user_ini, 'harissa64v2.ini')
-                    if con.get('harissa64v2.ini') == user_ini:
+                    con.put(user_ini, 'laika64dev.ini')
+                    if con.get('laika64dev.ini') == user_ini:
                         break
                 except Exception:
                     pass
                 time.sleep(5)
-            log('user ini restored: %s' % ('yes' if con.get('harissa64v2.ini') == user_ini else 'NO, put it back by hand'))
+            log('user ini restored: %s' % ('yes' if con.get('laika64dev.ini') == user_ini else 'NO, put it back by hand'))
         same = con.restore_saves(backup)
         log('saves restored: %s' % ('identical' if same else 'MISMATCH, check ' + backup))
     failed = [c['name'] for c, r in zip(cases, results) if r is False]

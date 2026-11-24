@@ -1,4 +1,4 @@
-// Harissa64 V2 - recompiler: block cache, dispatcher, code generation.
+// LAIKA 64 - recompiler: block cache, dispatcher, code generation.
 #include "h64_jit.h"
 #include "h64_jit_internal.h"
 

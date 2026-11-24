@@ -1,4 +1,4 @@
-// Harissa64 V2 - CRC-32 (IEEE 802.3, the zlib polynomial), used to identify
+// LAIKA 64 - CRC-32 (IEEE 802.3, the zlib polynomial), used to identify
 // a ROM's IPL3 boot code and hence its CIC chip.
 #ifndef H64_CRC32_H
 #define H64_CRC32_H

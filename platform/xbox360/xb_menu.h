@@ -1,4 +1,4 @@
-// Harissa64 V2 - front-end menus (Xbox 360): a generic list panel, the ROM
+// LAIKA 64 - front-end menus (Xbox 360): a generic list panel, the ROM
 // browser shown at start-up and the settings screen.
 #ifndef XB_MENU_H
 #define XB_MENU_H
@@ -193,6 +193,7 @@ int BatteryCheck(const Config *c, char *msg, int size);
 // main.cpp: the menus set the controllers' motors themselves; the game's Rumble Pak sends its own again next frame.
 void RumbleForget(void);
 void MenuInGame(int on);
+void MenuOnlineGameName(const char *romPath, u32 crc1, u32 crc2, char *out, size_t size);   // online play's name of a game (a hack's with its version)
 int MenuTakeResume(void);   // main.cpp, as a game starts: the state slot to load (the main menu's "Continue"), once; 0 none   // main.cpp: a game runs (the right stick is the game's: no music volume or track then)
 void OnlineGameAvatar(float cx, float cy, float r, int avatar, const char *tag);   // between UiBegin and UiEnd
 

@@ -1,4 +1,4 @@
-// Harissa64 V2 - VR4300 COP1 (FPU), reference implementation.
+// LAIKA 64 - VR4300 COP1 (FPU), reference implementation.
 //
 // Arithmetic runs on the host's IEEE unit in the guest's rounding mode; the
 // host exception flags become the FCR31 cause bits. What the host cannot

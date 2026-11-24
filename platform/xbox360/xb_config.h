@@ -1,6 +1,6 @@
-// Harissa64 V2 - front-end configuration (Xbox 360).
+// LAIKA 64 - front-end configuration (Xbox 360).
 //
-// Read in layers: defaults, game:\harissa64v2.ini (developer keys and
+// Read in layers: defaults, game:\laika64dev.ini (developer keys and
 // scripted runs), then the menu's files: <drive>:\config\settings.ini (all
 // games) and <drive>:\config\<game folder>.ini (one game's profile).
 #ifndef XB_CONFIG_H
@@ -150,6 +150,8 @@ struct Config
     int musicMode;      // musicmode=0|1|2|3: game:\music\ in name order, at random, musictrack over and over, or none
     char musicTrack[96];    // musictrack=FILE: the track of musicmode=2 (a file name in game:\music\)
     int asyncGfx;       // asyncgfx=0: graphics tasks and presents on the CPU thread
+    int netBlackhole;   // netblackhole=1: every connection goes to an address that never answers (a network that
+                        // resolves names but reaches nothing, as a user's console did with 3.4)
     int parseWorker;    // parseworker=0: display lists parsed on the graphics worker too (no second worker)
     int asyncAudio;     // asyncaudio=0: audio HLE tasks on the CPU thread
     u32 audioCycles;    // audiocycles=N: CPU cycles an asynchronous audio task keeps the RSP busy
@@ -172,7 +174,7 @@ struct Config
     u32 browserAt;      // browserat=N: back to the ROM list at VI N (as the menu's "Back to the ROM list")
     int xenia;          // xenia=1: running in Xenia (no FPSCR access, no return to the dashboard)
     char lang[8];       // lang=en|es|de|fr|ar|pt|ru: the menus' language (settings.ini; empty: not chosen yet)
-    char uiLang[8];     // uilang=CODE (harissa64v2.ini, checks): this language whatever settings.ini says, no language list
+    char uiLang[8];     // uilang=CODE (laika64dev.ini, checks): this language whatever settings.ini says, no language list
     int langPick;       // langpick=1: the language list at start even when a language is set (checks); 2..8: on LANG_* N-2
     int langAuto;       // langauto=MS: the language list confirms its selection by itself after MS ms (checks)
     int rumble;         // rumble=0..100: the Rumble Pak's strength in % (0: off; default 100; an older file's 1 is 100)

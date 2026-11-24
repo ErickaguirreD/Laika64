@@ -21,7 +21,7 @@
  *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.          *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-// Harissa64 V2: mupen64plus-rsp-hle's JPEG task HLE (Pokemon Stadium 1 and 2,
+// LAIKA 64: mupen64plus-rsp-hle's JPEG task HLE (Pokemon Stadium 1 and 2,
 // Ocarina of Time, Ogre Battle 64, Bottom of the 9th), commit 8a7a472, kept
 // as upstream wrote it; guest memory through h64_hle_internal.h's helpers.
 

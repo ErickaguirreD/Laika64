@@ -1,4 +1,4 @@
-// Harissa64 V2 - save states (see h64_state.h).
+// LAIKA 64 - save states (see h64_state.h).
 //
 // Layout: "H64S", format version, ROM header CRCs, then the sections below in
 // a fixed order, each opened by a 4-character marker. A single visitor walks

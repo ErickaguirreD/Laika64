@@ -1,4 +1,4 @@
-// Harissa64 V2 - software RDP: commands, rasterisation and the pixel pipeline.
+// LAIKA 64 - software RDP: commands, rasterisation and the pixel pipeline.
 //
 // Serial CPU port of ParaLLEl-RDP (MIT, see h64_rdp_state.h): command
 // decoding (rdp_device.cpp), derived state (rdp_renderer.cpp), span setup

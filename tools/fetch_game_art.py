@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Download box art and game information for your N64 ROMs, on a PC.
 
-Harissa64 downloads these itself when the console is online. This script is
+LAIKA 64 downloads these itself when the console is online. This script is
 for consoles without internet: run it on a PC, then copy the folder it fills
-to the console, next to default.xex (Harissa64\\art\\games\\).
+to the console, next to default.xex (LAIKA 64\\art\\games\\).
 
 Usage:
   python fetch_game_art.py ROM_FOLDER [OUTPUT_FOLDER] [--no-descriptions] [--refresh]
@@ -36,7 +36,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 
-UA = 'Harissa64 art script (https://github.com/kernel64/Harissa64)'
+UA = 'LAIKA 64 art script (https://github.com/ErickaguirreD/Laika64)'
 LIBRETRO = 'https://raw.githubusercontent.com/libretro/libretro-database/master/metadat/'
 N64 = 'Nintendo%20-%20Nintendo%2064.dat'
 DB_FILES = [
@@ -291,7 +291,7 @@ def lookup(db, code, version, stem):
 
 # ---- Cache files (h64_gameinfo_format / parse) ----
 def write_info(path, info):
-    lines = ['# Harissa64 game information (sources: libretro-database CC BY-SA 4.0, GameDB-N64, Wikipedia CC BY-SA)',
+    lines = ['# LAIKA 64 game information (sources: libretro-database CC BY-SA 4.0, GameDB-N64, Wikipedia CC BY-SA)',
              'found=%d' % (1 if info.get('found') else 0),
              'cover=' + {1: 'yes', 0: 'none'}.get(info.get('cover', -1), 'unknown')]
     if info.get('wiki', -1) >= 0:
@@ -359,7 +359,7 @@ def wiki_pages(info):
 
 
 def main():
-    ap = argparse.ArgumentParser(description='Box art and game information for Harissa64.')
+    ap = argparse.ArgumentParser(description='Box art and game information for LAIKA 64.')
     ap.add_argument('roms', help='folder with your ROMs')
     ap.add_argument('out', nargs='?', default=os.path.join('art', 'games'), help='output folder (default art/games)')
     ap.add_argument('--no-descriptions', action='store_true', help='skip the Wikipedia descriptions')
@@ -431,7 +431,7 @@ def main():
         covers += os.path.exists(png)
         print('[%d/%d] %s -> %s: %s%s' % (i, len(files), f, key, info.get('title', 'not found'),
                                         '' if os.path.exists(png) else ' (no box art)'))
-    print('\n%d ROMs, %d identified, %d with box art. Copy "%s" to the console as Harissa64\\art\\games.'
+    print('\n%d ROMs, %d identified, %d with box art. Copy "%s" to the console as LAIKA 64\\art\\games.'
           % (len(files), found, covers, a.out))
 
 

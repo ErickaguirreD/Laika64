@@ -1,4 +1,4 @@
-// Harissa64 V2 - M0.3: executable memory proof of concept.
+// LAIKA 64 - M0.3: executable memory proof of concept.
 //
 // Tries every plausible way of getting memory the title can write machine
 // code into and then execute. For each method: allocate, write
@@ -379,7 +379,7 @@ restart:
         }
     }
     if (next == 0)
-        Log("==== Harissa64 V2 execmem POC, fresh start ====");
+        Log("==== LAIKA 64 execmem POC, fresh start ====");
     else if (next < NUM_METHODS)
         Log("==== relaunched: resuming at method %d (method %d did not finish) ====", next + 1, next);
 
@@ -426,7 +426,7 @@ restart:
         if (dev)
         {
             dev->Clear(0, NULL, D3DCLEAR_TARGET, D3DCOLOR_XRGB(10, 12, 20), 1.0f, 0);
-            AddText(80, 30, 3, "HARISSA64 V2 - EXECUTABLE MEMORY TEST");
+            AddText(80, 30, 3, "LAIKA 64 - EXECUTABLE MEMORY TEST");
             FlushText(dev, D3DCOLOR_XRGB(220, 220, 220));
             for (i = 0; i < NUM_METHODS; i++)
             {

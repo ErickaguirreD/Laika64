@@ -1,4 +1,4 @@
-// Harissa64 - HTTPS downloads from the console (the update check, box art and
+// LAIKA 64 - HTTPS downloads from the console (the update check, box art and
 // game information).
 //
 // The Xbox 360 libraries speak no modern TLS: BearSSL (third_party/bearssl,
@@ -22,6 +22,10 @@
 // an address. Returns 1 when online. Later calls return the first answer
 // at once (no new wait) unless `retry` is set.
 int NetStart(int retry);
+
+// Check key netblackhole=1: names still resolve, but every connection goes to an
+// address that never answers (each one gives up after its connect time).
+void NetSetBlackhole(int on);
 
 // GET https://host/path over HTTP/1.1. Redirects are followed (up to 4) when
 // `follow` is set; otherwise a redirect's Location goes to `location`. With

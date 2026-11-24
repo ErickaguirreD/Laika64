@@ -1,4 +1,4 @@
-// Harissa64 V2 - endian-aware memory access.
+// LAIKA 64 - endian-aware memory access.
 //
 // The N64 is big-endian. Guest memory (RDRAM, ROM, DMEM/IMEM, PIF RAM...) is
 // stored in the core as plain byte arrays in N64 byte order, so a guest byte

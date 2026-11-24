@@ -1,4 +1,4 @@
-// Harissa64 V2 - PIF: JoyBus command processing, the PIF RAM control byte,
+// LAIKA 64 - PIF: JoyBus command processing, the PIF RAM control byte,
 // the CIC-NUS-6105 challenge, and the high-level boot (IPL1-IPL3 effects).
 //
 // Behaviour from n64brew ("PIF-NUS", "Joybus Protocol", "Boot process").

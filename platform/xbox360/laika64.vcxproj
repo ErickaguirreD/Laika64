@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-  <!-- Harissa64 V2, Xbox 360 target (Visual Studio 2010 + Xbox 360 SDK).
+  <!-- LAIKA 64, Xbox 360 target (Visual Studio 2010 + Xbox 360 SDK).
        Outputs go to platform\xbox360\<Configuration>\ (the XDK platform sets them). -->
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Xbox 360">
@@ -15,7 +15,7 @@
   <PropertyGroup Label="Globals">
     <ProjectGuid>{6C1F4E2A-8B3D-4F5E-9A61-2D7C0B9E4F12}</ProjectGuid>
     <Keyword>Xbox360Proj</Keyword>
-    <ProjectName>harissa64v2</ProjectName>
+    <ProjectName>laika64</ProjectName>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Xbox 360'" Label="Configuration">
@@ -60,9 +60,9 @@
     </Link>
     <ImageXex>
       <ConfigurationFile>title\xex.xml</ConfigurationFile>
-      <!-- Title data (name "Harissa64", 64x64 title image) for the dashboards: an XDBF/SPA
-           section named after the title ID, built from title\harissa64v2.gameconfig below. -->
-      <AdditionalSections>48413632=$(OutDir)spa.bin</AdditionalSections>
+      <!-- Title data (name "LAIKA 64", 64x64 title image) for the dashboards: an XDBF/SPA
+           section named after the title ID, built from title\laika64.gameconfig below. -->
+      <AdditionalSections>4C4B3634=$(OutDir)spa.bin</AdditionalSections>
     </ImageXex>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Xbox 360'">
@@ -170,7 +170,7 @@
     <None Include="title\art\icon.png" />
   </ItemGroup>
   <ItemGroup>
-    <CustomBuild Include="title\harissa64v2.gameconfig">
+    <CustomBuild Include="title\laika64.gameconfig">
       <Message>Build SPA file from %(FullPath)</Message>
       <Command>"$(XEDK)\bin\win32\spac.exe" -nologo -noh -forceoverwrite -o "$(OutDir)spa.bin" "%(FullPath)"</Command>
       <AdditionalInputs>title\art\icon.png</AdditionalInputs>

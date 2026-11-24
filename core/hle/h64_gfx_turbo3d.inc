@@ -1,4 +1,4 @@
-// Harissa64 V2 - Turbo3D (Dark Rift): included by h64_gfx.cpp.
+// LAIKA 64 - Turbo3D (Dark Rift): included by h64_gfx.cpp.
 //
 // Studied in GLideN64 (uCodes/Turbo3D.cpp, GPL v2) and rewritten. The display
 // list is a list of 16-byte entries: a global state, an object state, its

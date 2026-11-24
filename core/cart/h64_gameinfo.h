@@ -1,4 +1,4 @@
-// Harissa64 V2 - game information for the ROM browser: matching a ROM with
+// LAIKA 64 - game information for the ROM browser: matching a ROM with
 // public game databases, and the small text files that cache the result.
 //
 // Sources (downloaded at run time, or by tools/fetch_game_art.py; never

@@ -1,4 +1,4 @@
-// Harissa64 V2 - Xenos renderer (see h64_xenos.h).
+// LAIKA 64 - Xenos renderer (see h64_xenos.h).
 //
 // Combiner inputs, blender modes and texture addressing follow the RDP
 // description in the n64brew wiki and ParaLLEl-RDP (as ported in core/rdp);

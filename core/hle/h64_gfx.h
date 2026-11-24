@@ -1,4 +1,4 @@
-// Harissa64 V2 - graphics task HLE: runs the display list of a graphics
+// LAIKA 64 - graphics task HLE: runs the display list of a graphics
 // OSTask in C++ (the job of the F3D/F3DEX/F3DEX2 microcodes on the RSP) and
 // sends the result to the renderer (render/api.h): RDP commands, and
 // triangles as screen-space vertices.

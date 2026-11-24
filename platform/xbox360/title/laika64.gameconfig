@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="utf-8" standalone="no"?>
-<!-- Harissa64 V2 title data, compiled by the XDK's spac into spa.bin and embedded in the XEX
-     as the section named after the title ID (48413632, see harissa64v2.vcxproj AdditionalSections).
+<!-- LAIKA 64 title data, compiled by the XDK's spac into spa.bin and embedded in the XEX
+     as the section named after the title ID (4C4B3634, see laika64.vcxproj AdditionalSections).
      Dashboards (Aurora, the stock dashboard) read the title name (X_STRINGID_TITLENAME) and the
-     title image (X_IMAGEID_GAME, 64x64 PNG, made by tools/gen_title_art.py) from it. -->
+     title image (X_IMAGEID_GAME, 64x64 PNG, title/art/icon.png) from it. -->
 <XboxLiveSubmissionProject Version="2.0.60117.01" xmlns="http://www.xboxlive.com/xlast">
-  <GameConfigProject name="LAIKA 64" titleName="LAIKA 64" projectVersion="2.00.0000.0" schemaVersion="1.08.0000.0" classification="BaseGame" titleId="0x48413632" multiplayer="false" titleType="1" arn="0x0">
+  <GameConfigProject name="LAIKA 64" titleName="LAIKA 64" projectVersion="2.00.0000.0" schemaVersion="1.08.0000.0" classification="BaseGame" titleId="0x4C4B3634" multiplayer="false" titleType="1" arn="0x0">
     <ProductInformation>
       <Platform name="Xbox 360" id="2" />
     </ProductInformation>

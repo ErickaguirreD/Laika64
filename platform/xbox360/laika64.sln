@@ -1,7 +1,7 @@
 
 Microsoft Visual Studio Solution File, Format Version 11.00
 # Visual Studio 2010
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "harissa64v2", "harissa64v2.vcxproj", "{6C1F4E2A-8B3D-4F5E-9A61-2D7C0B9E4F12}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "laika64", "laika64.vcxproj", "{6C1F4E2A-8B3D-4F5E-9A61-2D7C0B9E4F12}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution

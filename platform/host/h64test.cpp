@@ -1,4 +1,4 @@
-// h64test - Harissa64 V2 headless runner.
+// h64test - LAIKA 64 headless runner.
 //
 //   h64test --unit                       run the unit tests
 //   h64test --rom FILE [options]         run a ROM
@@ -935,7 +935,7 @@ int main(int argc, char **argv)
     if (argc < 2) { usage(); return 2; }
     if (!strcmp(argv[1], "--version") || !strcmp(argv[1], "--unit"))
     {
-        printf("Harissa64 V2 %s, %s-endian host, %d-bit pointers\n", H64_VERSION_STRING,
+        printf("LAIKA 64 %s, %s-endian host, %d-bit pointers\n", H64_VERSION_STRING,
                H64_HOST_BIG_ENDIAN ? "big" : "little", (int)(sizeof(void *) * 8));
         if (!strcmp(argv[1], "--unit"))
         {

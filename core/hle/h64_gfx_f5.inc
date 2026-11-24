@@ -1,4 +1,4 @@
-// Harissa64 V2 - graphics HLE: Factor 5's microcodes (included by h64_gfx.cpp).
+// LAIKA 64 - graphics HLE: Factor 5's microcodes (included by h64_gfx.cpp).
 //
 // Star Wars: Rogue Squadron (F3DSWRS). Studied in GLideN64's uCodes/F5Rogue.cpp
 // (GPL v2: Lemmy's LemNemu port, microcode decoding by olivieryuyu) and

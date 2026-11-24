@@ -1,4 +1,4 @@
-// Harissa64 - HTTPS downloads from the console (see xb_net.h).
+// LAIKA 64 - HTTPS downloads from the console (see xb_net.h).
 #include <xtl.h>
 #include <winsockx.h>
 #include <stdarg.h>
@@ -159,6 +159,50 @@ static int resolve(const char *host, IN_ADDR *addr)
     return ok;
 }
 
+// netblackhole=1: TEST-NET-1 (RFC 5737), routed nowhere - connections wait, then give up.
+static volatile LONG s_blackhole;
+void NetSetBlackhole(int on) { InterlockedExchange(&s_blackhole, on ? 1 : 0); }
+
+// connect() within NET_CONNECT_MS. A blocking one waited for the system's own time (~21 s) when
+// the network let nothing through: the threads that download (videos, box art) were still in it
+// when the ROM list was left and asked them to stop (a user's console, 3.4, then a crash).
+// The socket is blocking again after it. 1 when connected.
+#define NET_CONNECT_MS 4000
+static int connect_timed(SOCKET s, IN_ADDR ip, const char *host)
+{
+    SOCKADDR_IN sa;
+    u_long nb = 1;
+    int ok, err = 0;
+    fd_set wr, ex;
+    timeval tv;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(443);
+    sa.sin_addr = ip;
+    if (s_blackhole) sa.sin_addr.s_addr = inet_addr("192.0.2.1");
+    ioctlsocket(s, FIONBIO, &nb);
+    ok = connect(s, (const sockaddr *)&sa, sizeof(sa)) == 0;
+    if (!ok && WSAGetLastError() == WSAEWOULDBLOCK)
+    {
+        FD_ZERO(&wr);
+        FD_SET(s, &wr);
+        FD_ZERO(&ex);
+        FD_SET(s, &ex);
+        tv.tv_sec = NET_CONNECT_MS / 1000;
+        tv.tv_usec = (NET_CONNECT_MS % 1000) * 1000;
+        // Winsock: a connection made shows as writable, one refused in the exceptions (no SO_ERROR on the console).
+        const int got = select(0, NULL, &wr, &ex, &tv);
+        if (got > 0 && FD_ISSET(s, &wr) && !FD_ISSET(s, &ex)) ok = 1;
+        else err = got > 0 ? WSAECONNREFUSED : WSAETIMEDOUT;
+    }
+    else if (!ok)
+        err = WSAGetLastError();
+    nb = 0;
+    ioctlsocket(s, FIONBIO, &nb);
+    if (!ok) H64_INFO("[net] cannot connect to %s (%d)%s", host, err, s_blackhole ? " (netblackhole)" : "");
+    return ok;
+}
+
 int NetResolve(const char *host, unsigned long *ipv4)
 {
     IN_ADDR a;
@@ -305,7 +349,6 @@ static int connect_tls(const char *host, SOCKET *ps, NetTls **pt)
 {
     NetTls *t;
     IN_ADDR ip;
-    SOCKADDR_IN sa;
     SOCKET s;
     BOOL one = TRUE;
     DWORD timeout = NET_TIMEOUT_MS;
@@ -332,13 +375,8 @@ static int connect_tls(const char *host, SOCKET *ps, NetTls **pt)
             H64_INFO("[net] receive window %d KB", got >> 10);
         }
     }
-    memset(&sa, 0, sizeof(sa));
-    sa.sin_family = AF_INET;
-    sa.sin_port = htons(443);
-    sa.sin_addr = ip;
-    if (connect(s, (const sockaddr *)&sa, sizeof(sa)) != 0)
+    if (!connect_timed(s, ip, host))
     {
-        H64_INFO("[net] cannot connect to %s (%d)", host, WSAGetLastError());
         closesocket(s);
         return 0;
     }
@@ -402,8 +440,8 @@ static int request(const char *host, const char *path, u8 **body, u32 *bodyLen, 
     req = (char *)malloc(NET_URL_MAX + 512);
     if (!head || !req) { free(head); free(req); return 0; }
     _snprintf(req, NET_URL_MAX + 511,
-              "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: Harissa64/" H64_VERSION_STRING
-              " (Xbox 360; https://github.com/kernel64/Harissa64)\r\nAccept: */*\r\nConnection: keep-alive\r\n\r\n",
+              "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: LAIKA64/" H64_VERSION_STRING
+              " (Xbox 360; https://github.com/ErickaguirreD/Laika64)\r\nAccept: */*\r\nConnection: keep-alive\r\n\r\n",
               path, host);
     req[NET_URL_MAX + 511] = 0;
 
@@ -870,7 +908,8 @@ NetWs *NetWsOpen(const char *host, const char *path)
     sa.sin_family = AF_INET;
     sa.sin_port = htons(443);
     sa.sin_addr = ip;
-    if (connect(w->s, (const sockaddr *)&sa, sizeof(sa)) != 0 && (WSAGetLastError() != WSAEWOULDBLOCK || !ws_wait(w->s, 1, NET_TIMEOUT_MS)))
+    if (s_blackhole) sa.sin_addr.s_addr = inet_addr("192.0.2.1");
+    if (connect(w->s, (const sockaddr *)&sa, sizeof(sa)) != 0 && (WSAGetLastError() != WSAEWOULDBLOCK || !ws_wait(w->s, 1, NET_CONNECT_MS)))
     {
         H64_INFO("[net] cannot connect to %s (%d)", host, WSAGetLastError());
         goto fail;

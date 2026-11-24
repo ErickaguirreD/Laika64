@@ -1,4 +1,4 @@
-// Harissa64 V2 - helpers shared by the interpreter's source files.
+// LAIKA 64 - helpers shared by the interpreter's source files.
 #ifndef H64_CPU_INTERNAL_H
 #define H64_CPU_INTERNAL_H
 

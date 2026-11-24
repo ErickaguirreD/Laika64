@@ -1,4 +1,4 @@
-// Harissa64 V2 - hi-res texture packs (.hts). See h64_hts.h.
+// LAIKA 64 - hi-res texture packs (.hts). See h64_hts.h.
 #include "h64_hts.h"
 
 #include <xtl.h>

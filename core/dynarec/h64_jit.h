@@ -1,4 +1,4 @@
-// Harissa64 V2 - MIPS -> PowerPC dynamic recompiler.
+// LAIKA 64 - MIPS -> PowerPC dynamic recompiler.
 //
 // Blocks of up to H64_JIT_MAX_INSNS MIPS instructions, inside one 4 KB page,
 // ending after a branch and its delay slot. Instructions are emitted as

@@ -1,4 +1,4 @@
-// Harissa64 - per-game settings built into the emulator.
+// LAIKA 64 - per-game settings built into the emulator.
 //
 // A fix that changes how the emulator behaves (not a plain bug fix) is turned
 // on only for the games it was made and checked for, so that it cannot change

@@ -30,6 +30,13 @@
 //                                             seconds tag,tag... art; art: the box art's key), the players online ("U" name country avatar
 //                                             status room ms conn) and the general chat after `since`
 //                                             ("C" id tag avatar text ago)
+//                                             With v=<version> (the last "V" line read): "S <version>" alone when
+//                                             nothing changed since (no database read); otherwise the lists and
+//                                             "V <version>"
+//   /v1/lobbyws?g=&t=                         WebSocket kept open while a console is in Play online: the server sends
+//                                             it the lobby (as /v1/lobby, the chat its last messages) as it changes,
+//                                             in parts "L\t<version>\t<part>\t<parts>\n<lines>"; "p" now and then
+//                                             (answered "q")
 //   /v1/invite?g=&t=&to=&code=                invites a player to the room `code` (waiting): told at once through
 //                                             its inbox ("OK live"), or when it next opens one ("OK later")
 //   /v1/inbox?g=&t=                           WebSocket kept open by each console: the server sends through it
@@ -42,6 +49,8 @@
 //   /v1/rank?g=&t=&offset=                    position name country avatar minutes online
 //   /v1/week?g=&t=&list=&offset=              this week's ranking by time online: days left, my place, my seconds; the
 //                                             top 10 (list=1: a page from offset) - place name country avatar seconds online
+//   /v1/top?g=&t=&period=w|m|a                the most played games online (this week, four weeks, all time):
+//                                             "T place code game minutes players lastweek", then "M code minutes" mine
 //   /v1/news?lang=                            date title text
 //   /v1/rooms?g=&t=                           rooms waiting: code host avatar players game name locked
 //   /v1/chat?g=&t=&since=                     the general chat after message `since`: id tag avatar text ago (seconds)
@@ -84,6 +93,12 @@ const INVITE_GAP_MS = 10000;     // one player's invitations to another at least
 const INVITE_KEEP_MS = 600000;   // an invitation to a player without its inbox open waits this long
 const INBOX_QUIET_MS = 90000;    // an inbox connection silent this long (no "p") is gone
 const INBOX_SOCKETS = 3;         // connections kept per player (its newest)
+const TOP_GAMES = 10;            // games in the most played (/v1/top)
+const TOP_CACHE_S = 3600;        // ... read once in this long
+const LOBBY_GATHER_MS = 1000;    // the lobby's changes gathered this long, then sent as one
+const LOBBY_FRESH_MS = 30000;    // while consoles listen, the lobby looked at again this often (sent when it changed)
+const LOBBY_QUIET_MS = 90000;    // a lobby connection silent this long (no "p") is gone
+const LOBBY_PART = 3500;         // bytes of one message of the lobby at most (the console's frames: 4 KB)
 
 const now = () => Math.floor(Date.now() / 1000);
 // The weekly ranking (hours played online): weeks from Monday 00:00 UTC (1970-01-05 was one); a game counts from
@@ -182,9 +197,13 @@ async function profiles(cmd, q, request, env) {
       // The time played as the server sees it (playbank): the time since the last ping, when a game was open then or
       // is now (at most PLAY_STEP_S a ping; the bank at most PLAY_BANK_S). /v1/played takes its minutes from it.
       const status = clean(q.get("status"), 40);
+      // The lobby's players change when this one comes online, plays something else or goes in or out of a room.
+      const was = await db.prepare("SELECT seen, status, room FROM users WHERE id = ?").bind(me).first();
+      const moved = !was || t - was.seen >= ONLINE_S || was.status !== status || was.room !== (q.get("room") === "1" ? 1 : 0);
       await db.prepare("UPDATE users SET playbank = MIN(?, playbank + CASE WHEN status <> '' OR ? <> '' THEN MAX(0, MIN(? - seen, ?)) ELSE 0 END), " +
         "seen = ?, status = ?, ms = ?, conn = ?, room = ?, country = CASE WHEN ? <> '--' THEN ? ELSE country END WHERE id = ?")
         .bind(PLAY_BANK_S, status, t, PLAY_STEP_S, t, status, ms, conn, q.get("room") === "1" ? 1 : 0, cc, cc, me).run();
+      if (moved) await lobbyBump(env);
       const since = Math.max(0, parseInt(q.get("since") ?? "0", 10) || 0);
       const [friends, asked, msgs] = await db.batch([
         db.prepare("SELECT u.name, u.seen, u.avatar FROM friends f JOIN users u ON u.id = f.friend WHERE f.user = ?").bind(me),
@@ -280,20 +299,11 @@ async function profiles(cmd, q, request, env) {
     }
     case "lobby": {
       const since = Math.max(0, parseInt(q.get("since") ?? "0", 10) || 0);
-      // The host's time to the server with each room waiting (a console adds its own: its time to the host).
-      const [rooms, chat, online] = await db.batch([
-        db.prepare("SELECT r.code, r.host, r.avatar, r.players, r.game, r.name, r.locked, r.size, r.started, r.tags, r.art, r.crc, " +
-          "(SELECT u.ms FROM users u WHERE u.lower = lower(r.host)) AS ms FROM rooms r WHERE r.updated > ? ORDER BY r.started, r.updated DESC LIMIT 60")
-          .bind(t - ROOM_LIST_S),
-        db.prepare("SELECT id, tag, avatar, text, at FROM chat WHERE id > ? ORDER BY id DESC LIMIT 30").bind(since),
-        db.prepare("SELECT name, country, avatar, status, room, ms, conn FROM users WHERE seen > ? ORDER BY (status <> '') DESC, room DESC, lower LIMIT ?")
-          .bind(t - ONLINE_S, LOBBY_USERS),
-      ]);
-      return ["OK",
-        ...rooms.results.filter((r) => !r.started).map((r) => ["R", r.code, r.host, r.avatar, r.players, r.game, r.name, r.locked, r.size, r.ms ?? 0, r.art, r.crc ?? ""].join("\t")),
-        ...rooms.results.filter((r) => r.started).map((r) => ["G", r.code, r.game, Math.max(0, t - r.started), r.tags, r.art].join("\t")),
-        ...online.results.map((u) => ["U", u.name, u.country, u.avatar, u.status, u.room, u.ms, u.conn].join("\t")),
-        ...chat.results.reverse().map((m) => ["C", m.id, m.tag, m.avatar, m.text, Math.max(0, t - m.at)].join("\t"))];
+      if (!q.has("v")) return ["OK", ...(await lobbyRows(db, t, since))];   // (a LAIKA before the pushed lobby)
+      // The version asked: nothing read when the lobby has not changed since (the pushed lobby's fallback).
+      const v = await lobbyVersion(env);
+      if (v >= 0 && String(v) === q.get("v")) return ["OK", "S\t" + v];
+      return ["OK", ...(await lobbyRows(db, t, since)), "V\t" + Math.max(0, v)];
     }
     case "invite": {
       // The room must be waiting; the invitation names its game (as the room's list has it), not the sender's words.
@@ -324,11 +334,51 @@ async function profiles(cmd, q, request, env) {
         .bind(bank - minutes * 60, pending, t, me).run();
       if (minutes && code)
         await db.batch([
-          db.prepare("INSERT INTO played (user, code, game, minutes) VALUES (?, ?, ?, ?) ON CONFLICT (user, code) DO UPDATE SET minutes = minutes + excluded.minutes")
-            .bind(me, code, game, minutes),
+          db.prepare("INSERT INTO played (user, code, game, minutes) VALUES (?, ?, ?, ?) ON CONFLICT (user, code) DO UPDATE SET minutes = minutes + excluded.minutes, " +
+            "game = excluded.game").bind(me, code, game, minutes),
           db.prepare("UPDATE users SET minutes = minutes + ? WHERE id = ?").bind(minutes, me),
+          // the week's (the most played games of the week and month, /v1/top)
+          db.prepare("INSERT INTO game_week (week, code, user, game, minutes) VALUES (?, ?, ?, ?, ?) ON CONFLICT (week, code, user) DO UPDATE SET " +
+            "minutes = minutes + excluded.minutes, game = excluded.game").bind(weekOf(t), code, me, game, minutes),
         ]);
       return ["OK"];
+    }
+    case "top": {
+      // The most played games online: this week (w), the last four weeks (m) or all time (a); TOP_GAMES of them, each
+      // "T place code game minutes players lastweek" (lastweek: its place a week before, 0 none; this week's only),
+      // then "M code minutes" for this player's own time with them. The ranking is read once an hour (top_cache).
+      const period = ["w", "m", "a"].includes(q.get("period")) ? q.get("period") : "w";
+      let body = null;
+      const cached = await db.prepare("SELECT at, body FROM top_cache WHERE period = ?").bind(period).first();
+      if (cached && t - cached.at < TOP_CACHE_S) body = cached.body;
+      else {
+        // The name of each game: the newest kind of name wins - a LAIKA from 3.5 on sends a hack's file name with its
+        // version ("Smash Remix 2.0.1"), older ones its header's ("SMASH REMIX"); MAX keeps the mixed case one.
+        const wk = weekOf(t);
+        const sql = (where) => "SELECT code, MAX(game) AS game, SUM(minutes) AS m, COUNT(DISTINCT user) AS n FROM " + where +
+          " GROUP BY code ORDER BY m DESC LIMIT " + TOP_GAMES;
+        const top = period === "a" ? await db.prepare(sql("played")).all()
+          : await db.prepare(sql("game_week WHERE week >= ?")).bind(period === "w" ? wk : wk - 3).all();
+        let last = new Map();
+        if (period === "w") {
+          const prev = await db.prepare(sql("game_week WHERE week = ?")).bind(wk - 1).all();
+          prev.results.forEach((r, i) => last.set(r.code, i + 1));
+        }
+        body = top.results.map((r, i) => ["T", i + 1, r.code, r.game, r.m, r.n, last.get(r.code) ?? 0].join("\t")).join("\n");
+        await db.prepare("INSERT INTO top_cache (period, at, body) VALUES (?, ?, ?) ON CONFLICT (period) DO UPDATE SET at = excluded.at, body = excluded.body")
+          .bind(period, t, body).run();
+      }
+      const lines = body ? body.split("\n") : [];
+      const codes = lines.map((l) => l.split("\t")[2]);
+      let mine = [];
+      if (codes.length) {
+        const marks = codes.map(() => "?").join(",");
+        mine = period === "a"
+          ? (await db.prepare("SELECT code, minutes AS m FROM played WHERE user = ? AND code IN (" + marks + ")").bind(me, ...codes).all()).results
+          : (await db.prepare("SELECT code, SUM(minutes) AS m FROM game_week WHERE user = ? AND week >= ? AND code IN (" + marks + ") GROUP BY code")
+            .bind(me, period === "w" ? weekOf(t) : weekOf(t) - 3, ...codes).all()).results;
+      }
+      return ["OK", ...lines, ...mine.map((r) => ["M", r.code, r.m].join("\t"))];
     }
     case "stats": {
       const who = await db.prepare("SELECT id, minutes, avatar, country, seen, status, ms, conn, room FROM users WHERE lower = ?")
@@ -368,6 +418,7 @@ async function profiles(cmd, q, request, env) {
         db.prepare("INSERT INTO said (user, at) VALUES (?, ?) ON CONFLICT (user) DO UPDATE SET at = excluded.at").bind(me, t),
         db.prepare("DELETE FROM chat WHERE id <= (SELECT MAX(id) FROM chat) - ?").bind(CHAT_KEEP),
       ]);
+      await lobbyBump(env);   // the general chat: the lobby's consoles see it at once
       return ["OK"];
     }
     case "week": {
@@ -429,6 +480,7 @@ export default {
     if (!m) return new Response("LAIKA 64 online\n", { headers: { "content-type": "text/plain" } });
     if (m[1] === "room") return room(request, url, env);
     if (m[1] === "inbox") return inbox(request, url, env);
+    if (m[1] === "lobbyws") return lobbySocket(request, url, env);
     try {
       return reply(await profiles(m[1], url.searchParams, request, env));
     } catch (e) {
@@ -580,6 +632,172 @@ export class Inbox {
   webSocketError() {}
 }
 
+// ---- The lobby pushed: one Durable Object holding the WebSockets of the consoles in Play online (hibernated while
+// quiet). What changes the lobby (a room made, filled, started or closed; the general chat; a player coming online
+// or changing what it plays) tells it (/bump); a moment later (LOBBY_GATHER_MS, so a burst is one) it reads the lobby
+// from D1 once and sends it to every console, in parts (each under LOBBY_PART bytes: the console's frames are 4 KB):
+//     L\t<version>\t<part>\t<parts>\n<lines of /v1/lobby, the chat its last messages>
+// While consoles listen it looks again every LOBBY_FRESH_MS (times to the server, players gone without a word) and
+// sends only what changed. Its version (/version) answers /v1/lobby?v= without D1: "S" when nothing changed.
+async function lobbyRows(db, t, since) {
+  // The host's time to the server with each room waiting (a console adds its own: its time to the host).
+  const [rooms, chat, online] = await db.batch([
+    db.prepare("SELECT r.code, r.host, r.avatar, r.players, r.game, r.name, r.locked, r.size, r.started, r.tags, r.art, r.crc, " +
+      "(SELECT u.ms FROM users u WHERE u.lower = lower(r.host)) AS ms FROM rooms r WHERE r.updated > ? ORDER BY r.started, r.updated DESC LIMIT 60")
+      .bind(t - ROOM_LIST_S),
+    db.prepare("SELECT id, tag, avatar, text, at FROM chat WHERE id > ? ORDER BY id DESC LIMIT 30").bind(since),
+    db.prepare("SELECT name, country, avatar, status, room, ms, conn FROM users WHERE seen > ? ORDER BY (status <> '') DESC, room DESC, lower LIMIT ?")
+      .bind(t - ONLINE_S, LOBBY_USERS),
+  ]);
+  return [
+    ...rooms.results.filter((r) => !r.started).map((r) => ["R", r.code, r.host, r.avatar, r.players, r.game, r.name, r.locked, r.size, r.ms ?? 0, r.art, r.crc ?? ""].join("\t")),
+    ...rooms.results.filter((r) => r.started).map((r) => ["G", r.code, r.game, Math.max(0, t - r.started), r.tags, r.art].join("\t")),
+    ...online.results.map((u) => ["U", u.name, u.country, u.avatar, u.status, u.room, u.ms, u.conn].join("\t")),
+    ...chat.results.reverse().map((m) => ["C", m.id, m.tag, m.avatar, m.text, Math.max(0, t - m.at)].join("\t"))];
+}
+
+// The lobby's object, told something changed (from a request, or a room's object). Never waited on for long: a
+// failure only means the consoles see it at the next look.
+function lobbyBump(env) {
+  try {
+    return env.LOBBY.get(env.LOBBY.idFromName("lobby")).fetch("https://lobby/bump").catch(() => {});
+  } catch (e) {
+    return Promise.resolve();
+  }
+}
+
+async function lobbyVersion(env) {
+  try {
+    return parseInt(await (await env.LOBBY.get(env.LOBBY.idFromName("lobby")).fetch("https://lobby/version")).text(), 10) || 0;
+  } catch (e) {
+    return -1;
+  }
+}
+
+async function lobbySocket(request, url, env) {
+  if (request.headers.get("upgrade") !== "websocket") return new Response("WebSocket only\n", { status: 426 });
+  const me = await user(env.DB, url.searchParams);
+  if (me === null) return refuse("auth");
+  return env.LOBBY.get(env.LOBBY.idFromName("lobby")).fetch("https://lobby/open", request);
+}
+
+export class Lobby {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+    this.sent = "";   // the lines last sent (forgotten when it sleeps: sent again then, no harm)
+    state.setWebSocketAutoResponse(new WebSocketRequestResponsePair("p", "q"));   // answered without waking it
+  }
+
+  async version() {
+    if (this.v === undefined) this.v = (await this.state.storage.get("v")) ?? 0;
+    return this.v;
+  }
+
+  // The connections still alive: those that said "p" (or opened) within LOBBY_QUIET_MS; the others closed.
+  alive() {
+    const t = Date.now();
+    return this.state.getWebSockets().filter((ws) => {
+      const at = Math.max(this.state.getWebSocketAutoResponseTimestamp(ws)?.getTime() ?? 0, ws.deserializeAttachment()?.at ?? 0);
+      if (t - at < LOBBY_QUIET_MS) return true;
+      try {
+        ws.close(1000, "gone");
+      } catch (e) {}
+      return false;
+    });
+  }
+
+  // The lobby in parts, each its own message.
+  parts(v, lines) {
+    const chunks = [], enc = new TextEncoder();   // (bytes, as the console counts them: a name's accents take two)
+    let cur = [], size = 0;
+    for (const l of lines) {
+      const bytes = enc.encode(l).length + 1;
+      if (cur.length && size + bytes > LOBBY_PART) {
+        chunks.push(cur);
+        cur = [];
+        size = 0;
+      }
+      cur.push(l);
+      size += bytes;
+    }
+    chunks.push(cur);
+    return chunks.map((c, i) => ["L", v, i, chunks.length].join("\t") + "\n" + c.join("\n"));
+  }
+
+  async send(sockets, force) {
+    const lines = await lobbyRows(this.env.DB, now(), 0);
+    const text = lines.join("\n");
+    if (!force && text === this.sent) return;   // (the periodic look: nothing new)
+    if (text !== this.sent) {
+      this.v = (await this.version()) + 1;
+      await this.state.storage.put("v", this.v);
+      this.sent = text;
+    }
+    const msgs = this.parts(await this.version(), lines);
+    for (const ws of sockets)
+      for (const m of msgs) {
+        try {
+          ws.send(m);
+        } catch (e) {}
+      }
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+    if (url.pathname === "/open") {
+      const pair = new WebSocketPair();
+      this.state.acceptWebSocket(pair[1]);
+      pair[1].serializeAttachment({ at: Date.now() });
+      // The lobby as it is, to this one at once (from the last read when fresh, else read now).
+      try {
+        if (this.sent && Date.now() - (this.sentAt ?? 0) < LOBBY_FRESH_MS) {
+          for (const m of this.parts(await this.version(), this.sent.split("\n"))) pair[1].send(m);
+        } else {
+          await this.send([pair[1]], true);
+          this.sentAt = Date.now();
+        }
+      } catch (e) {
+        console.log("lobby open: " + e);
+      }
+      if (!(await this.state.storage.getAlarm())) await this.state.storage.setAlarm(Date.now() + LOBBY_FRESH_MS);
+      return new Response(null, { status: 101, webSocket: pair[0] });
+    }
+    if (url.pathname === "/bump") {
+      // Something changed: the version moves now (the consoles that poll see it), the lists go out a moment later.
+      this.v = (await this.version()) + 1;
+      await this.state.storage.put("v", this.v);
+      const at = await this.state.storage.getAlarm();
+      if (!at || at > Date.now() + LOBBY_GATHER_MS) await this.state.storage.setAlarm(Date.now() + LOBBY_GATHER_MS);
+      return new Response("ok");
+    }
+    if (url.pathname === "/version") return new Response(String(await this.version()));
+    return new Response("?", { status: 404 });
+  }
+
+  async alarm() {
+    const open = this.alive();
+    if (!open.length) return;   // nobody listens: nothing read (the next console reads it as it opens)
+    try {
+      await this.send(open, false);
+      this.sentAt = Date.now();
+    } catch (e) {
+      console.log("lobby send: " + e);
+    }
+    await this.state.storage.setAlarm(Date.now() + LOBBY_FRESH_MS);
+  }
+
+  webSocketMessage() {}   // only "p", answered by itself
+
+  webSocketClose(ws, code, reason) {
+    try {
+      ws.close(code, reason);
+    } catch (e) {}
+  }
+
+  webSocketError() {}
+}
+
 // A WebSocket that says why and closes.
 function refuse(why) {
   const pair = new WebSocketPair();
@@ -691,8 +909,9 @@ export class Room {
     });
   }
 
-  // The rooms' list in D1: this room as it is now (waiting, or its game and who plays it), or not at all.
-  async list() {
+  // The rooms' list in D1: this room as it is now (waiting, or its game and who plays it), or not at all. `beat`:
+  // only its row freshened (nothing changed: the lobby is not told).
+  async list(beat) {
     const db = this.env.DB;
     try {
       if (this.open && this.players.length)
@@ -704,6 +923,7 @@ export class Room {
             this.size, this.started ? this.startedAt : 0, this.started ? this.playing().map((p) => p.tag).join(",") : "", this.game.art,
             (this.game.crc1 + " " + this.game.crc2).trim()).run();
       else if (this.code) await db.prepare("DELETE FROM rooms WHERE code = ?").bind(this.code).run();
+      if (!beat) await lobbyBump(this.env);
     } catch (e) {
       console.log("room list: " + e);
     }
@@ -883,7 +1103,7 @@ export class Room {
       await this.list();
       return;
     }
-    await this.list();
+    await this.list(true);   // (the beat: its row freshened)
     await this.state.storage.setAlarm(t + ROOM_BEAT_MS);
   }
   end(why) {

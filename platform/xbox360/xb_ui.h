@@ -1,4 +1,4 @@
-// Harissa64 V2 - screen drawing for the front end (Xbox 360): text, panels,
+// LAIKA 64 - screen drawing for the front end (Xbox 360): text, panels,
 // button prompts, the logo, toasts.
 //
 // Everything is drawn as alpha-blended quads in one small batch per UiBegin /
@@ -134,6 +134,8 @@ void UiImageRelease(IDirect3DDevice9 *dev, IDirect3DTexture9 *tex);
 // A JPEG, PNG or BMP file's bytes decoded to RGBA, at most maxW x maxH keeping its shape: a malloc'd
 // buffer (*w x *h), NULL when it cannot be read. Any thread (no device).
 unsigned char *UiDecodeImage(const unsigned char *enc, long size, int maxW, int maxH, int *w, int *h);
+// Its size as it is (nothing decoded); 0 when it is not a JPEG, PNG or BMP.
+int UiImageSize(const unsigned char *enc, long size, int *w, int *h);
 // Draws the whole picture stretched over (x, y, w, h), corners rounded by `r`,
 // tinted by `color` (white: as it is; its alpha fades the picture).
 void UiImage(IDirect3DTexture9 *tex, float x, float y, float w, float h, float r, D3DCOLOR color);
@@ -245,6 +247,7 @@ float UiFooterWidth(const char *hints);
 void UiScreenFooter(const char *hints);
 void UiScreenFooterSmall(const char *hints);   // the same, three quarters the size
 void UiScreenFooterGlow(const char *hints, const char *glow);   // the same, button `glow` ("START") pulsing with a soft light
+void UiScreenFooterGlowSmall(const char *hints, const char *glow);   // that, three quarters the size (the ROM list)
 
 // ---- Notifications ----
 // A toast at the bottom centre; `age` and `life` in ms (it slides in and fades out).

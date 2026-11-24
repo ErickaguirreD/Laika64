@@ -1,4 +1,4 @@
-// Harissa64 V2 - VI output stage.
+// LAIKA 64 - VI output stage.
 //
 // Serial CPU port of ParaLLEl-RDP's VI (MIT licence, Themaister/parallel-rdp
 // commit 1cecd042, see THIRD_PARTY.md): register decoding

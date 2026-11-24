@@ -1,4 +1,4 @@
-// Harissa64 V2 - software RDP: renderer state.
+// LAIKA 64 - software RDP: renderer state.
 //
 // The software renderer is a serial CPU port of ParaLLEl-RDP's compute
 // shaders (MIT licence, Themaister/parallel-rdp at commit 1cecd042, see

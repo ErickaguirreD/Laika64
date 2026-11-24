@@ -1,4 +1,4 @@
-// Harissa64 V2 - renderer interface used by the core.
+// LAIKA 64 - renderer interface used by the core.
 //
 // The core produces two kinds of drawing work:
 //  - raw RDP commands (1 to 22 big-endian 64-bit words, exactly as the RDP

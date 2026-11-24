@@ -1,4 +1,4 @@
-// Harissa64 - is a newer release on GitHub? (checked once, in the background)
+// LAIKA 64 - is a newer release on GitHub? (checked once, in the background)
 
 #ifndef XB_UPDATE_H
 #define XB_UPDATE_H

@@ -1,4 +1,4 @@
-// Harissa64 V2 - RCP registers (SP, DP, MI, VI, AI, PI, RI, SI) and their
+// LAIKA 64 - RCP registers (SP, DP, MI, VI, AI, PI, RI, SI) and their
 // timed side effects. Register layouts from n64brew.
 //
 // The SP registers and DMA live with the RSP (core/rsp), the DPC registers

@@ -1,4 +1,4 @@
-// Harissa64 V2 - hi-res texture packs in the GlideHQ/GlideN64 .hts format.
+// LAIKA 64 - hi-res texture packs in the GlideHQ/GlideN64 .hts format.
 //
 // A pack maps a 64-bit "Rice" checksum of an N64 texture (taken over its texels
 // in RDRAM, and for colour-indexed textures over the palette entries they use)

@@ -1,8 +1,8 @@
-# Harissa64 V2 - host builds (Windows MSVC, Linux gcc, big-endian PowerPC
+# LAIKA 64 - host builds (Windows MSVC, Linux gcc, big-endian PowerPC
 # cross build run under qemu-ppc64). The Xbox 360 build uses the Visual
 # Studio 2010 project in platform/xbox360 instead.
 cmake_minimum_required(VERSION 3.16)
-project(Harissa64V2 C CXX)
+project(Laika64 C CXX)
 
 file(READ "${CMAKE_SOURCE_DIR}/VERSION" H64_VERSION_RAW)
 string(STRIP "${H64_VERSION_RAW}" H64_VERSION)

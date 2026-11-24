@@ -1,4 +1,4 @@
-// Harissa64 V2 - save states: the whole machine in one portable buffer.
+// LAIKA 64 - save states: the whole machine in one portable buffer.
 //
 // Every field is written big-endian one by one, so a state made on the
 // console loads in Xenia and on the hosts (and the other way round) for the

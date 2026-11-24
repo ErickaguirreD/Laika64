@@ -1,4 +1,4 @@
-// Harissa64 V2 - RSP scalar unit, SP registers and SP DMA.
+// LAIKA 64 - RSP scalar unit, SP registers and SP DMA.
 // Ported from ares (ISC licence): ares/n64/rsp/interpreter.cpp,
 // interpreter-ipu.cpp, interpreter-scc.cpp, dma.cpp, io.cpp (commit a776c509);
 // pipeline timing from rsp.cpp, rsp.hpp and decoder.cpp (commit 652d6537).

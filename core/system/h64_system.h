@@ -1,4 +1,4 @@
-// Harissa64 V2 - the whole machine: CPU, memories, RCP registers, PIF,
+// LAIKA 64 - the whole machine: CPU, memories, RCP registers, PIF,
 // cartridge and the scheduler that times them.
 #ifndef H64_SYSTEM_H
 #define H64_SYSTEM_H

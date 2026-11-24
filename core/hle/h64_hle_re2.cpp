@@ -1,4 +1,4 @@
-// Harissa64 V2 - Resident Evil 2's own RSP tasks (graphics-type tasks with
+// LAIKA 64 - Resident Evil 2's own RSP tasks (graphics-type tasks with
 // no microcode name): the background resize, the movie frame decode and the
 // movie double-buffer blend. Their microcodes ran on the LLE RSP (80-150 ms
 // per frame in Xenia whenever a room or a movie starts).

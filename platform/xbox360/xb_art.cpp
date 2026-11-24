@@ -1,4 +1,4 @@
-// Harissa64 - box art and game information for the ROM browser (see xb_art.h).
+// LAIKA 64 - box art and game information for the ROM browser (see xb_art.h).
 #include <xtl.h>
 #include <ctype.h>
 #include <stdio.h>
@@ -2159,7 +2159,109 @@ void ArtDropPicture(const char *romPath, int kind)
     file_delete(file);   // the names known too: the download looks for it again, covers.pak's record is stale
     art_path(key, s_kindCov[kind], file, sizeof(file));
     file_delete(file);
+    if (kind == ART_KIND_BOX)
+    {
+        art_path(key, "own", file, sizeof(file));   // a box of one's own goes with it
+        file_delete(file);
+    }
     H64_INFO("[art] %s: picture %d dropped", key, kind);
+}
+
+// ---- A box of one's own (the detailed view's "Your own picture") ----
+// The picture as the game's box (<key>.png: a PNG of RGB, its deflate "stored" - no compression, as
+// zlib here only inflates), marked <key>.own. The downloads only fetch what is missing: it stays.
+// Its size goes into the names known (file_write), so covers.pak's copy of the old one is not used.
+static void png_put32(u8 *p, u32 v) { p[0] = (u8)(v >> 24); p[1] = (u8)(v >> 16); p[2] = (u8)(v >> 8); p[3] = (u8)v; }
+
+static u8 *png_stored_rgb(const u8 *rgba, int w, int h, u32 *outLen)
+{
+    const u32 row = (u32)w * 3 + 1, rawLen = (u32)h * row, blocks = (rawLen + 65534) / 65535;
+    const u32 zLen = 2 + rawLen + blocks * 5 + 4, total = 8 + (12 + 13) + (12 + zLen) + 12;
+    u8 *out = (u8 *)malloc(total), *z, *p;
+    u32 a = 1, b = 0, crc;
+    int x, y;
+    if (!out) return NULL;
+    memcpy(out, "\x89PNG\r\n\x1a\n", 8);
+    p = out + 8;
+    png_put32(p, 13);
+    memcpy(p + 4, "IHDR", 4);
+    png_put32(p + 8, (u32)w);
+    png_put32(p + 12, (u32)h);
+    p[16] = 8; p[17] = 2; p[18] = 0; p[19] = 0; p[20] = 0;   // 8-bit RGB
+    png_put32(p + 21, h64_crc32(0, p + 4, 17));
+    p += 25;
+    png_put32(p, zLen);
+    memcpy(p + 4, "IDAT", 4);
+    z = p + 8;
+    z[0] = 0x78; z[1] = 0x01;
+    {
+        // The rows (filter 0, RGB) straight into stored blocks of up to 65535 bytes, Adler-32 as they go.
+        u32 pos = 2, left = 0, inRaw = 0;
+        for (y = 0; y < h; y++)
+            for (x = -1; x < w * 3; x++)
+            {
+                const u8 v = x < 0 ? 0 : rgba[((size_t)y * w + x / 3) * 4 + x % 3];
+                if (!left)
+                {
+                    const u32 n = rawLen - inRaw < 65535 ? rawLen - inRaw : 65535;
+                    z[pos++] = (u8)(inRaw + n >= rawLen ? 1 : 0);
+                    z[pos++] = (u8)n; z[pos++] = (u8)(n >> 8);
+                    z[pos++] = (u8)~n; z[pos++] = (u8)(~n >> 8);
+                    left = n;
+                }
+                z[pos++] = v;
+                left--;
+                inRaw++;
+                a = (a + v) % 65521;
+                b = (b + a) % 65521;
+            }
+        z[pos++] = (u8)(b >> 8); z[pos++] = (u8)b; z[pos++] = (u8)(a >> 8); z[pos++] = (u8)a;
+    }
+    crc = h64_crc32(0, p + 4, 4 + zLen);
+    png_put32(p + 8 + zLen, crc);
+    p += 12 + zLen;
+    png_put32(p, 0);
+    memcpy(p + 4, "IEND", 4);
+    png_put32(p + 8, h64_crc32(0, p + 4, 4));
+    *outLen = total;
+    return out;
+}
+
+int ArtSetOwnBox(const char *romPath, const u8 *rgba, int w, int h)
+{
+    H64Rom rom;
+    char key[16], file[128];
+    u8 *png;
+    u32 len = 0;
+    int ok;
+    if (!s_started || !rgba || w <= 0 || h <= 0 || !RomReadHeader(romPath, &rom)) return 0;
+    art_key(&rom, key);
+    h64_rom_free(&rom);
+    png = png_stored_rgb(rgba, w, h, &len);
+    if (!png) return 0;
+    art_path(key, "png", file, sizeof(file));
+    ok = len <= ART_MAX_PNG && file_write(file, png, len);
+    free(png);
+    if (ok)
+    {
+        art_path(key, s_kindCov[ART_KIND_BOX], file, sizeof(file));
+        file_delete(file);
+        art_path(key, "own", file, sizeof(file));
+        file_write(file, "own", 3);
+    }
+    H64_INFO("[art] %s: box of one's own %dx%d %s (%u bytes)", key, w, h, ok ? "written" : "NOT written", len);
+    return ok;
+}
+
+int ArtHasOwnBox(const char *romPath)
+{
+    H64Rom rom;
+    char key[16], file[128];
+    if (!s_started || !RomReadHeader(romPath, &rom)) return 0;
+    art_key(&rom, key);
+    h64_rom_free(&rom);
+    art_path(key, "own", file, sizeof(file));
+    return file_exists(file);
 }
 
 int ArtReadCoverKey(const char *key, int kind, u8 **rgba, int *w, int *h, int *gotKind)

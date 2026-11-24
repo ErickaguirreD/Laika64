@@ -1,4 +1,4 @@
-// Harissa64 V2 - RDP (Reality Display Processor): command interface.
+// LAIKA 64 - RDP (Reality Display Processor): command interface.
 //
 // DPC registers, command fetch from RDRAM or DMEM (XBUS), assembly of
 // multi-word commands and the interrupt after SYNC_FULL. Each complete

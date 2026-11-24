@@ -1,6 +1,6 @@
-// Harissa64 - is a newer release on GitHub? (see xb_update.h)
+// LAIKA 64 - is a newer release on GitHub? (see xb_update.h)
 //
-// The request is GET /kernel64/Harissa64/releases/latest, whose answer is a
+// The request is GET /ErickaguirreD/Laika64/releases/latest, whose answer is a
 // redirect to .../releases/tag/v<version>: the version is read from the
 // Location header, the page itself is never downloaded (xb_net.cpp does the
 // HTTPS). The worst a fake server could do is show a wrong "new version"
@@ -55,7 +55,7 @@ static int fetch_latest(char *version, size_t size)
     const char *p, *e;
     int status = NetGet(UPDATE_HOST, UPDATE_PATH, 0, NULL, NULL, 0, loc, sizeof(loc));
     if (!status) return 0;
-    // "Location: https://github.com/kernel64/Harissa64/releases/tag/v2.0.1"
+    // "Location: https://github.com/ErickaguirreD/Laika64/releases/tag/v3.4"
     p = strstr(loc, "/releases/tag/");
     if (p)
     {

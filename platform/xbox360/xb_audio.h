@@ -1,4 +1,4 @@
-// Harissa64 V2 - XAudio2 output of the AI buffers (Xbox 360).
+// LAIKA 64 - XAudio2 output of the AI buffers (Xbox 360).
 //
 // Each AI buffer is copied into a ring of slots and queued unmodified: the
 // N64 writes big-endian 16-bit stereo, which is the console's native PCM.

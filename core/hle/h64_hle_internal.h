@@ -1,4 +1,4 @@
-// Harissa64 V2 - RSP task HLE, internal declarations.
+// LAIKA 64 - RSP task HLE, internal declarations.
 //
 // The audio task HLE is a port of mupen64plus-rsp-hle (GPL v2, commit
 // 8a7a472, June 2026; see THIRD_PARTY.md). This header replaces its

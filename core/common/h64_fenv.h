@@ -1,4 +1,4 @@
-// Harissa64 V2 - host floating-point environment (rounding mode, exception
+// LAIKA 64 - host floating-point environment (rounding mode, exception
 // flags, denormals) behind one interface for MSVC, the XDK and gcc.
 //
 // The reference FPU computes with the host's IEEE arithmetic in the guest's

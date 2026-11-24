@@ -1,4 +1,4 @@
-// Harissa64 V2 - graphics task HLE (see h64_gfx.h).
+// LAIKA 64 - graphics task HLE (see h64_gfx.h).
 //
 // Microcode behaviour (command encodings, matrix stack, lights, viewport,
 // texture generation, fog, branch and cull commands) follows GLideN64's

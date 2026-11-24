@@ -1,4 +1,4 @@
-// Harissa64 V2 - recompiler internals shared by h64_jit.cpp and h64_jit_gen.cpp.
+// LAIKA 64 - recompiler internals shared by h64_jit.cpp and h64_jit_gen.cpp.
 #ifndef H64_JIT_INTERNAL_H
 #define H64_JIT_INTERNAL_H
 

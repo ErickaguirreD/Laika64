@@ -1,7 +1,7 @@
 # Builds every target and runs the unit tests where they can run.
 #   1. Windows host, MSVC 2026 + CMake/Ninja       -> build-msvc\h64test.exe --unit
 #   2. WSL gcc little-endian, ppc64 big-endian/qemu -> tests/scripts/run_wsl.sh
-#   3. Xbox 360, VS2010 + XDK (MSBuild)             -> platform\xbox360\Release\harissa64v2.xex
+#   3. Xbox 360, VS2010 + XDK (MSBuild)             -> platform\xbox360\Release\laika64.xex
 #      (+ the execmem proof of concept with -ExecMem)
 # The Xbox build only compiles: its unit tests run at start-up in Xenia or on
 # the console (see the developer notes). Exit code 1 if anything fails.
@@ -42,11 +42,11 @@ if (-not $SkipXbox) {
     # The menu texts (platform/xbox360/lang): complete, fitting, and xb_lang_table.h up to date.
     python (Join-Path $root 'platform\xbox360\tools\gen_lang.py') --check
     if ($LASTEXITCODE -ne 0) { $failed += 'menu texts' }
-    $sln = Join-Path $root 'platform\xbox360\harissa64v2.sln'
+    $sln = Join-Path $root 'platform\xbox360\laika64.sln'
     $out = cmd /c "`"$vs2010`" x86 >nul && `"$msbuild`" `"$sln`" /p:Configuration=Release /p:Platform=`"Xbox 360`" /m /v:minimal" 2>&1
     $out | Select-String -Pattern 'warning|error' | ForEach-Object { $_.Line }
     if ($LASTEXITCODE -ne 0) { $failed += 'xbox' }
-    $xex = Join-Path $root 'platform\xbox360\Release\harissa64v2.xex'
+    $xex = Join-Path $root 'platform\xbox360\Release\laika64.xex'
     if (Test-Path $xex) { Write-Host ("xex: {0} ({1:N0} bytes, {2})" -f $xex, (Get-Item $xex).Length, (Get-Item $xex).LastWriteTime) }
     else { $failed += 'xbox (no xex)' }
     if ($ExecMem) {

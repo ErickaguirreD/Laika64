@@ -1,4 +1,4 @@
-// Harissa64 V2 - ROMs inside .zip archives (see h64_zip.h).
+// LAIKA 64 - ROMs inside .zip archives (see h64_zip.h).
 // Zip layout from PKWARE's APPNOTE.TXT (end of central directory, central
 // directory and local headers); inflate is zlib's (third_party/zlib).
 #include "h64_zip.h"

@@ -1,4 +1,4 @@
-// Harissa64 V2 - NEC VR4300 (R4300i) CPU state and reference interpreter.
+// LAIKA 64 - NEC VR4300 (R4300i) CPU state and reference interpreter.
 //
 // Written from the VR4300 user manual and n64brew. The interpreter is the
 // reference implementation: simple, one instruction at a time, every check

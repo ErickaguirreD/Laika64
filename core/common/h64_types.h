@@ -1,4 +1,4 @@
-// Harissa64 V2 - basic types and platform detection.
+// LAIKA 64 - basic types and platform detection.
 //
 // The core is portable C++ restricted to what the Xbox 360 SDK compiler
 // (VS2010, cl 16.00) accepts: see "Core language subset" in the developer notes.

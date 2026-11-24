@@ -1,4 +1,4 @@
-// Harissa64 V2 - recompiler code generation.
+// LAIKA 64 - recompiler code generation.
 //
 // Block layout (64-bit PowerPC):
 //   prologue: stdu/stwu r1,-FRAME(r1); mflr r0; save r0 and r14..r31 in the

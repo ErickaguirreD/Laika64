@@ -1,4 +1,4 @@
-// Harissa64 - per-game settings built into the emulator (see h64_profile.h).
+// LAIKA 64 - per-game settings built into the emulator (see h64_profile.h).
 
 #include "h64_profile.h"
 #include "h64_system.h"

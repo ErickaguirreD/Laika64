@@ -1,4 +1,4 @@
-// Harissa64 V2 - RSP task HLE (high-level emulation of RSP microcode tasks).
+// LAIKA 64 - RSP task HLE (high-level emulation of RSP microcode tasks).
 //
 // When the CPU starts the RSP on an OSTask, the HLE recognises the
 // microcode and runs the whole task at once in C++; anything it does not

@@ -1,4 +1,4 @@
-// Harissa64 V2 - lockstep check: the recompiler against the reference interpreter.
+// LAIKA 64 - lockstep check: the recompiler against the reference interpreter.
 #include "h64_lockstep.h"
 
 #include <stdio.h>

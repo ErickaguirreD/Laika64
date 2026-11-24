@@ -1,4 +1,4 @@
-// Harissa64 V2 - RDP command interface (DPC registers and command fetch).
+// LAIKA 64 - RDP command interface (DPC registers and command fetch).
 // Register behaviour from n64brew ("Reality Display Processor/Interface").
 #include "h64_rdp.h"
 #include "h64_rdp_state.h"

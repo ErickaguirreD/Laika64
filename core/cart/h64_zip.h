@@ -1,4 +1,4 @@
-// Harissa64 V2 - ROMs inside .zip archives.
+// LAIKA 64 - ROMs inside .zip archives.
 //
 // Reads the archive through a callback (the whole file need not be in
 // memory): the central directory locates the first N64 ROM (by its first

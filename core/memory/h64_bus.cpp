@@ -1,4 +1,4 @@
-// Harissa64 V2 - physical address map (n64brew "Memory map").
+// LAIKA 64 - physical address map (n64brew "Memory map").
 //
 //   0x00000000-0x03EFFFFF  RDRAM (8 MB present, the rest reads as 0)
 //   0x03F00000-0x03FFFFFF  RDRAM registers

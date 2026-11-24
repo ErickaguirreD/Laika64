@@ -48,7 +48,7 @@ def log(msg):
 
 
 def http_get(url, token=None):
-    req = urllib.request.Request(url, headers={"User-Agent": "harissa64-fetch"})
+    req = urllib.request.Request(url, headers={"User-Agent": "laika64-fetch"})
     if token:
         req.add_header("Authorization", "Bearer " + token)
     with urllib.request.urlopen(req, timeout=120) as r:

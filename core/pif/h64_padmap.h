@@ -1,4 +1,4 @@
-// Harissa64 V2 - controller remapping: a host gamepad (Xbox 360 layout) as
+// LAIKA 64 - controller remapping: a host gamepad (Xbox 360 layout) as
 // an N64 controller.
 //
 // Portable (no platform headers) so that the unit tests check it. The Xbox

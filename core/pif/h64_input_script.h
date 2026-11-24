@@ -1,5 +1,5 @@
-// Harissa64 V2 - scripted controller input, shared by h64test (--input) and
-// the Xbox front end (input= in harissa64v2.ini), so that the same scene
+// LAIKA 64 - scripted controller input, shared by h64test (--input) and
+// the Xbox front end (input= in laika64dev.ini), so that the same scene
 // can be played on the host and in Xenia.
 //
 // Syntax: comma-separated events BUTTON@first[-last] (VI frames), buttons

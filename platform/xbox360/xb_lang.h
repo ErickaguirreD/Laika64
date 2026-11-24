@@ -1,4 +1,4 @@
-// Harissa64 V2 - menu languages (Xbox 360): English, Spanish, German, French,
+// LAIKA 64 - menu languages (Xbox 360): English, Spanish, German, French,
 // Arabic, Brazilian Portuguese, Russian and Italian.
 //
 // The texts are in platform/xbox360/lang/<code>.txt; tools/gen_lang.py checks

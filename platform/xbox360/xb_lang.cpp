@@ -1,4 +1,4 @@
-// Harissa64 V2 - menu languages (see xb_lang.h).
+// LAIKA 64 - menu languages (see xb_lang.h).
 #define XB_LANG_DEFINE_TABLES
 #include "xb_lang.h"
 

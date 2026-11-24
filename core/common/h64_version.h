@@ -1,4 +1,4 @@
-// Harissa64 V2 - version string, from the VERSION file at the repository
+// LAIKA 64 - version string, from the VERSION file at the repository
 // root (passed by every build as H64_VERSION).
 #ifndef H64_VERSION_H
 #define H64_VERSION_H

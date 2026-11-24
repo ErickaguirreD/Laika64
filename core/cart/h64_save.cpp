@@ -1,4 +1,4 @@
-// Harissa64 V2 - cartridge save media and the Controller Pak.
+// LAIKA 64 - cartridge save media and the Controller Pak.
 //
 // Behaviour from n64brew ("Joybus Protocol", "EEPROM", "Controller Pak",
 // "FlashRAM") and mupen64plus-core (GPL v2: device/cart/flashram.c, the

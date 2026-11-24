@@ -1,4 +1,4 @@
-// Harissa64 V2 - Xenos renderer (Xbox 360, Direct3D 9 of the XDK).
+// LAIKA 64 - Xenos renderer (Xbox 360, Direct3D 9 of the XDK).
 //
 // Implements render/api.h with the GPU. The software RDP runs in "state
 // only" mode (sys->options.rdpStateOnly) and keeps the RDP state and TMEM;

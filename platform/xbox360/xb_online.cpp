@@ -715,6 +715,35 @@ int OnlineNewsGet(const char *lang, std::vector<OnlineNews> *out)
     return 1;
 }
 
+int OnlineTopGames(char period, std::vector<OnlineTopGame> *out)
+{
+    std::vector<std::string> rows;
+    std::string q;
+    char p[2] = { period, 0 };
+    size_t k, j;
+    out->clear();
+    add(&q, "period", p);
+    if (!request_me("top", q, &rows)) return 0;
+    for (k = 0; k < rows.size(); k++)
+        if (!rows[k].compare(0, 2, "T\t"))
+        {
+            OnlineTopGame g;
+            g.place = atoi(field(rows[k], 1).c_str());
+            g.code = field(rows[k], 2);
+            g.game = field(rows[k], 3);
+            g.minutes = atoi(field(rows[k], 4).c_str());
+            g.players = atoi(field(rows[k], 5).c_str());
+            g.last = atoi(field(rows[k], 6).c_str());
+            g.mine = 0;
+            out->push_back(g);
+        }
+    for (k = 0; k < rows.size(); k++)
+        if (!rows[k].compare(0, 2, "M\t"))
+            for (j = 0; j < out->size(); j++)
+                if ((*out)[j].code == field(rows[k], 1)) (*out)[j].mine = atoi(field(rows[k], 2).c_str());
+    return 1;
+}
+
 // ---- The thread: "still here" every two minutes, and the games played ----
 void OnlineSetStatus(const char *game)
 {
@@ -804,6 +833,11 @@ static std::vector<OnlineRoomInfo> s_lobbyRooms;
 static std::vector<OnlineGameInfo> s_lobbyGames;
 static std::vector<OnlineUser> s_lobbyUsers;
 static std::vector<OnlineChatLine> s_lobbyChat;
+// The pushed lobby (/v1/lobbyws, lobby_ws_thread): the version of the lists held (-1: none yet; /v1/lobby?v= answers
+// "S" while it is the server's) and when the socket last brought them (its lists are fresh: no polling meanwhile).
+static int s_lobbyV = -1;
+static volatile DWORD s_lobbyLiveAt;
+#define ONLINE_LOBBY_LIVE_MS 75000   // the server sends the lobby at least every 30 s while it changes; quiet longer: polled
 
 // Presses on the controllers, watched by the online thread: buttons, triggers and sticks coarsely (a stick's jitter is
 // not a press).
@@ -845,6 +879,7 @@ void OnlineLobbyWatch(int on, int since)
         s_lobbyAt = GetTickCount();   // the first read at once
         s_lobbyReady = 0;
         s_lobbyChat.clear();
+        s_lobbyV = -1;                // (a whole answer, not "S")
     }
     s_lobbyWatch = on;
     LeaveCriticalSection(&s_lock);
@@ -902,6 +937,8 @@ static void rooms_news(const std::vector<OnlineRoomInfo> &rooms)
     LeaveCriticalSection(&s_lock);
 }
 
+static int lobby_version(const std::vector<std::string> &rows, int *same);   // below
+
 // The rooms alone (the general chat not wanted), for rooms_news while no screen reads the lobby.
 static void rooms_look(void)
 {
@@ -912,44 +949,187 @@ static void rooms_look(void)
     std::vector<OnlineChatLine> chat;
     std::string q;
     char err[sizeof(s_error)];
+    static int seenV = -1;   // the version last looked at: "S" (nothing read on the server) while it is the same
+    int same, v;
     add(&q, "since", 0x7FFFFFFF);
+    add(&q, "v", seenV);
     if (!request_me("lobby", q, &rows, err)) return;
+    v = lobby_version(rows, &same);
+    if (same) return;
+    seenV = v;
     lobby_parse(rows, &rooms, &games, &users, &chat);
     rooms_news(rooms);
 }
 
-static void lobby_read(void)
+// A version line of /v1/lobby ("V <version>", or "S <version>" alone: nothing changed): the version, -1 when none.
+static int lobby_version(const std::vector<std::string> &rows, int *same)
 {
-    std::vector<std::string> rows;
+    size_t k;
+    *same = 0;
+    for (k = 0; k < rows.size(); k++)
+        if (!rows[k].compare(0, 2, "V\t") || !rows[k].compare(0, 2, "S\t"))
+        {
+            *same = rows[k][0] == 'S';
+            return atoi(rows[k].c_str() + 2);
+        }
+    return -1;
+}
+
+// The lists of an answer (read, or pushed) for the screen: rooms, games and players as they are, the chat lines after
+// the ones it has. `since`: the chat line the request was made after (-1: pushed, whatever it holds).
+static void lobby_apply(const std::vector<std::string> &rows, int since, int version)
+{
     std::vector<OnlineRoomInfo> rooms;
     std::vector<OnlineGameInfo> games;
     std::vector<OnlineUser> users;
     std::vector<OnlineChatLine> chat;
-    std::string q;
-    char err[sizeof(s_error)];
-    int since;
     size_t k;
-    EnterCriticalSection(&s_lock);
-    since = s_lobbySince;
-    LeaveCriticalSection(&s_lock);
-    add(&q, "since", since);
-    if (!request_me("lobby", q, &rows, err)) return;   // not reached: the screen keeps what it has
     lobby_parse(rows, &rooms, &games, &users, &chat);
     rooms_news(rooms);
     EnterCriticalSection(&s_lock);
-    if (s_lobbyWatch && s_lobbySince == since)   // (not a read for a screen gone, or one that started again)
+    if (s_lobbyWatch && (since < 0 || s_lobbySince == since))   // (not a read for a screen gone, or one that started again)
     {
         s_lobbyRooms.swap(rooms);
         s_lobbyGames.swap(games);
         s_lobbyUsers.swap(users);
         for (k = 0; k < chat.size(); k++)
-        {
-            s_lobbyChat.push_back(chat[k]);
-            if (chat[k].id > s_lobbySince) s_lobbySince = chat[k].id;
-        }
+            if (chat[k].id > s_lobbySince)
+            {
+                s_lobbyChat.push_back(chat[k]);
+                s_lobbySince = chat[k].id;
+            }
+        if (version >= 0) s_lobbyV = version;
         s_lobbyReady = 1;
     }
     LeaveCriticalSection(&s_lock);
+}
+
+static void lobby_read(void)
+{
+    std::vector<std::string> rows;
+    std::string q;
+    char err[sizeof(s_error)];
+    int since, v, same;
+    EnterCriticalSection(&s_lock);
+    since = s_lobbySince;
+    v = s_lobbyV;
+    LeaveCriticalSection(&s_lock);
+    add(&q, "since", since);
+    add(&q, "v", v);   // (-1 at first: never the server's, so the whole lobby)
+    if (!request_me("lobby", q, &rows, err)) return;   // not reached: the screen keeps what it has
+    v = lobby_version(rows, &same);
+    if (same)
+    {
+        // Nothing changed since the lists held (read without the database): they stay.
+        EnterCriticalSection(&s_lock);
+        if (s_lobbyWatch) s_lobbyReady = 1;
+        LeaveCriticalSection(&s_lock);
+        return;
+    }
+    lobby_apply(rows, since, v);
+}
+
+// ---- The pushed lobby: a WebSocket kept open while a screen shows the lobby (OnlineLobbyWatch). The server sends
+// the lobby as it changes, in parts ("L\t<version>\t<part>\t<parts>\n<lines>"): put together, then the screen's.
+// The 8 s reads stop while it brings them (online_thread); they come back if it goes quiet or is lost.
+#define ONLINE_LOBBY_WS_KEEP_MS 30000   // "p" this often (the server lets go of one silent for 90 s)
+#define ONLINE_LOBBY_WS_LINGER_MS 15000 // the socket kept this long after the lobby's screen closed (back soon: no new one)
+
+static DWORD WINAPI lobby_ws_thread(LPVOID)
+{
+    static char msg[4200];
+    DWORD wait = 1000;
+    for (;;)
+    {
+        std::string q, parts[16];
+        char tag[ONLINE_TAG_MAX + 1];
+        NetWs *w;
+        DWORD openAt, keepAt, unwatchedAt = 0;
+        int partsV = -1, partsN = 0, got = 0;
+        Sleep(wait);
+        if (!s_lobbyWatch || !OnlineRegistered() || !s_me.server[0] || !NetStart(0)) { wait = 1000; continue; }
+        copy(tag, sizeof(tag), s_me.tag);
+        add(&q, "g", s_me.tag);
+        add(&q, "t", s_me.token);
+        w = NetWsOpen(s_me.server, ("/v1/lobbyws?" + q).c_str());
+        // Not reached (an older server, or none): the reads go on; tried again later and later (up to two minutes).
+        if (!w) { wait = wait < 60000 ? wait * 2 : 120000; continue; }
+        H64_INFO("[online] lobby pushed (socket open)");
+        openAt = GetTickCount();
+        keepAt = openAt + ONLINE_LOBBY_WS_KEEP_MS;
+        for (;;)
+        {
+            int text = 0;
+            const int n = NetWsRecv(w, msg, sizeof(msg) - 1, 1000, &text);
+            if (n < 0) break;
+            if (n > 0 && text)
+            {
+                msg[n] = 0;
+                if (msg[0] == 'L' && msg[1] == '\t')
+                {
+                    // One part: its version, place and count; the lines after its first one.
+                    const char *nl = strchr(msg, '\n');
+                    const std::string head(msg, nl ? nl - msg : n);
+                    const int v = atoi(field(head, 1).c_str()), i = atoi(field(head, 2).c_str()), count = atoi(field(head, 3).c_str());
+                    if (count < 1 || count > 16 || i < 0 || i >= count) continue;
+                    if (v != partsV || count != partsN)
+                    {
+                        int k;
+                        for (k = 0; k < 16; k++) parts[k].clear();
+                        partsV = v;
+                        partsN = count;
+                        got = 0;
+                    }
+                    if (parts[i].empty())
+                    {
+                        parts[i] = nl ? std::string(nl + 1) : std::string();
+                        parts[i] += '\n';   // (an empty part still counts as there)
+                        got++;
+                    }
+                    if (got == partsN)
+                    {
+                        // The whole lobby: its lines for the screen.
+                        std::vector<std::string> rows;
+                        int k;
+                        for (k = 0; k < partsN; k++)
+                        {
+                            size_t at = 0, e;
+                            while ((e = parts[k].find('\n', at)) != std::string::npos)
+                            {
+                                if (e > at) rows.push_back(parts[k].substr(at, e - at));
+                                at = e + 1;
+                            }
+                        }
+                        lobby_apply(rows, -1, partsV);
+                        s_lobbyLiveAt = GetTickCount();
+                        partsV = -1;
+                        partsN = got = 0;
+                    }
+                }
+            }
+            if (strcmp(tag, s_me.tag)) break;   // another gamertag
+            if (!s_lobbyWatch)
+            {
+                // The lobby's screen closed: kept a little (it may be back at once), then let go.
+                if (!unwatchedAt) unwatchedAt = GetTickCount();
+                else if (GetTickCount() - unwatchedAt > ONLINE_LOBBY_WS_LINGER_MS) break;
+            }
+            else unwatchedAt = 0;
+            if ((int)(GetTickCount() - keepAt) >= 0)
+            {
+                if (!NetWsSend(w, "p", 1, 1)) break;
+                keepAt = GetTickCount() + ONLINE_LOBBY_WS_KEEP_MS;
+            }
+        }
+        NetWsClose(w);
+        s_lobbyLiveAt = 0;   // (the reads at once, if a screen still shows it)
+        EnterCriticalSection(&s_lock);
+        s_lobbyAt = GetTickCount();
+        LeaveCriticalSection(&s_lock);
+        H64_INFO("[online] lobby socket closed after %u s", (unsigned)((GetTickCount() - openAt) / 1000));
+        // Lost soon after it opened: later and later; otherwise again as soon as a screen wants it.
+        wait = GetTickCount() - openAt < 20000 ? (wait < 60000 ? wait * 2 : 120000) : 1000;
+    }
 }
 
 static DWORD WINAPI online_thread(LPVOID)
@@ -1004,9 +1184,11 @@ static DWORD WINAPI online_thread(LPVOID)
         }
         if (s_lobbyWatch && !away && (int)(GetTickCount() - s_lobbyAt) >= 0)
         {
+            const DWORD live = s_lobbyLiveAt;
             EnterCriticalSection(&s_lock);
             s_lobbyAt = GetTickCount() + idle_every(ONLINE_LOBBY_MS);
             LeaveCriticalSection(&s_lock);
+            if (live && GetTickCount() - live < ONLINE_LOBBY_LIVE_MS) continue;   // pushed (lobby_ws_thread): nothing to read
             lobby_read();
             s_lobbyReadAt = GetTickCount();
             continue;
@@ -1150,6 +1332,14 @@ void OnlineInit(const char *drive)
         SetThreadPriority(inbox, THREAD_PRIORITY_BELOW_NORMAL);
         ResumeThread(inbox);
         CloseHandle(inbox);
+    }
+    {
+        HANDLE lobby = CreateThread(NULL, 256 * 1024, lobby_ws_thread, NULL, CREATE_SUSPENDED, NULL);
+        if (!lobby) return;
+        XSetThreadProcessor(lobby, 3);
+        SetThreadPriority(lobby, THREAD_PRIORITY_BELOW_NORMAL);
+        ResumeThread(lobby);
+        CloseHandle(lobby);
     }
 }
 

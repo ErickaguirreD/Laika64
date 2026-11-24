@@ -1,7 +1,7 @@
-// Harissa64 V2 - Xbox 360 entry point.
+// LAIKA 64 - Xbox 360 entry point.
 //
 // Start-up: unit tests on the console's own CPU, then, depending on
-// game:\harissa64v2.ini (key=value lines, all optional):
+// game:\laika64dev.ini (developer keys, key=value lines, all optional):
 //   mode=play      (default) run a ROM: recompiler or interpreter CPU, RSP
 //                  task HLE (graphics and audio), Xenos renderer, XAudio2,
 //                  XInput. The ROM is rom=<path>, else game:\test.z64, else
@@ -267,10 +267,19 @@ static void MountDrives(void)
 
 // ---- Configuration: xb_config.cpp ----
 
+// game:\laika64dev.ini: developer keys and scripted runs (never in a release). An old
+// game:\harissa64v2.ini (Harissa64's, or keys a test left) is not read: its keys went over
+// the menu's settings unseen. Renamed to .old, so that it shows it is not used.
 static void LoadConfig(Config *c)
 {
     ConfigDefaults(c);
-    ConfigParseFile(c, "game:\\harissa64v2.ini");
+    if (GetFileAttributesA("game:\\harissa64v2.ini") != 0xFFFFFFFF)
+    {
+        DeleteFileA("game:\\harissa64v2.ini.old");
+        H64_WARN("[main] harissa64v2.ini is not read any more: %s",
+                 MoveFileA("game:\\harissa64v2.ini", "game:\\harissa64v2.ini.old") ? "renamed harissa64v2.ini.old" : "cannot rename it");
+    }
+    ConfigParseFile(c, "game:\\laika64dev.ini");
 }
 
 // The menus' language: uilang= (checks) first, then lang= of the menu's
@@ -833,10 +842,11 @@ static void ApplyGraphics(H64System *sys, H64Renderer *renderer, const Config *c
         // Online every console draws the same picture: what a game copies from its frames into RDRAM (Mario Kart
         // 64's trackside screens, gfxFrameToRdram) differed between a console at 1280x720 and the others at
         // 1366x768, and their state hashes with it. One picture for all: 1280x720 widescreen (16:9, the setting most
-        // players use), and nothing that costs time below.
+        // players use), and nothing that costs time below. "16:9 by software" off (the 4:3 picture stretched: the wider
+        // 3D shows graphics errors in some games); of the picture's settings only its calibration (size, position).
         resW = 1280;
         resH = 720;
-        aspect = 1;
+        aspect = 2;
     }
     sys->options.gfxKeepOffscreen = aspect == 1;
     if (!renderer) return;
@@ -853,13 +863,13 @@ static void ApplyGraphics(H64System *sys, H64Renderer *renderer, const Config *c
     o.sharpAmount = c->sharpLevel / 100.0f;
     o.blurAmount = c->blurLevel / 100.0f;
     o.screen = online ? 0 : c->screen;
-    o.brightness = c->brightness;
+    o.brightness = online ? 0 : c->brightness;
     {
-        // The bar: 50 as the console; 100 lifts the dark tones (power 0.6), 0 deepens them (1.6).
-        int lv = c->brightLevel < 0 || c->brightLevel > 100 ? 50 : c->brightLevel;
+        // The bar: 50 as the console; 100 lifts the dark tones (power 0.6), 0 deepens them (1.6). Online: 50.
+        int lv = online || c->brightLevel < 0 || c->brightLevel > 100 ? 50 : c->brightLevel;
         o.brightPower = lv >= 50 ? 1.0f - 0.4f * (lv - 50) / 50.0f : 1.0f + 0.6f * (50 - lv) / 50.0f;
     }
-    o.colorStyle = c->colorStyle;
+    o.colorStyle = online ? 0 : c->colorStyle;
     // Adaptive: a late picture shown at once (RunGame paces frames on the TV's refreshes); a frame in reserve: each
     // held for its refresh, never shown early (2); online: the clock, as the others.
     o.vsync = c->vsync && s_netMode <= 0 ? (FrameReserveOn(c) ? 2 : 1) : 0;
@@ -4085,11 +4095,11 @@ static int RunGameBody(IDirect3DDevice9 *dev, Config *c, const char *romPath)
     if (!sys) { OnlineRoomClose(); MessageScreen(dev, Tr(T_NOT_N64), rom, D3DCOLOR_XRGB(240, 60, 60)); return RG_BROWSER; }
     gfxProfAt = sys->prof[H64_PROF_GFX_HLE];
     // Online play's profile: the game being played, and at the end the minutes it was.
-    char onlineGame[24], onlineCode[24];
+    char onlineGame[44], onlineCode[24];
     const DWORD onlineStart = GetTickCount();
     s_playStart = onlineStart;   // (the pause menu: the time played this session)
-    strncpy(onlineGame, sys->rom.name, sizeof(onlineGame) - 1);
-    onlineGame[sizeof(onlineGame) - 1] = 0;
+    // As the lobby shows it: a hack by its file's name, with its version (its header's name is every version's).
+    MenuOnlineGameName(rom, sys->rom.crc1, sys->rom.crc2, onlineGame, sizeof(onlineGame));
     _snprintf(onlineCode, sizeof(onlineCode) - 1, "%s / %08X", sys->rom.gameCode, sys->rom.crc1);
     onlineCode[sizeof(onlineCode) - 1] = 0;
     OnlineSetStatus(onlineGame);
@@ -4152,7 +4162,7 @@ static int RunGameBody(IDirect3DDevice9 *dev, Config *c, const char *romPath)
     H64_INFO("[main] running %s: cpu %s, RSP %s, %s renderer", rom, jit ? "recompiler" : "interpreter",
              c->hle ? "HLE" : "LLE", c->softRenderer ? "software" : "Xenos");
     if (c->hle && !c->trace)
-        // Online: the graphics worker always, whatever harissa64v2.ini says (every console the same way). On the CPU
+        // Online: the graphics worker always, whatever laika64dev.ini says (every console the same way). On the CPU
         // thread (3.1-3.2 online) the whole console hung or powered off after 11-21 minutes of Smash Remix, offline as
         // well with asyncgfx=0; the desync blamed on the worker was one console left with asyncgfx=0 - both on the
         // worker, the whole RDRAM and the CPU agreed for every second of the game (2026-11-19).
@@ -4922,6 +4932,7 @@ int __cdecl main()
     // logcpu=N: the hardware thread that writes the log (5 by default, shared
     // with the display list parser; checks of the 2 s stalls).
     if (s_logThread && cfg.logCpu >= 0 && cfg.logCpu <= 5 && cfg.logCpu != 5) XSetThreadProcessor(s_logThread, (DWORD)cfg.logCpu);
+    NetSetBlackhole(cfg.netBlackhole);
     if (cfg.xenia || !cfg.fpuFlags) h64_fenv_disable_host_flags();
     s_jitNoFpu = !cfg.jitFpu;
     s_noRegCache = !cfg.regCache;
@@ -4978,10 +4989,10 @@ int __cdecl main()
     else if (dev)
     {
         // Scripted runs and rom= (or game:\test.z64) start one game directly
-        // with harissa64v2.ini alone; otherwise the ROM browser, with the
-        // menu's settings and the game's profile over harissa64v2.ini.
+        // with laika64dev.ini alone; otherwise the ROM browser, with the
+        // menu's settings and the game's profile over laika64dev.ini.
         int scripted = cfg.input.count || cfg.exitAfter || cfg.trace || cfg.shotCount || cfg.loadState || cfg.saveStateAt;
-        // Checks driven by harissa64v2.ini: no language list.
+        // Checks driven by laika64dev.ini: no language list.
         int checks = cfg.autoStart || cfg.controlsTest >= 0 || cfg.browserDemo || cfg.artAll || cfg.browserSel[0] || cfg.browserAt ||
                      cfg.menuAt || cfg.aboutAt;
         char dir[64], menuFile[160];
