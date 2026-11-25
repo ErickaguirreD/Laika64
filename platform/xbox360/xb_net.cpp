@@ -128,17 +128,103 @@ static int sock_write(void *ctx, const unsigned char *buf, size_t len)
     return n > 0 ? n : -1;
 }
 
-// The console's clock as BearSSL wants it (days since 1 January of year 0,
-// seconds in the day): certificates are checked for their dates.
-static void ssl_time(uint32_t *days, uint32_t *secs)
+// The console's clock, in seconds since 1970.
+static long long console_secs(void)
 {
     FILETIME ft;
     ULARGE_INTEGER t;
-    unsigned long long unixSecs;
     GetSystemTimeAsFileTime(&ft);
     t.LowPart = ft.dwLowDateTime;
     t.HighPart = ft.dwHighDateTime;
-    unixSecs = (t.QuadPart - 116444736000000000ULL) / 10000000ULL;
+    return (long long)((t.QuadPart - 116444736000000000ULL) / 10000000ULL);
+}
+
+// A console's clock is often wrong: an Xbox 360 left unplugged starts again in 2005, and few set it (no Xbox
+// Live). The certificates are checked for their dates, so with it wrong every connection failed - no online
+// play, no box art, no HD packs - while the PC and the phone on the same network worked. So the time is
+// taken from a server's answer (its Date header, plain HTTP: no certificate needed for it) and the
+// difference added; when no server tells, at least this version's own date.
+#define NET_CLOCK_FLOOR 1795478400LL   // 2026-11-24 (this version's date): a clock before it is wrong
+static long long s_clockOffset;       // seconds added to the console's clock
+static volatile long s_clockState;    // 0 not asked yet, 1 asking, 2 known (or given up)
+
+static int connect_timed(SOCKET s, IN_ADDR ip, const char *host, int port = 443);
+static int resolve(const char *host, IN_ADDR *addr);
+
+// "Tue, 24 Nov 2026 19:00:00 GMT" -> seconds since 1970 (0 if not one).
+static long long http_date(const char *v)
+{
+    static const char months[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
+    char mon[4] = { 0 };
+    int d, y, hh, mm, ss, m;
+    long long days;
+    const char *c = strchr(v, ',');
+    if (!c || sscanf(c + 1, " %d %3s %d %d:%d:%d", &d, mon, &y, &hh, &mm, &ss) != 6) return 0;
+    for (m = 0; m < 12 && strncmp(months + m * 3, mon, 3); m++) {}
+    if (m == 12 || y < 2020) return 0;
+    {
+        // days since 1970 (the civil calendar's)
+        const int yy = m < 2 ? y - 1 : y, era = yy / 400, yoe = yy - era * 400, mp = (m + 10) % 12;
+        const int doy = (153 * mp + 2) / 5 + d - 1, doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        days = (long long)era * 146097 + doe - 719468;
+    }
+    return days * 86400 + hh * 3600 + mm * 60 + ss;
+}
+
+// The time from `host`'s plain HTTP answer (whatever it is: a redirect to HTTPS has the Date too); 0 when none.
+static long long server_secs(const char *host)
+{
+    IN_ADDR ip;
+    SOCKET s;
+    BOOL one = TRUE;
+    DWORD timeout = 3000;
+    char buf[1024], req[200];
+    int n = 0, r;
+    long long when = 0;
+    if (!resolve(host, &ip)) return 0;
+    s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == INVALID_SOCKET) return 0;
+    setsockopt(s, SOL_SOCKET, SO_MARKINSECURE, (const char *)&one, sizeof(one));
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout, sizeof(timeout));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char *)&timeout, sizeof(timeout));
+    if (connect_timed(s, ip, host, 80))
+    {
+        _snprintf(req, sizeof(req) - 1, "HEAD / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", host);
+        req[sizeof(req) - 1] = 0;
+        if (send(s, req, (int)strlen(req), 0) > 0)
+            while (n < (int)sizeof(buf) - 1 && (r = recv(s, buf + n, (int)sizeof(buf) - 1 - n, 0)) > 0)
+            {
+                const char *d;
+                n += r;
+                buf[n] = 0;
+                if ((d = strstr(buf, "\r\nDate:")) != NULL || (d = strstr(buf, "\r\ndate:")) != NULL)
+                    if (strstr(d + 2, "\r\n")) { when = http_date(d + 7); break; }
+                if (strstr(buf, "\r\n\r\n")) break;
+            }
+    }
+    closesocket(s);
+    return when;
+}
+
+// Before the first connection: the console's clock checked against a server's (once a session).
+static void clock_fix(const char *host)
+{
+    if (s_clockState == 2 || InterlockedCompareExchange(&s_clockState, 1, 0) != 0) return;
+    {
+        const long long mine = console_secs(), theirs = server_secs(host);
+        if (theirs && theirs >= NET_CLOCK_FLOOR - 86400) s_clockOffset = theirs - mine > 86400 || mine - theirs > 86400 ? theirs - mine : 0;
+        else if (mine < NET_CLOCK_FLOOR) s_clockOffset = NET_CLOCK_FLOOR - mine;
+        if (s_clockOffset)
+            H64_INFO("[net] the console's clock is %lld days off (%s): corrected", s_clockOffset / 86400, theirs ? "server's time" : "no server time");
+    }
+    InterlockedExchange(&s_clockState, 2);
+}
+
+// The clock as BearSSL wants it (days since 1 January of year 0, seconds in the day): certificates are
+// checked for their dates.
+static void ssl_time(uint32_t *days, uint32_t *secs)
+{
+    const unsigned long long unixSecs = (unsigned long long)(console_secs() + s_clockOffset);
     *days = (uint32_t)(unixSecs / 86400) + 719528;
     *secs = (uint32_t)(unixSecs % 86400);
 }
@@ -168,7 +254,7 @@ void NetSetBlackhole(int on) { InterlockedExchange(&s_blackhole, on ? 1 : 0); }
 // when the ROM list was left and asked them to stop (a user's console, 3.4, then a crash).
 // The socket is blocking again after it. 1 when connected.
 #define NET_CONNECT_MS 4000
-static int connect_timed(SOCKET s, IN_ADDR ip, const char *host)
+static int connect_timed(SOCKET s, IN_ADDR ip, const char *host, int port)
 {
     SOCKADDR_IN sa;
     u_long nb = 1;
@@ -177,7 +263,7 @@ static int connect_timed(SOCKET s, IN_ADDR ip, const char *host)
     timeval tv;
     memset(&sa, 0, sizeof(sa));
     sa.sin_family = AF_INET;
-    sa.sin_port = htons(443);
+    sa.sin_port = htons((u_short)port);
     sa.sin_addr = ip;
     if (s_blackhole) sa.sin_addr.s_addr = inet_addr("192.0.2.1");
     ioctlsocket(s, FIONBIO, &nb);
@@ -355,6 +441,7 @@ static int connect_tls(const char *host, SOCKET *ps, NetTls **pt)
     unsigned char seed[32];
     uint32_t days, secs;
     if (!resolve(host, &ip)) { H64_INFO("[net] cannot resolve %s", host); return 0; }
+    clock_fix(host);
     s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (s == INVALID_SOCKET) return 0;
     setsockopt(s, SOL_SOCKET, SO_MARKINSECURE, (const char *)&one, sizeof(one));
@@ -896,6 +983,7 @@ NetWs *NetWsOpen(const char *host, const char *path)
     DWORD t0;
     int k;
     if (strlen(path) + strlen(host) > 600 || !NetStart(0) || !resolve(host, &ip)) return NULL;
+    clock_fix(host);
     w = (NetWs *)calloc(1, sizeof(NetWs));
     if (!w) return NULL;
     w->t = (NetTls *)malloc(sizeof(NetTls));

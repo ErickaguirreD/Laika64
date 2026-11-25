@@ -2058,6 +2058,49 @@ static IDirect3DTexture9 *brand_anim_tex(void)
     return s_tex;
 }
 
+IDirect3DTexture9 *UiLaikaName(int *w, int *h)
+{
+    static IDirect3DTexture9 *s_name;
+    static int s_nameTried, s_nw, s_nh;
+    if (!s_nameTried && s_dev)
+    {
+        int pw = 0, ph = 0, x, y, x0 = 0, cw = 0, top = -1, bot = -1;
+        unsigned char *rgba = h64_png_decode(s_laikaLogoPng, sizeof(s_laikaLogoPng), &pw, &ph, 1024 * 1024), *cut;
+        s_nameTried = 1;
+        if (!rgba) return NULL;
+        // past the mark (the first clear column after it, as UiLaikaEmblem), then its first drawn column
+        for (x = 100; x < pw && !cw; x++)
+        {
+            int clear = 1;
+            for (y = 0; y < ph && clear; y++)
+                if (rgba[((size_t)y * pw + x) * 4 + 3] > 8) clear = 0;
+            if (clear) cw = x;
+        }
+        for (x = cw; x < pw && !x0; x++)
+            for (y = 0; y < ph; y++)
+                if (rgba[((size_t)y * pw + x) * 4 + 3] > 8) { x0 = x; break; }
+        for (y = 0; y < ph; y++)
+            for (x = x0; x < pw; x++)
+                if (rgba[((size_t)y * pw + x) * 4 + 3] > 8) { if (top < 0) top = y; bot = y; break; }
+        if (x0 && top >= 0)
+        {
+            s_nw = pw - x0;
+            s_nh = bot - top + 1;
+            cut = (unsigned char *)malloc((size_t)s_nw * s_nh * 4);
+            if (cut)
+            {
+                for (y = 0; y < s_nh; y++) memcpy(cut + (size_t)y * s_nw * 4, rgba + ((size_t)(y + top) * pw + x0) * 4, (size_t)s_nw * 4);
+                s_name = UiImageCreate(s_dev, cut, s_nw, s_nh);
+                free(cut);
+            }
+        }
+        free(rgba);
+    }
+    *w = s_nw;
+    *h = s_nh;
+    return s_name;
+}
+
 float UiBrand(float x, float cy, float size)
 {
     // The LAIKA 64 logo (mark and name in one picture), whatever the skin; animated in its own colours.

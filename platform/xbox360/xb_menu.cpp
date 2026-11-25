@@ -8080,77 +8080,217 @@ static int s_splashShown;   // the logo was shown this session (the first start'
 // first shown, their HD marks): called every frame, 1 once all is there.
 static int (*s_splashLoad)(IDirect3DDevice9 *dev);
 
+// The logo as the intro shows it, the mark above the name (each at its own size: sharp), centred on (cx, my); `k` its
+// size (1: as drawn), `open` how much of the name is shown from its middle (0 to 1), `a` its opacity.
+#define INTRO_MARK 210.0f   // the mark's square
+#define INTRO_NAME_W 400.0f
+#define INTRO_NAME_DY 162.0f   // the name's middle under the mark's
+static void intro_logo(float cx, float my, float k, float open, float a)
+{
+    IDirect3DTexture9 *mark = UiLaikaEmblem(), *name;
+    int nw = 0, nh = 0;
+    const int al = a <= 0 ? 0 : a >= 1 ? 255 : (int)(a * 255);
+    if (!al) return;
+    if (mark) UiImage(mark, cx - INTRO_MARK * 0.5f * k, my - INTRO_MARK * 0.5f * k, INTRO_MARK * k, INTRO_MARK * k, 0, D3DCOLOR_ARGB(al, 255, 255, 255));
+    name = UiLaikaName(&nw, &nh);
+    if (name && nw && open > 0)
+    {
+        const float w = INTRO_NAME_W * k, h = w * nh / nw, ny = my + INTRO_NAME_DY * k, o = open > 1 ? 1.0f : open;
+        const float x0 = cx - w * o * 0.5f, x1 = cx + w * o * 0.5f, u0 = 0.5f - o * 0.5f, u1 = 0.5f + o * 0.5f;
+        float xy[6], uv[6];
+        UiQuadsBegin(name);
+        xy[0] = x0; xy[1] = ny - h * 0.5f; xy[2] = x1; xy[3] = xy[1]; xy[4] = x0; xy[5] = ny + h * 0.5f;
+        uv[0] = u0; uv[1] = 0; uv[2] = u1; uv[3] = 0; uv[4] = u0; uv[5] = 1;
+        UiTrisAdd(xy, uv, D3DCOLOR_ARGB(al, 255, 255, 255));
+        xy[0] = x1; xy[1] = ny - h * 0.5f; xy[2] = x1; xy[3] = ny + h * 0.5f; xy[4] = x0; xy[5] = xy[3];
+        uv[0] = u1; uv[1] = 0; uv[2] = u1; uv[3] = 1; uv[4] = u0; uv[5] = 1;
+        UiTrisAdd(xy, uv, D3DCOLOR_ARGB(al, 255, 255, 255));
+        UiQuadsEnd();
+        if (o < 1)
+        {
+            // bright edges where it opens
+            const int ea = (int)(220 * (1 - o) * a);
+            UiRect(x0 - 1, ny - h * 0.5f - 6, 2, h + 12, D3DCOLOR_ARGB(ea, 230, 225, 255));
+            UiRect(x1 - 1, ny - h * 0.5f - 6, 2, h + 12, D3DCOLOR_ARGB(ea, 230, 225, 255));
+        }
+    }
+}
+
+// The stars of the intro and the way out, in depth: still points first, streaks as the flight speeds up (the
+// vanishing point at (cx, cy)), back to points as it slows. `v` the speed, `dt` the time since the last frame.
+#define INTRO_STARS 420
+#define INTRO_FOCAL 520.0f
+struct IntroStar { float x, y, z, ph; D3DCOLOR col; };
+static IntroStar s_introStar[INTRO_STARS];
+static unsigned s_introSeed = 0x2468ACE1u;
+static float intro_rand(float lo, float hi)
+{
+    s_introSeed = s_introSeed * 1664525u + 1013904223u;
+    return lo + (hi - lo) * ((s_introSeed >> 8) & 0xFFFF) / 65535.0f;
+}
+static void intro_star_new(IntroStar *s, float cx, float cy, float zlo, float zhi)
+{
+    // somewhere on the screen at its depth (spread evenly: not bunched in the middle)
+    static const D3DCOLOR cols[4] = { D3DCOLOR_ARGB(255, 255, 255, 255), D3DCOLOR_ARGB(255, 200, 210, 255),
+                                      D3DCOLOR_ARGB(255, 190, 170, 255), D3DCOLOR_ARGB(255, 255, 230, 210) };
+    s->z = intro_rand(zlo, zhi);
+    s->x = (intro_rand(-60, UI_WIDTH + 60) - cx) * s->z / INTRO_FOCAL;
+    s->y = (intro_rand(-60, UI_HEIGHT + 60) - cy) * s->z / INTRO_FOCAL;
+    s->ph = intro_rand(0, 6.28f);
+    s->col = cols[(int)intro_rand(0, 3.99f)];
+}
+static void intro_stars_init(float cx, float cy)
+{
+    int i;
+    for (i = 0; i < INTRO_STARS; i++) intro_star_new(&s_introStar[i], cx, cy, 0.4f, 4.0f);
+}
+static void intro_stars(float cx, float cy, float v, float dt, float now, float a)
+{
+    int i;
+    for (i = 0; i < INTRO_STARS; i++)
+    {
+        IntroStar *s = &s_introStar[i];
+        float close, sx, sy, tail, al;
+        s->z -= v * dt;
+        if (s->z < 0.12f) { intro_star_new(s, cx, cy, 3.0f, 4.0f); continue; }   // passed by: a new one far away
+        sx = cx + s->x / s->z * INTRO_FOCAL;
+        sy = cy + s->y / s->z * INTRO_FOCAL;
+        if (sx < -50 || sx > UI_WIDTH + 50 || sy < -50 || sy > UI_HEIGHT + 50) continue;
+        close = (4.0f - s->z) / 3.6f;
+        close = close < 0 ? 0 : close > 1 ? 1 : close;
+        al = (0.25f + 0.75f * close) * (v < 0.5f ? 0.75f + 0.25f * sinf(now * 4 + s->ph) : 1.0f) * a;
+        tail = v * 0.055f > 1.2f ? 1.2f : v * 0.055f;   // the streak grows with the speed
+        if (tail > 0.004f)
+        {
+            float xy[4];
+            xy[0] = cx + s->x / (s->z + tail) * INTRO_FOCAL;
+            xy[1] = cy + s->y / (s->z + tail) * INTRO_FOCAL;
+            xy[2] = sx;
+            xy[3] = sy;
+            UiPolyline(xy, 2, close < 0.5f ? 1.2f : 2.0f, 1.0f, (s->col & 0x00FFFFFF) | ((DWORD)(255 * al) << 24));
+        }
+        else UiCircle(sx, sy, 0.6f + 1.6f * close, (s->col & 0x00FFFFFF) | ((DWORD)(255 * al) << 24));
+    }
+}
+
+// The flight's speed, `u` seconds after the jump: the stars stretch, full speed, slowing back to a drift.
+static float intro_speed(float u)
+{
+    float s;
+    if (u < 0) return 0;
+    if (u < 0.8f) { s = u / 0.8f; s = s * s * (3 - 2 * s); return 6.0f * s * s; }
+    if (u < 1.6f) return 6.0f;
+    if (u < 2.5f) { s = (u - 1.6f) / 0.9f; s = s * s * (3 - 2 * s); return 6.0f * (1 - s) + 0.05f; }
+    return 0.05f;
+}
+
+// The intro: still stars twinkling while the list loads behind it (s_splashLoad; at least 0.9 s, at most 8),
+// "Loading..." under them when it takes long; then the jump to hyperspace - the stars stretch, the mark flies in
+// from their vanishing point, a flash as it arrives, the stars slow back to points - the name opening from its
+// middle, and who made it, small, at the bottom. A, B or START skip it once the list is loaded.
 static void wiz_splash(IDirect3DDevice9 *dev)
 {
-    const float anim = 5.0f, waitMax = 6.0f, start = UiTime();
-    float total = anim;
+    const float start = UiTime(), cx = UI_WIDTH * 0.5f, my = UI_HEIGHT * 0.5f - 50, waitMax = 8.0f;
+    float jumpAt = -1, last = start;
     int loaded = s_splashLoad ? 0 : 1;
-    s_splashShown = 1;
     UiInput in;
+    s_splashShown = 1;
     UiInputInit(&in);
-    xb_audio_ui_sound(XB_SFX_LAUNCH);
+    intro_stars_init(cx, my);
     for (;;)
     {
-        float t = UiTime() - start, a, k;
+        const float now = UiTime(), t = now - start, dt = now - last > 0.1f ? 0.1f : now - last;
+        float u, k, fade;
         WORD down = UiInputPoll(&in);
-        if (!loaded) loaded = s_splashLoad(dev) || t >= anim - 1.2f + waitMax;   // never stuck on a picture that does not come
-        // The logo holds (before its fade) until the list is loaded; a button skips only then.
-        if (!loaded && t > anim - 1.2f) total = t + 1.2f;
-        if (t >= total || (loaded && (down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_START)))) break;
-        a = t < 0.8f ? wiz_ease(t / 0.8f) : t > total - 1.2f ? 1.0f - wiz_ease((t - (total - 1.2f)) / 1.2f) : 1.0f;
-        // The logo comes out of the stars' vanishing point: from a speck to full size
-        // over 2.6 s (eased out), then a slow push in.
-        k = t < 2.6f ? 0.02f + 0.92f * wiz_ease(t / 2.6f) : 0.94f + 0.06f * wiz_ease((t - 2.6f) / 2.4f);
-        dev->Clear(0, NULL, D3DCLEAR_TARGET, D3DCOLOR_ARGB(255, 0, 0, 0), 1.0f, 0);
+        last = now;
+        if (!loaded) loaded = s_splashLoad(dev) || t >= waitMax;   // never stuck on a picture that does not come
+        if (jumpAt < 0 && loaded && t >= 0.9f)
+        {
+            jumpAt = t;
+            xb_audio_ui_sound(XB_SFX_LAUNCH);
+        }
+        u = jumpAt < 0 ? -1.0f : t - jumpAt;
+        if (u >= 4.3f || (jumpAt >= 0 && (down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_START)))) break;
+        fade = (t < 0.35f ? t / 0.35f : 1.0f) * (u > 3.9f ? (4.3f - u) / 0.4f : 1.0f);
+        dev->Clear(0, NULL, D3DCLEAR_TARGET, D3DCOLOR_ARGB(255, 2, 2, 8), 1.0f, 0);
         UiBegin(dev);
         {
-            // The hyperspace stars of the background effects, rushing out of the centre.
-            const int keep = s_bgEffect;
-            s_bgEffect = BGFX_WARP;
-            browser_effect();
-            s_bgEffect = keep;
+            const float v = intro_speed(u);
+            UiShadow(cx - 450, my - 260, 900, 520, 260, 200, D3DCOLOR_ARGB((int)((26 + 30 * v / 6) * fade), 60, 30, 120));   // a faint nebula
+            intro_stars(cx, my, v, dt, now, fade);
+        }
+        if (jumpAt < 0 && t > 2.0f)
+        {
+            // still loading: said under the stars, softly pulsing
+            const float pa = (t - 2.0f < 0.5f ? (t - 2.0f) / 0.5f : 1.0f) * (0.55f + 0.25f * sinf(t * 3));
+            UiText(UI_REGULAR, 17, cx, UI_HEIGHT - 52, D3DCOLOR_ARGB((int)(255 * pa), 150, 150, 175), Tr(T_INTRO_LOADING), UI_CENTER);
+        }
+        // the mark: from a speck at the vanishing point to its size, a little overshoot as it arrives
+        k = wiz_ease((u - 0.6f) / 1.0f);
+        if (k > 0)
+        {
+            const float b = u - 1.6f, sc = 0.03f + 0.97f * k + (b > 0 && b < 0.4f ? 0.04f * sinf(b / 0.4f * 3.1416f) : 0.0f);
+            UiShadow(cx - 130 * sc, my - 120 * sc, 260 * sc, 240 * sc, 120 * sc, 60, D3DCOLOR_ARGB((int)(140 * k * fade), 110, 80, 230));
+            intro_logo(cx, my, sc, wiz_ease((u - 1.9f) / 0.7f), (k * 2 > 1 ? 1 : k * 2) * fade);
+        }
+        if (u > 1.55f && u < 2.05f)
+        {
+            // the flash as it arrives
+            const float fa = 1 - fabsf(u - 1.65f) / 0.4f;
+            UiShadow(cx - 260, my - 170, 520, 340, 170, 120, D3DCOLOR_ARGB((int)(200 * (fa > 0 ? fa : 0)), 235, 230, 255));
         }
         {
-            const float lw = 980 * k, lh = lw * 1.9f / UiBrandWidth(1.0f), lx = (UI_WIDTH - lw) * 0.5f, ly = (UI_HEIGHT - lh) * 0.5f;
-            UiShadow(lx + lw * 0.1f, ly + lh * 0.1f, lw * 0.8f, lh * 0.8f, lh * 0.4f, 160, SEL_LO(90 * a));   // a soft light behind
-            UiBrandFit(lx, ly, lw, lh);
-            UiRect(0, 0, UI_WIDTH, UI_HEIGHT, D3DCOLOR_ARGB((int)(255 * (1.0f - a)), 0, 0, 0));   // the fade, over black
+            // who made it, at the bottom, after the name
+            const float ca = wiz_ease((u - 2.5f) / 0.8f) * fade;
+            if (ca > 0)
+            {
+                static const char who[] = "ErickAguirreD";
+                const char *by = Tr(T_INTRO_BY);
+                const float y = UI_HEIGHT - 52 + (1 - ca) * 8, w1 = UiTextWidth(UI_REGULAR, 17, by) + 6, w2 = UiTextWidth(UI_BOLD, 17, who);
+                const D3DCOLOR c1 = D3DCOLOR_ARGB((int)(200 * ca), 150, 150, 175), c2 = D3DCOLOR_ARGB((int)(220 * ca), 190, 180, 230);
+                if (LangRtl())
+                {
+                    UiText(UI_BOLD, 17, cx - (w1 + w2) * 0.5f, y, c2, who, UI_LEFT);
+                    UiText(UI_REGULAR, 17, cx + (w1 + w2) * 0.5f, y, c1, by, UI_RIGHT);
+                }
+                else
+                {
+                    UiText(UI_REGULAR, 17, cx - (w1 + w2) * 0.5f, y, c1, by, UI_LEFT);
+                    UiText(UI_BOLD, 17, cx - (w1 + w2) * 0.5f + w1, y, c2, who, UI_LEFT);
+                }
+            }
         }
         UiEnd();
         UiPresent(dev);
     }
 }
 
-// Leaving LAIKA 64 (main.cpp, before the dashboard): the intro the other way
-// round - the hyperspace stars, the logo shrinking into their vanishing point,
-// then black. 1.6 s; any button ends it sooner.
+// Leaving LAIKA 64 (main.cpp, before the dashboard): the intro the other way round - the name closing, the mark
+// flying back into the stars' vanishing point as they stretch, then black. 1.6 s; any button ends it sooner.
 void OutroScreen(IDirect3DDevice9 *dev)
 {
-    const float total = 1.6f, start = UiTime();
-    const int keep = s_bgEffect;
+    const float total = 1.6f, start = UiTime(), cx = UI_WIDTH * 0.5f, my = UI_HEIGHT * 0.5f - 50;
+    float last = start;
     UiInput in;
     if (!dev) return;
     UiInputInit(&in);
     xb_audio_ui_sound(XB_SFX_BACK);
+    intro_stars_init(cx, my);
     for (;;)
     {
-        float t = UiTime() - start, p, k, fade;
+        const float now = UiTime(), t = now - start, dt = now - last > 0.1f ? 0.1f : now - last;
+        float p, k, fade;
         WORD down = UiInputPoll(&in);
+        last = now;
         if (t >= total || (down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_START))) break;
         p = t / total;
-        k = 0.02f + 0.92f * (1.0f - p * p * p);          // full size to a speck, faster at the end
+        k = 0.03f + 0.97f * (1.0f - wiz_ease((p - 0.2f) / 0.6f));   // full size to a speck
         fade = p < 0.72f ? 1.0f : 1.0f - (p - 0.72f) / 0.28f;   // then into black
-        dev->Clear(0, NULL, D3DCLEAR_TARGET, D3DCOLOR_ARGB(255, 0, 0, 0), 1.0f, 0);
+        dev->Clear(0, NULL, D3DCLEAR_TARGET, D3DCOLOR_ARGB(255, 2, 2, 8), 1.0f, 0);
         UiBegin(dev);
-        s_bgEffect = BGFX_WARP;
-        browser_effect();
-        s_bgEffect = keep;
-        {
-            const float lw = 980 * k, lh = lw * 1.9f / UiBrandWidth(1.0f), lx = (UI_WIDTH - lw) * 0.5f, ly = (UI_HEIGHT - lh) * 0.5f;
-            UiShadow(lx + lw * 0.1f, ly + lh * 0.1f, lw * 0.8f, lh * 0.8f, lh * 0.4f, 160, SEL_LO(90 * fade));
-            UiBrandFit(lx, ly, lw, lh);
-        }
-        UiRect(0, 0, UI_WIDTH, UI_HEIGHT, D3DCOLOR_ARGB((int)(255 * (1.0f - fade)), 0, 0, 0));
+        intro_stars(cx, my, 6.0f * wiz_ease(p / 0.5f), dt, now, fade);
+        UiShadow(cx - 130 * k, my - 120 * k, 260 * k, 240 * k, 120 * k, 60, D3DCOLOR_ARGB((int)(140 * fade), 110, 80, 230));
+        intro_logo(cx, my, k, 1.0f - wiz_ease(p / 0.3f), fade);
         UiEnd();
         UiPresent(dev);
     }

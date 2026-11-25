@@ -183,6 +183,8 @@ float UiBrandWidth(float size);
 void UiOnlineLogo(float cx, float cy, float h, float alpha = 1.0f);
 // The logo's mark alone (the wolf in the cube), square, its surroundings clear: made on first use, kept.
 IDirect3DTexture9 *UiLaikaEmblem(void);
+// The logo's name alone ("LAIKA64", what follows the mark), its size in *w x *h: made on first use, kept.
+IDirect3DTexture9 *UiLaikaName(int *w, int *h);
 void UiBrandFit(float x, float y, float w, float h);
 
 // ---- Wallpapers (game:\wallpapers\<folder>\, over a skin's background) ----
