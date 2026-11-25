@@ -4,7 +4,8 @@ CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, lo
     token TEXT NOT NULL, country TEXT NOT NULL, avatar INTEGER NOT NULL, created INTEGER NOT NULL,
     seen INTEGER NOT NULL, status TEXT NOT NULL DEFAULT '', minutes INTEGER NOT NULL DEFAULT 0,
     ms INTEGER NOT NULL DEFAULT 0, conn INTEGER NOT NULL DEFAULT 0, room INTEGER NOT NULL DEFAULT 0,
-    playbank INTEGER NOT NULL DEFAULT 0);   -- the time played the server saw (pings with a game open), not yet claimed
+    playbank INTEGER NOT NULL DEFAULT 0,    -- the time played the server saw (pings with a game open), not yet claimed
+    playing INTEGER NOT NULL DEFAULT 0);    -- since when it plays what its status says (0: nothing)
 CREATE INDEX IF NOT EXISTS users_minutes ON users (minutes DESC);
 CREATE INDEX IF NOT EXISTS users_seen ON users (seen);   -- the players online (/v1/lobby): without it every request read every user
 -- A friendship, each way, and since when (0: before 2.2.2, not known).

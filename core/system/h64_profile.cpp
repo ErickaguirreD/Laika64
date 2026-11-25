@@ -249,8 +249,10 @@ static const GameProfile s_profiles[] = {
 
 // Options with no bit left in the flags above, set by h64_apply_game_profile.
 enum { H64_GX_SOFT_TINY = 1, H64_GX_TALL_SCISSOR = 2, H64_GX_SOFT_SMALL = 4, H64_GX_COPY_LATE = 8, H64_GX_COPY_SYNC = 16,
-       H64_GX_DEPTH_DROP = 32, H64_GX_FILL_RAM = 64 };   // options.gfxSoftTiny, gfxTallScissor, gfxSoftSmall, gfxCopyBackLate,
-                                                       // gfxCopyBackSync, gfxDepthDrawDrop, gfxFillOnlyRam
+       H64_GX_DEPTH_DROP = 32, H64_GX_FILL_RAM = 64, H64_GX_RDRAM_BOOT = 128, H64_GX_NO_LOAD_COPY = 256 };
+                                                       // options.gfxSoftTiny, gfxTallScissor, gfxSoftSmall, gfxCopyBackLate,
+                                                       // gfxCopyBackSync, gfxDepthDrawDrop, gfxFillOnlyRam, gfxRdramAtBoot,
+                                                       // gfxNoLoadCopy
 struct GameExtra { const char *code; u32 extra; };
 static const GameExtra s_extras[] = {
     // Each character's shaded palette is drawn into a 16x1 image, then loaded
@@ -287,6 +289,14 @@ static const GameExtra s_extras[] = {
     // over as a card: the GPU's copy of that image, only ever cleared, made the
     // card white. The frame shown goes to RDRAM (FRAME_TO_RDRAM above).
     { "NMF", H64_GX_DEPTH_DROP | H64_GX_FILL_RAM },
+    // Its intro movie is decoded by an RSP task straight into the frames the VI
+    // shows, with no RDP drawing: black for 600 VIs (~30 s at its speed there).
+    // GitHub issue #11. In a match played from boot (right from a state loaded
+    // at boot) its boards and background were black: their loads read GPU
+    // images the renderer had only cleared. Without copy backs right, 60 VI/s
+    // (not H64_GP_NO_COPY_BACK: it leaves out what is drawn while the colour
+    // image is the depth image's, as this game's boards are).
+    { "NPN", H64_GX_RDRAM_BOOT | H64_GX_NO_LOAD_COPY },
 };
 
 static void apply_idle_yield(H64System *sys);
@@ -320,6 +330,8 @@ void h64_apply_game_profile(H64System *sys)
     sys->options.gfxCopyBackSync = (extra & H64_GX_COPY_SYNC) != 0;   // no copy of the frame before even when copied every frame
     sys->options.gfxDepthDrawDrop = (extra & H64_GX_DEPTH_DROP) != 0;
     sys->options.gfxFillOnlyRam = (extra & H64_GX_FILL_RAM) != 0;
+    sys->options.gfxRdramAtBoot = (extra & H64_GX_RDRAM_BOOT) != 0;
+    sys->options.gfxNoLoadCopy = (extra & H64_GX_NO_LOAD_COPY) != 0;
     if (name) H64_INFO("[profile] %s: flags %X%s", name, f, extra ? " (+ extra options)" : "");
 }
 
@@ -363,6 +375,10 @@ static const GameCpi s_gameCpi[] = {
     { "NPD", 3 },
     // Perfect Dark's engine: 620k instructions a frame, 200k triangles a second, 55-58 VI/s at cpi 2.
     { "NGE", 3 },
+    // Its battles step once a drawn frame: 765k instructions a frame (no idle
+    // loop), a new frame every VI at cpi 2 - about twice the console's speed
+    // (GitHub issue #11). At 4: 390k a VI, a frame every second VI.
+    { "NCC", 4 },
 };
 
 // Dinosaur Planet: 12.5 ms a frame, some of 18-20 ms - each shown a refresh late and the next 4 ms after it

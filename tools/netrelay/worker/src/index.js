@@ -28,7 +28,8 @@
 //   /v1/lobby?g=&t=&since=                    in one answer: the rooms waiting ("R" code host avatar players game
 //                                             name locked max hostms art crc; crc: "CRC1 CRC2" of its ROM), the games being played ("G" code game
 //                                             seconds tag,tag... art; art: the box art's key), the players online ("U" name country avatar
-//                                             status room ms conn) and the general chat after `since`
+//                                             status room ms conn playing; playing: seconds playing what status says)
+//                                             and the general chat after `since`
 //                                             ("C" id tag avatar text ago)
 //                                             With v=<version> (the last "V" line read): "S <version>" alone when
 //                                             nothing changed since (no database read); otherwise the lists and
@@ -49,11 +50,12 @@
 //   /v1/rank?g=&t=&offset=                    position name country avatar minutes online
 //   /v1/week?g=&t=&list=&offset=              this week's ranking by time online: days left, my place, my seconds; the
 //                                             top 10 (list=1: a page from offset) - place name country avatar seconds online
-//   /v1/top?g=&t=&period=w|m|a                the most played games online (this week, four weeks, all time):
+//   /v1/top?g=&t=&period=w|m|a                the most played games online - in rooms (this week, four weeks, all time):
 //                                             "T place code game minutes players lastweek", then "M code minutes" mine
 //   /v1/news?lang=                            date title text
 //   /v1/rooms?g=&t=                           rooms waiting: code host avatar players game name locked
-//   /v1/chat?g=&t=&since=                     the general chat after message `since`: id tag avatar text ago (seconds)
+//   /v1/chat?g=&t=&since=|before=             the general chat after message `since` (or the 40 before message
+//                                             `before`: its older messages): id tag avatar text ago (seconds)
 //   /v1/say?g=&t=&text=                       a message to it
 //   /v1/room?op=create&g=&t=&name=&pass=&game=&crc1=&crc2=&max= | op=join&code=&pass=&g=&t=   WebSocket: see Room below
 //
@@ -107,7 +109,7 @@ const WEEK_S = 7 * 86400, MONDAY0 = 4 * 86400, WEEK_GAME_S = 6 * 3600, WEEK_MIN_
 const weekOf = (t) => Math.floor((t - MONDAY0) / WEEK_S);
 const clean = (text, limit) => String(text ?? "").replace(/[\t\r\n\x00-\x1f]/g, " ").trim().slice(0, limit);
 const country = (text) => (/^[A-Za-z]{2}$/.test(text ?? "") ? text.toUpperCase() : "--");
-const avatar = (text) => Math.max(0, Math.min(parseInt(text ?? "0", 10) || 0, 255));   // 63 the team's, the colour ones from 64
+const avatar = (text) => Math.max(0, Math.min(parseInt(text ?? "0", 10) || 0, 1023));   // 63 the team's, the colour ones from 64, the animated from 256
 const reply = (lines, status = 200) =>
   new Response(lines.join("\n") + "\n.\n", { status, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" } });
 
@@ -200,9 +202,11 @@ async function profiles(cmd, q, request, env) {
       // The lobby's players change when this one comes online, plays something else or goes in or out of a room.
       const was = await db.prepare("SELECT seen, status, room FROM users WHERE id = ?").bind(me).first();
       const moved = !was || t - was.seen >= ONLINE_S || was.status !== status || was.room !== (q.get("room") === "1" ? 1 : 0);
+      // playing: since when it plays what its status says (kept while the status stays; 0 when it plays nothing).
       await db.prepare("UPDATE users SET playbank = MIN(?, playbank + CASE WHEN status <> '' OR ? <> '' THEN MAX(0, MIN(? - seen, ?)) ELSE 0 END), " +
+        "playing = CASE WHEN ? = '' THEN 0 WHEN status = ? AND playing > 0 THEN playing ELSE ? END, " +
         "seen = ?, status = ?, ms = ?, conn = ?, room = ?, country = CASE WHEN ? <> '--' THEN ? ELSE country END WHERE id = ?")
-        .bind(PLAY_BANK_S, status, t, PLAY_STEP_S, t, status, ms, conn, q.get("room") === "1" ? 1 : 0, cc, cc, me).run();
+        .bind(PLAY_BANK_S, status, t, PLAY_STEP_S, status, status, t, t, status, ms, conn, q.get("room") === "1" ? 1 : 0, cc, cc, me).run();
       if (moved) await lobbyBump(env);
       const since = Math.max(0, parseInt(q.get("since") ?? "0", 10) || 0);
       const [friends, asked, msgs] = await db.batch([
@@ -347,6 +351,8 @@ async function profiles(cmd, q, request, env) {
       // The most played games online: this week (w), the last four weeks (m) or all time (a); TOP_GAMES of them, each
       // "T place code game minutes players lastweek" (lastweek: its place a week before, 0 none; this week's only),
       // then "M code minutes" for this player's own time with them. The ranking is read once an hour (top_cache).
+      // Only games played in rooms count (online_week, the rooms' own count since 2026-11-24): with the time of any game
+      // open while online (played, game_week) the ranking led with games played alone (Ocarina of Time).
       const period = ["w", "m", "a"].includes(q.get("period")) ? q.get("period") : "w";
       let body = null;
       const cached = await db.prepare("SELECT at, body FROM top_cache WHERE period = ?").bind(period).first();
@@ -357,11 +363,11 @@ async function profiles(cmd, q, request, env) {
         const wk = weekOf(t);
         const sql = (where) => "SELECT code, MAX(game) AS game, SUM(minutes) AS m, COUNT(DISTINCT user) AS n FROM " + where +
           " GROUP BY code ORDER BY m DESC LIMIT " + TOP_GAMES;
-        const top = period === "a" ? await db.prepare(sql("played")).all()
-          : await db.prepare(sql("game_week WHERE week >= ?")).bind(period === "w" ? wk : wk - 3).all();
+        const top = period === "a" ? await db.prepare(sql("online_week")).all()
+          : await db.prepare(sql("online_week WHERE week >= ?")).bind(period === "w" ? wk : wk - 3).all();
         let last = new Map();
         if (period === "w") {
-          const prev = await db.prepare(sql("game_week WHERE week = ?")).bind(wk - 1).all();
+          const prev = await db.prepare(sql("online_week WHERE week = ?")).bind(wk - 1).all();
           prev.results.forEach((r, i) => last.set(r.code, i + 1));
         }
         body = top.results.map((r, i) => ["T", i + 1, r.code, r.game, r.m, r.n, last.get(r.code) ?? 0].join("\t")).join("\n");
@@ -373,10 +379,8 @@ async function profiles(cmd, q, request, env) {
       let mine = [];
       if (codes.length) {
         const marks = codes.map(() => "?").join(",");
-        mine = period === "a"
-          ? (await db.prepare("SELECT code, minutes AS m FROM played WHERE user = ? AND code IN (" + marks + ")").bind(me, ...codes).all()).results
-          : (await db.prepare("SELECT code, SUM(minutes) AS m FROM game_week WHERE user = ? AND week >= ? AND code IN (" + marks + ") GROUP BY code")
-            .bind(me, period === "w" ? weekOf(t) : weekOf(t) - 3, ...codes).all()).results;
+        mine = (await db.prepare("SELECT code, SUM(minutes) AS m FROM online_week WHERE user = ? AND week >= ? AND code IN (" + marks + ") GROUP BY code")
+          .bind(me, period === "w" ? weekOf(t) : period === "m" ? weekOf(t) - 3 : 0, ...codes).all()).results;
       }
       return ["OK", ...lines, ...mine.map((r) => ["M", r.code, r.m].join("\t"))];
     }
@@ -403,8 +407,12 @@ async function profiles(cmd, q, request, env) {
       return ["OK", ...results.map((r) => [r.code, r.host, r.avatar, r.players, r.game, r.name, r.locked].join("\t"))];
     }
     case "chat": {
+      // before: the 40 messages before that one (the lobby's older messages), else the last ones after `since`.
       const since = Math.max(0, parseInt(q.get("since") ?? "0", 10) || 0);
-      const { results } = await db.prepare("SELECT id, tag, avatar, text, at FROM chat WHERE id > ? ORDER BY id DESC LIMIT 40").bind(since).all();
+      const before = Math.max(0, parseInt(q.get("before") ?? "0", 10) || 0);
+      const { results } = await (before
+        ? db.prepare("SELECT id, tag, avatar, text, at FROM chat WHERE id < ? ORDER BY id DESC LIMIT 40").bind(before)
+        : db.prepare("SELECT id, tag, avatar, text, at FROM chat WHERE id > ? ORDER BY id DESC LIMIT 40").bind(since)).all();
       return ["OK", ...results.reverse().map((m) => [m.id, m.tag, m.avatar, m.text, Math.max(0, t - m.at)].join("\t"))];
     }
     case "say": {
@@ -646,13 +654,13 @@ async function lobbyRows(db, t, since) {
       "(SELECT u.ms FROM users u WHERE u.lower = lower(r.host)) AS ms FROM rooms r WHERE r.updated > ? ORDER BY r.started, r.updated DESC LIMIT 60")
       .bind(t - ROOM_LIST_S),
     db.prepare("SELECT id, tag, avatar, text, at FROM chat WHERE id > ? ORDER BY id DESC LIMIT 30").bind(since),
-    db.prepare("SELECT name, country, avatar, status, room, ms, conn FROM users WHERE seen > ? ORDER BY (status <> '') DESC, room DESC, lower LIMIT ?")
+    db.prepare("SELECT name, country, avatar, status, room, ms, conn, playing FROM users WHERE seen > ? ORDER BY (status <> '') DESC, room DESC, lower LIMIT ?")
       .bind(t - ONLINE_S, LOBBY_USERS),
   ]);
   return [
     ...rooms.results.filter((r) => !r.started).map((r) => ["R", r.code, r.host, r.avatar, r.players, r.game, r.name, r.locked, r.size, r.ms ?? 0, r.art, r.crc ?? ""].join("\t")),
     ...rooms.results.filter((r) => r.started).map((r) => ["G", r.code, r.game, Math.max(0, t - r.started), r.tags, r.art].join("\t")),
-    ...online.results.map((u) => ["U", u.name, u.country, u.avatar, u.status, u.room, u.ms, u.conn].join("\t")),
+    ...online.results.map((u) => ["U", u.name, u.country, u.avatar, u.status, u.room, u.ms, u.conn, u.playing ? Math.max(0, t - u.playing) : 0].join("\t")),
     ...chat.results.reverse().map((m) => ["C", m.id, m.tag, m.avatar, m.text, Math.max(0, t - m.at)].join("\t"))];
 }
 
@@ -1041,12 +1049,22 @@ export class Room {
     p.port = 0;
   }
 
+  // A console's time in a game: this week's ranking of players (weekly) and of games played online (online_week, by
+  // the game's code as /v1/played names it: "NALE / 34EE4749" - a hack's art key is its CRC, so "XXXX" for its code).
   async week(tag, secs) {
     secs = Math.min(secs, WEEK_GAME_S);
     if (!tag || secs < WEEK_MIN_S) return;
+    const wk = weekOf(now()), lower = tag.toLowerCase(), g = this.game ?? {};
+    const code = g.crc1 ? ((g.art ?? "").length === 4 ? g.art : "XXXX") + " / " + g.crc1 : "";
     try {
-      await this.env.DB.prepare("INSERT INTO weekly (week, user, seconds) SELECT ?, id, ? FROM users WHERE lower = ? " +
-        "ON CONFLICT (week, user) DO UPDATE SET seconds = seconds + excluded.seconds").bind(weekOf(now()), secs, tag.toLowerCase()).run();
+      const db = this.env.DB;
+      await db.batch([
+        db.prepare("INSERT INTO weekly (week, user, seconds) SELECT ?, id, ? FROM users WHERE lower = ? " +
+          "ON CONFLICT (week, user) DO UPDATE SET seconds = seconds + excluded.seconds").bind(wk, secs, lower),
+        ...(code ? [db.prepare("INSERT INTO online_week (week, code, user, game, minutes) SELECT ?, ?, id, ?, ? FROM users WHERE lower = ? " +
+          "ON CONFLICT (week, code, user) DO UPDATE SET minutes = minutes + excluded.minutes, game = excluded.game")
+          .bind(wk, code, (g.name ?? "").slice(0, 40), Math.max(1, Math.round(secs / 60)), lower)] : []),
+      ]);
     } catch (e) {
       console.log("week: " + e);
     }

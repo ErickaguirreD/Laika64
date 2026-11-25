@@ -22,7 +22,8 @@
 
 #define ONLINE_TAG_MIN 3
 #define ONLINE_TAG_MAX 15
-#define ONLINE_AVATARS 256   // avatar numbers the server keeps (0-255): xb_avatars.h's (63 the team's), xb_avatars2.h's from 64
+#define ONLINE_AVATARS 1024  // avatar numbers the server keeps (0-1023): xb_avatars.h's (63 the team's), xb_avatars2.h's from 64,
+                             // the animated ones (xb_avatars3.h) from 256
 
 struct OnlineProfile
 {
@@ -54,6 +55,7 @@ struct OnlineUser
     int pos, minutes;   // the ranking's
     int inRoom;         // in a room's lobby (Play online's players)
     int ms, conn;       // its time to the server and back (0: not known); its connection (ONLINE_CONN_*)
+    int playSecs;       // playing what `status` says for this long, seconds (0: not known - an older server)
 };
 enum { ONLINE_CONN_NONE = 0, ONLINE_CONN_CABLE, ONLINE_CONN_WIFI, ONLINE_CONN_OLD };   // OLD: a LAIKA before 2.1 (tells neither)
 enum { ONLINE_LIST_USERS = 0, ONLINE_LIST_FRIENDS, ONLINE_LIST_RANK, ONLINE_LIST_WEEK };   // WEEK: this week's ranking online
@@ -131,8 +133,12 @@ struct OnlineRoomInfo { unsigned code; char host[ONLINE_TAG_MAX + 1]; int avatar
 int OnlineRooms(std::vector<OnlineRoomInfo> *out);   // the rooms waiting for players (locked: a password is asked)
 // A game being played in a room: who plays it, for how long.
 struct OnlineGameInfo { unsigned code; char game[44], art[16]; int seconds, count; char tag[4][ONLINE_TAG_MAX + 1]; };
-struct OnlineChatLine { int id; char tag[ONLINE_TAG_MAX + 1]; int avatar; std::string text; char when[8]; };   // when: "HH:MM", this console's clock
+// when: "HH:MM", this console's clock; daysAgo: its day (0 today, 1 yesterday...).
+struct OnlineChatLine { int id; char tag[ONLINE_TAG_MAX + 1]; int avatar; std::string text; char when[8]; int daysAgo;
+                        OnlineChatLine() : id(0), avatar(0), daysAgo(0) { tag[0] = 0; when[0] = 0; } };
 int OnlineChatGet(int since, std::vector<OnlineChatLine> *out);   // the general chat after message `since` (0: the last ones)
+// The general chat's messages before message `before`, the newest last (40 at most; none: no older ones kept).
+int OnlineChatBefore(int before, std::vector<OnlineChatLine> *out);
 int OnlineChatSay(const char *text);                              // OnlineError "busy": too soon after the last one
 // The rooms waiting, the games being played, the players online and the general chat after `since` in one
 // request (the Play online screen's).

@@ -267,6 +267,7 @@ struct Xenos
     u32 dzPrim, dzHigh, dzTris, dzLastPrim;   // xenosdebug=15: triangles with prim depth / a vertex z >= 32767 / all, last prim depth
     float dzMin, dzMax;                        // xenosdebug=15: vertex z range (N64 units, 32767 = far)
     u64 dbgPresentT;   // xenosdebug=7: clock at the previous present
+    u32 rspPictureSeen;   // H64System.rspPictureGen last handled
     u32 debugLines;    // xenosdebug=9: lines logged so far     // xenosdebug=8: the first of the two presents logged (xenosdebug=8000+N: present N)
     IDirect3DTexture9 *shown;   // texture shown at the last present
     int shownSlot;              // frame slot the VI showed at the last present (-1: none)
@@ -459,7 +460,7 @@ static const char *a_c(u32 s)
     return t[s & 7];
 }
 
-enum { KEY_TWO_CYCLE = 1, KEY_FOG = 2, KEY_DEPTH = 4, KEY_3POINT = 8, KEY_BL_FOG = 16, KEY_BL_SHADEA = 32 };
+enum { KEY_TWO_CYCLE = 1, KEY_FOG = 2, KEY_DEPTH = 4, KEY_3POINT = 8, KEY_BL_FOG = 16, KEY_BL_SHADEA = 32, KEY_ADITHER = 64 };
 #define TRI_ZOUT 0x100   // batch flag beside H64_TRI_*: a vertex Z outside the RDP range
 
 // In the second cycle the RDP's TEXEL0 input is texel 1 and TEXEL1 is the next
@@ -543,6 +544,7 @@ static IDirect3DPixelShader9 *combiner_shader(Xenos *x, u32 flags)
               "float4 zbias : register(c7);\n"
               "float4 tsize0 : register(c8);\n"
               "float4 tsize1 : register(c9);\n"
+              "float4 nseed : register(c10);\n"
               "%s"
               "struct PSOUT { float4 c : COLOR; %s };\n"
               "PSOUT main(float4 col : COLOR0, float4 tc : TEXCOORD0, float4 lcol : TEXCOORD1, float4 lw : TEXCOORD2, float2 vpos : VPOS) {\n"
@@ -554,7 +556,7 @@ static IDirect3DPixelShader9 *combiner_shader(Xenos *x, u32 flags)
               "  float4 comb = float4(0.0, 0.0, 0.0, 0.0);\n"
               "%s%s%s%s%s"
               "  o.c = comb;\n"
-              "%s%s"
+              "%s%s%s"
               "  return o;\n"
               "}\n",
               (flags & KEY_3POINT) ? s_ps3PointSource : "",
@@ -564,6 +566,9 @@ static IDirect3DPixelShader9 *combiner_shader(Xenos *x, u32 flags)
               c0, c1, (flags & KEY_FOG) ? "  comb.rgb = lerp(comb.rgb, fogc.rgb, shade.a);\n" : "",
               // The blender's P is the fog colour (set_blend): the shader hands it over as its colour.
               (flags & KEY_BL_FOG) ? "  comb.rgb = fogc.rgb;\n" : "", (flags & KEY_BL_SHADEA) ? "  comb.a = shade.a;\n" : "",
+              // Alpha compare against a random threshold, another each frame (RDP alpha dither):
+              // Command & Conquer's briefing panels draw their static so.
+              (flags & KEY_ADITHER) ? "  clip(o.c.a - frac(sin(dot(vpos + nseed.xy, float2(12.9898, 78.233))) * 43758.5453) - 0.002);\n" : "",
               // Xenos computes ddx/ddy with a texture unit: a shader whose
               // combiner reads no texture had no sampler left and failed to
               // compile (X3602, Banjo-Kazooie); t0 * zbias.w (always 0) keeps s0.
@@ -2411,10 +2416,10 @@ static void load_rdram_range(const H64RdpState *st, const u32 *w, u32 op, u32 *l
 // No copy backs: xenosdebug=5 (diagnosis), or the game's profile (Mario
 // Golf and Mario Tennis: their courses, players and HUD were garbled or
 // missing with them, and come out right without; Golf's pause menu then
-// has a black background).
+// has a black background; gfxNoLoadCopy: Pokemon Puzzle League's boards).
 static int no_copy_back(const Xenos *x)
 {
-    return x->debug == 5 || x->sys->options.gfxNoCopyBack;
+    return x->debug == 5 || x->sys->options.gfxNoCopyBack || x->sys->options.gfxNoLoadCopy;
 }
 
 // Copies back the lines of a GPU image a load reads, unless done since it was drawn.
@@ -2777,9 +2782,24 @@ static void set_depth(Xenos *x, int hasDepth)
 // a pack's half-transparent pictures are meant so there (the series emblems behind the
 // damage, ~30% alpha, vanished under the half cut).
 #define HD_ALPHA_REF 0x80
+// Alpha compare against the RDP's random threshold (ALPHA_COMPARE dither): the
+// combiner shader drops those pixels itself (KEY_ADITHER). Not where the RDP
+// compares the coverage instead (see set_alpha_test), nor in copy mode.
+static int alpha_dither(const H64RdpState *st)
+{
+    u32 f = st->rasterFlags;
+    return (f & (RS_ALPHA_TEST | RS_ALPHA_TEST_DITHER)) == (RS_ALPHA_TEST | RS_ALPHA_TEST_DITHER) &&
+           (f & (RS_ALPHA_CVG_SELECT | RS_CVG_TIMES_ALPHA)) != RS_ALPHA_CVG_SELECT && !(f & RS_COPY);
+}
+
 static void set_alpha_test(Xenos *x, int hires)
 {
     const H64RdpState *st = x->st;
+    if (alpha_dither(st))
+    {
+        x->dev->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+        return;
+    }
     // Alpha from coverage (ALPHA_CVG_SELECT) without coverage times alpha: the RDP compares the
     // coverage, full inside a triangle, not the combiner's alpha - nothing is dropped. Army Men:
     // Air Combat draws its ground so (anti-aliased opaque surface, alpha compare on) with palette
@@ -2859,6 +2879,7 @@ static void setup_combined(Xenos *x, int hasDepth, TexBinding *tb0, TexBinding *
     }
     if (zOut && hasDepth && (st->depthBlendFlags & (DB_DEPTH_TEST | DB_DEPTH_UPDATE))) flags |= KEY_DEPTH;
     if (x->texFilter == 0 && !(x->hts && x->hiTex) && (st->rasterFlags & RS_SAMPLE_QUAD) && !(st->rasterFlags & RS_COPY)) flags |= KEY_3POINT;
+    if (alpha_dither(st)) flags |= KEY_ADITHER;
     ps = combiner_shader(x, flags);
     x->dev->SetPixelShader(ps ? ps : x->psFallback);
     set_color_const(x, 0, st->primColor);
@@ -2874,6 +2895,11 @@ static void setup_combined(Xenos *x, int hasDepth, TexBinding *tb0, TexBinding *
     x->dev->SetPixelShaderConstantF(5, c, 1);
     c[0] = st->keyScale[0] / 255.0f; c[1] = st->keyScale[1] / 255.0f; c[2] = st->keyScale[2] / 255.0f; c[3] = 0;
     x->dev->SetPixelShaderConstantF(6, c, 1);
+    if (flags & KEY_ADITHER)
+    {
+        c[0] = (float)((x->presentCount * 37u) % 997u); c[1] = (float)((x->presentCount * 91u) % 991u); c[2] = c[3] = 0;
+        x->dev->SetPixelShaderConstantF(10, c, 1);
+    }
     c[0] = 2.0f / fbw; c[1] = -2.0f / fbh; c[2] = 0; c[3] = 0;
     x->dev->SetVertexShaderConstantF(0, c, 1);
     {
@@ -3189,7 +3215,7 @@ static void fb_load(Xenos *x, const u32 *w, int block)
     u32 a = st->texAddr & 0xFFFFFF, i, bytes = st->texSize == 2 ? 2 : st->texSize == 3 ? 4 : 0;
     u32 sl = (w[0] >> 12) & 0xFFF, tl = w[0] & 0xFFF, sh = (w[1] >> 12) & 0xFFF, th = w[1] & 0xFFF;
     int found = -1;
-    if (!bytes || st->texFmt != 0 || x->debug == 5) return;
+    if (!bytes || st->texFmt != 0 || x->debug == 5 || x->sys->options.gfxNoLoadCopy) return;
     for (i = 0; i < FB_SLOTS; i++)
     {
         const FbSlot *s = &x->fb[i];
@@ -3307,7 +3333,7 @@ static void ram_load(Xenos *x, const u32 *w)
     const H64RdpState *st = x->st;
     const H64RdpTile *lt = &st->tiles[(w[1] >> 24) & 7];
     u32 sl = ((w[0] >> 12) & 0xFFF) >> 2, tl = (w[0] & 0xFFF) >> 2, sh = ((w[1] >> 12) & 0xFFF) >> 2, th = (w[1] & 0xFFF) >> 2;
-    if (st->texSize != 1 || !st->texWidth || sh < sl || th < tl || x->debug == 5) return;
+    if (st->texSize != 1 || !st->texWidth || sh < sl || th < tl || x->debug == 5 || x->sys->options.gfxNoLoadCopy) return;
     x->ramLoad.addr = st->texAddr & 0xFFFFFF;
     x->ramLoad.width = st->texWidth;
     x->ramLoad.sl = sl;
@@ -3960,6 +3986,24 @@ void h64_xenos_present_vi(H64Renderer *r, const u32 *vi)
     x->viGamma = (vi[0] & 8) != 0;
     int found = -1;
     if (x->curSlot >= 0 && x->targetBound) resolve_current(x);
+    if (x->sys->rspPictureGen != x->rspPictureSeen)
+    {
+        // An HLE task wrote a picture into RDRAM (H64System.rspPictureGen): the
+        // GPU frames there are dropped, as at a state load, and the VI shows
+        // RDRAM. Pokemon Puzzle League's story movies play in the frames the
+        // RDP drew the title screen into: that stayed on screen, with their voices.
+        u32 lo = x->sys->rspPictureLo, hi = x->sys->rspPictureHi;
+        x->rspPictureSeen = x->sys->rspPictureGen;
+        for (i = 0; i < FB_SLOTS; i++)
+        {
+            FbSlot *s = &x->fb[i];
+            u32 end = s->addr + (s->width ? s->width : 320) * (s->height ? s->height : 240) * (s->bytes ? s->bytes : 2);
+            if (!s->tex || !s->valid || hi <= s->addr || lo >= end) continue;
+            s->valid = 0;
+            s->gpuDirty = 0;   // never copied back over the picture
+            if (x->curSlot == (int)i) x->curSlot = -1;
+        }
+    }
     // The image holding the origin that starts closest to it (the most recently
     // drawn one at equal addresses): another image's guessed extent can cover
     // it too. DK64's stale 640x480 intro buffers span its 320x240 ones; the
@@ -4062,6 +4106,10 @@ void h64_xenos_present_vi(H64Renderer *r, const u32 *vi)
     x->edramOwner = -1;   // the back buffer shares the N64 target's EDRAM tiles (EDRAM_N64_COLOR)
     if (type < 2)
         ;
+    else if (((vi[9] >> 16) & 0x3FF) >= (vi[9] & 0x3FF) || ((vi[10] >> 16) & 0x3FF) >= (vi[10] & 0x3FF))
+        ;   // H_VIDEO or V_VIDEO empty: the VI shows no picture (black). Command & Conquer
+            // clears H_VIDEO between its screens; the whole 640x480 image shown instead
+            // squeezed its 240 lines into the top of the screen. GitHub issue #11.
     else if (found >= 0)
     {
         const FbSlot *fs = &x->fb[found];
@@ -4094,7 +4142,7 @@ void h64_xenos_present_vi(H64Renderer *r, const u32 *vi)
         x->shownV = x->vMax;
         x->shownTiled = 1;
     }
-    else if (x->drewFrame || ++x->blankPresents > 600)
+    else if (x->drewFrame || x->sys->options.gfxRdramAtBoot || ++x->blankPresents > 600)
         show_rdram_frame(x, vi, origin, width, type == 3);
     // else: at boot the VI often shows RDRAM the game still uses for other data
     // (noise); stay black until the RDP draws a frame, or for 600 VIs at most

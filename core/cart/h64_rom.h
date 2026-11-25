@@ -60,5 +60,8 @@ int h64_rom_tv_type(const H64Rom *rom);
 enum { H64_ROMKIND_UNKNOWN = -1, H64_ROMKIND_ORIGINAL = 0, H64_ROMKIND_TRANSLATION, H64_ROMKIND_HACK, H64_ROMKIND_BAD,
        H64_ROMKIND_OTHER, H64_ROMKIND_HOMEBREW };
 int h64_rom_catalogue(u32 crc1, u32 crc2, const char **name);
+// The same for a ROM known by its CRC1 only (another console's, as the online server names it): the kind of the
+// catalogue's ROMs with that CRC1, H64_ROMKIND_UNKNOWN when there is none.
+int h64_rom_catalogue_crc1(u32 crc1);
 
 #endif

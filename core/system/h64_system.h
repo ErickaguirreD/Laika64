@@ -105,6 +105,9 @@ struct H64Options
     int gfxKeepOffscreen;   // 16:9 widescreen: gfxViewportClip off (more than the viewport is shown)
     int gfxOtherModeInit;   // graphics HLE (game profile): each task starts from the microcode's other modes
     int gfxNoCopyBack;      // GPU renderer (game profile): frames it drew are never copied back for texture loads
+    int gfxNoLoadCopy;      // GPU renderer (game profile): loads read RDRAM, never a GPU image (no copy back, no
+                            // rectangle sampling the GPU's picture: xenosdebug=5), without gfxNoCopyBack's leaving
+                            // out what is drawn into the depth image (Pokemon Puzzle League's boards)
     int gfxS2dex1;          // graphics HLE (game profile): S2DEX 1.05+ in C++ (else the LLE RSP runs it)
     int gfxCopyBackFull;    // GPU renderer (game profile): copy back only images at least 320 pixels wide
     int gfxRdramCopy;       // GPU renderer (game profile): copy-mode 1:1 rectangles move memory (xenos rdram_copy_rect)
@@ -130,6 +133,8 @@ struct H64Options
                             // out, and the GPU images they read not copied back for them (Mario Golf)
     int gfxFillOnlyRam;     // GPU renderer (game profile): loads from an image the GPU only filled read RDRAM
                             // (the CPU writes there; Mario Golf's swing card)
+    int gfxRdramAtBoot;     // GPU renderer (game profile): before the RDP draws a frame, the VI shows RDRAM at once
+                            // instead of black for up to 600 VIs (the RSP decodes Pokemon Puzzle League's intro there)
     int gfxCopyBackLate;    // GPU renderer (game profile): an image narrower than 320 is copied back as it was a frame
                             // before (read without waiting for the GPU), the copy of now read at the next one
     int gfxSoftTiny;        // GPU renderer (game profile): drawing into colour images at most 16 pixels wide done by the
@@ -256,6 +261,11 @@ struct H64System
     // draws its thrown capsules into the frame with the CPU).
     H64CpuSprite cpuSprite[4];
     u32 cpuSpriteNext;
+    // An HLE task wrote a picture into RDRAM itself, no RDP drawing (Pokemon
+    // Puzzle League's movies): the renderer drops the GPU frames there, so the
+    // VI shows RDRAM. Counted up at each such write, with the range written.
+    volatile u32 rspPictureGen;
+    volatile u32 rspPictureLo, rspPictureHi;
     H64RspDecode rspDecode;
 };
 

@@ -108,6 +108,7 @@ struct hle_t
 
     unsigned int sp_status;   // status bits the task sets when it ends (rsp_break)
     int forwarded;            // the task was left to the LLE RSP
+    u32 taskCycles;           // the task's length in CPU cycles when it sets one (else H64_HLE_AUDIO_CYCLES)
     u32 dirtyLo, dirtyHi;     // RDRAM range written by the task (all of it: hleAudioCheck)
     // The separate ranges it wrote (for the recompiler, which drops the code
     // they overlap): an audio task writes buffers far apart, and the range
@@ -195,6 +196,9 @@ void musyx_v1_task(struct hle_t *hle);
 void jpeg_decode_PS0(struct hle_t *hle);
 void jpeg_decode_PS(struct hle_t *hle);
 void jpeg_decode_OB(struct hle_t *hle);
+
+// ---- h64_hle_npn.cpp ----
+void npn_video_task(struct hle_t *hle);   // Pokemon Puzzle League's movie decoder
 void musyx_v2_task(struct hle_t *hle);
 
 // ---- memory.h ----

@@ -1259,7 +1259,7 @@ static void NetP2pOff(int tell);
 #define NET_BACK_MENU_MS 1200       // BACK held this long: the menu (online), not the quick chat
 #define NET_CHAT_SHOW_MS 14000      // a message stays this long beside the game
 #define NET_CHAT_LINES 8
-#define QC_TEXTS 32   // the quick chat's texts (T_QC_1...): sent as their number, "@q<n>" (the first 8 as before 2.2.2)
+#define QC_TEXTS 34   // the quick chat's texts (T_QC_1...): sent as their number, "@q<n>" (the first 8 as before 2.2.2)
 #define QC_CATS 4     // ... in tabs (LB/RB): the game, teasing, notices, greetings - 8 each
 static const unsigned char s_qcTab[QC_CATS][8] = {
     { 0, 1, 3, 6, 8, 9, 10, 11 },          // the game: good game, well played, rematch?, let's go, so close, lucky, I won, one more
@@ -1284,7 +1284,7 @@ IDirect3DTexture9 *EmojiTex(int k)
     return s_emojiTex[k];
 }
 
-int EmojiCount(void) { return EMOJI_COUNT; }
+int EmojiCount(void) { return EmojiAllCount(); }   // (3.6: the animated ones added after xb_emojis.h's)
 
 static u32 NetBuildId(void)
 {
@@ -2318,7 +2318,7 @@ static float NetChatBody(float x, float cy, float size, const char *text, D3DCOL
         const int k = atoi(text + 2);
         if (k >= 0 && k < EMOJI_COUNT && EmojiTex(k))
         {
-            UiImage(EmojiTex(k), x, cy - size * 0.75f, size * 1.5f, size * 1.5f, 0, D3DCOLOR_ARGB(255, 255, 255, 255));
+            EmojiDraw(k, x, cy - size * 0.75f, size * 1.5f, D3DCOLOR_ARGB(255, 255, 255, 255));
             return size * 1.5f;
         }
     }
@@ -2429,7 +2429,7 @@ static void NetOverlayDraw(IDirect3DDevice9 *dev)
             const float ex = x + 24 + k * 65, ey = y + 18;
             const int on = s_qcRow == 0 && s_qcCol == k;
             if (on) UiRoundRect(ex - 4, ey - 4, 60, 60, 12, UI_COL_SELECT, UI_COL_SELECT);
-            if (EmojiTex(k)) UiImage(EmojiTex(k), ex + 2, ey + 2, 48, 48, 0, D3DCOLOR_ARGB(255, 255, 255, 255));
+            EmojiDraw(k, ex + 2, ey + 2, 48, D3DCOLOR_ARGB(255, 255, 255, 255));
         }
         {
             // The texts' tabs (LB/RB), the one shown lit.

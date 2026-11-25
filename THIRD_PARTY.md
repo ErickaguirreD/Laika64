@@ -108,3 +108,14 @@ The S2DEX2 background command (`bg_copy` in `core/hle/h64_gfx.cpp`) reads the `u
 ZSortp (Mia Hamm Soccer 64) in the graphics HLE follows GLideN64's `uCodes/ZSort.cpp` (same commit, GPL v2): command numbers, the zHeader object lists, the zSortVDest layout, the DMEM bias, MultMPMTX/Lighting/XFMLight; studied and rewritten.
 
 Boss Game Studios' ZSort microcode (World Driver Championship, Stunt Racer 64) follows GLideN64's `uCodes/ZSortBOSS.cpp` and `RSP.cpp` (same commit, GPL v2): command numbers, the main/sub display lists and their signals, matrices and vertex transform, object lists, the update mask, and the four audio commands; studied and rewritten.
+
+## Fluent Emoji Animated (the animated avatars)
+
+platform/xbox360/xb_avatars3.h holds 209 of Microsoft's Fluent Emoji Animated (https://github.com/microsoft/fluentui-emoji-animated),
+made 64x64 and 16 frames each by tools/avatars/make_avatars3.py. MIT License, Copyright (c) Microsoft Corporation:
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files
+(the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions: The above copyright notice and this permission notice shall be included in all copies or
+substantial portions of the Software. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED.

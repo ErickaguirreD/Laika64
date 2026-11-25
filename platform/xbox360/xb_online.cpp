@@ -1,6 +1,7 @@
 // LAIKA 64 - online play: the player's profile and the server's lists (see xb_online.h).
 
 #include <xtl.h>
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1368,6 +1369,25 @@ int OnlineRooms(std::vector<OnlineRoomInfo> *out)
     return 1;
 }
 
+// The general chat's quick messages (3.6, Play online's X): "@qNN" (a quick chat text, two digits after a space or at
+// the start) read in this console's language; the emojis ("@eNN") stay for RichText.
+static std::string qc_expand(const std::string &s)
+{
+    std::string out;
+    size_t i = 0;
+    while (i < s.size())
+    {
+        if (s[i] == '@' && i + 3 < s.size() + 0 && s[i + 1] == 'q' && isdigit((unsigned char)s[i + 2]) && isdigit((unsigned char)s[i + 3]) &&
+            (i == 0 || s[i - 1] == ' ') && (i + 4 == s.size() || s[i + 4] == ' '))
+        {
+            const int n = (s[i + 2] - '0') * 10 + (s[i + 3] - '0');
+            if (n < 34) { out += Tr(T_QC_1 + n); i += 4; continue; }
+        }
+        out += s[i++];
+    }
+    return out;
+}
+
 int OnlineChatGet(int since, std::vector<OnlineChatLine> *out)
 {
     std::vector<std::string> rows;
@@ -1383,14 +1403,40 @@ int OnlineChatGet(int since, std::vector<OnlineChatLine> *out)
         m.id = atoi(field(rows[k], 0).c_str());
         copy(m.tag, sizeof(m.tag), field(rows[k], 1).c_str());
         m.avatar = atoi(field(rows[k], 2).c_str());
-        m.text = field(rows[k], 3);
+        m.text = qc_expand(field(rows[k], 3));
         chat_when(m.when, atoi(field(rows[k], 4).c_str()));
+        m.daysAgo = days_ago(atoi(field(rows[k], 4).c_str()));
         if (m.id) out->push_back(m);
     }
     return 1;
 }
 
-// A player online of /v1/lobby: "U name country avatar status room ms conn". 1 when it names one.
+int OnlineChatBefore(int before, std::vector<OnlineChatLine> *out)
+{
+    std::vector<std::string> rows;
+    std::string q;
+    size_t k;
+    out->clear();
+    add(&q, "before", before);
+    if (!request_me("chat", q, &rows)) return 0;
+    for (k = 0; k < rows.size(); k++)
+    {
+        // id tag avatar text ago (a server without "before" sends the last ones: those not before it are left out)
+        OnlineChatLine m;
+        const int ago = atoi(field(rows[k], 4).c_str());
+        m.id = atoi(field(rows[k], 0).c_str());
+        copy(m.tag, sizeof(m.tag), field(rows[k], 1).c_str());
+        m.avatar = atoi(field(rows[k], 2).c_str());
+        m.text = qc_expand(field(rows[k], 3));
+        chat_when(m.when, ago);
+        m.daysAgo = days_ago(ago);
+        if (m.id && m.id < before) out->push_back(m);
+    }
+    return 1;
+}
+
+// A player online of /v1/lobby: "U name country avatar status room ms conn playing" (playing: the seconds it has
+// played what its status says - newer servers). 1 when it names one.
 static int user_row(const std::string &r, OnlineUser *u)
 {
     memset(u, 0, sizeof(*u));
@@ -1401,6 +1447,7 @@ static int user_row(const std::string &r, OnlineUser *u)
     u->inRoom = atoi(field(r, 5).c_str());
     u->ms = atoi(field(r, 6).c_str());
     u->conn = atoi(field(r, 7).c_str());
+    u->playSecs = atoi(field(r, 8).c_str());
     u->online = 1;
     return u->name[0] != 0;
 }
@@ -1483,8 +1530,9 @@ static void lobby_parse(const std::vector<std::string> &rows, std::vector<Online
             m.id = atoi(field(r, 1).c_str());
             copy(m.tag, sizeof(m.tag), field(r, 2).c_str());
             m.avatar = atoi(field(r, 3).c_str());
-            m.text = field(r, 4);
+            m.text = qc_expand(field(r, 4));
             chat_when(m.when, atoi(field(r, 5).c_str()));
+            m.daysAgo = days_ago(atoi(field(r, 5).c_str()));
             if (m.id) chat->push_back(m);
         }
     }

@@ -224,6 +224,10 @@ float kbd_draw_tabs(const OnlineKbd *k, float x, float cy);
 // The emojis of the online chats (xb_emojis.h, main.cpp): each one's picture (made when first wanted), how many.
 IDirect3DTexture9 *EmojiTex(int k);
 int EmojiCount(void);
+// An emoji drawn s x s from (x, y): its animation (xb_emojis_anim.h: Fluent Emoji Animated) when it has one, else its
+// picture (EmojiTex); colour's alpha applied. How many emojis there are in all (3.6: 22; xb_emojis.h's 14 first).
+void EmojiDraw(int k, float x, float y, float s, D3DCOLOR color);
+int EmojiAllCount(void);
 // A message's text with its emojis in it ("@eNN": two digits; a message "@eN" alone: that emoji), from x on cy, words
 // wrapped at maxW over maxLines lines 1.35 x size apart (the last one cut with "..." when more is left). draw 0: only
 // measured. Returns the lines; *widest (or NULL) the widest one's width.

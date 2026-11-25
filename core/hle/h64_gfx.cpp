@@ -1328,6 +1328,12 @@ static void triangle_body(H64Gfx *g, u32 i0, u32 i1, u32 i2)
         if (area == 0) return;
         if ((gm & GM_CULL_BACK) && area > 0) return;
         if ((gm & GM_CULL_FRONT) && area < 0) return;
+        // Every corner deeper than the RDP's depth range (past the far plane):
+        // F3DEX2 sends no triangle. Command & Conquer's briefings draw a
+        // depth-only quad there over the speaker's face (z ~39700): drawn, a
+        // black box; the LLE RSP draws none. GitHub issue #11.
+        if (g->uc->type == UC_F3DEX2 && (gm & GM_ZBUFFER) && v[0]->pz > 32767.0f && v[1]->pz > 32767.0f && v[2]->pz > 32767.0f)
+            return;
         if (gm & GM_ZBUFFER) flags |= H64_TRI_ZBUFFER;
         if (gm & GM_SHADE) flags |= H64_TRI_SHADE;
         if (g->texOn) flags |= H64_TRI_TEXTURE;
@@ -1445,6 +1451,14 @@ static void triangle_body(H64Gfx *g, u32 i0, u32 i1, u32 i2)
     if (area == 0) return;
     if ((gm & GM_CULL_BACK) && area > 0) return;
     if ((gm & GM_CULL_FRONT) && area < 0) return;
+    if (g->uc->type == UC_F3DEX2 && (gm & GM_ZBUFFER))
+    {
+        // Every corner deeper than the RDP's depth range (past the far plane):
+        // F3DEX2 sends no triangle (Command & Conquer's briefing quad over the
+        // face; the LLE RSP draws none there).
+        for (k = 0; k < n && sv[k].z > 32767.0f; k++) {}
+        if (k == n) return;
+    }
 
     if (gm & GM_ZBUFFER) flags |= H64_TRI_ZBUFFER;
     if (gm & GM_SHADE) flags |= H64_TRI_SHADE;
@@ -2508,6 +2522,13 @@ static void bg_1cyc_part(H64Gfx *g, u32 ptr, u32 fmt, u32 siz, u32 pal, u32 bpp,
         {
             texW = ((sa & 31) + xw * scaleW / 128) / 32 + 2;
             if (texW > imageW - (sa >> 5)) texW = imageW - (sa >> 5);
+            if (siz == 0)
+            {
+                // 4-bit texels go to TMEM as 8-bit ones (the RDP loads no 4-bit
+                // tile): from an even texel, an even count of them.
+                texW = (texW + ((sa >> 5) & 1) + 1) & ~1;
+                if (texW > imageW - ((sa >> 5) & ~1)) texW = (imageW - ((sa >> 5) & ~1)) & ~1;
+            }
             lineBytes = ((u32)texW * bpp + 63) / 64 * 8;
             if (lineBytes * 2 <= tmemBytes || xw <= 4) break;
             xw = (xw / 2 + 3) & ~3;
@@ -2515,7 +2536,10 @@ static void bg_1cyc_part(H64Gfx *g, u32 ptr, u32 fmt, u32 siz, u32 pal, u32 bpp,
         if (lineBytes * 2 > tmemBytes) { g->abort = 1; return; }
         for (ya = 0; ya < frameH; ya = yh)
         {
-            s32 ta = imageY + ya * scaleH / 128, ty0 = ta >> 5, fit = (s32)(tmemBytes / lineBytes), tyMax, rows, sx0 = sa >> 5;
+            s32 ta = imageY + ya * scaleH / 128, ty0 = ta >> 5, fit = (s32)(tmemBytes / lineBytes), tyMax, rows;
+            s32 sx0 = siz == 0 ? (sa >> 5) & ~1 : sa >> 5;
+            u32 lsiz = siz == 0 ? 1 : siz, lsx0 = siz == 0 ? (u32)sx0 / 2 : (u32)sx0, lsx1 = siz == 0 ? (u32)(sx0 + texW) / 2 - 1 : (u32)(sx0 + texW - 1);
+            u32 lstride = siz == 0 ? (u32)strideW / 2 : (u32)strideW;
             u32 line = lineBytes / 8, xh = (u32)(frameX + xa), yt = (u32)(frameY + ya), xl, yl;
             u64 w[2];
             // Screen rows whose texel rows (and the next, bilinear) are in this band.
@@ -2530,11 +2554,11 @@ static void bg_1cyc_part(H64Gfx *g, u32 ptr, u32 fmt, u32 siz, u32 pal, u32 bpp,
             if (rows < 1) break;
             xl = xh + (u32)xw;
             yl = yt + (u32)(yh - ya);
-            out_rdp1(g, 0xFD000000u | (fmt << 21) | (siz << 19) | (u32)(strideW - 1), ptr);                   // SETTIMG
-            out_rdp1(g, 0xF5000000u | (fmt << 21) | (siz << 19) | (line << 9), 0x07000000u);                 // SETTILE 7
+            out_rdp1(g, 0xFD000000u | (fmt << 21) | (lsiz << 19) | (lstride - 1), ptr);                       // SETTIMG
+            out_rdp1(g, 0xF5000000u | (fmt << 21) | (lsiz << 19) | (line << 9), 0x07000000u);                // SETTILE 7
             out_rdp1(g, 0xE6000000u, 0);                                                                     // LOADSYNC
-            out_rdp1(g, 0xF4000000u | ((u32)sx0 << 14) | ((u32)ty0 << 2),
-                     0x07000000u | ((u32)(sx0 + texW - 1) << 14) | ((u32)(ty0 + rows - 1) << 2));            // LOADTILE
+            out_rdp1(g, 0xF4000000u | (lsx0 << 14) | ((u32)ty0 << 2),
+                     0x07000000u | (lsx1 << 14) | ((u32)(ty0 + rows - 1) << 2));                             // LOADTILE
             out_rdp1(g, 0xE7000000u, 0);                                                                     // PIPESYNC
             out_rdp1(g, 0xF5000000u | (fmt << 21) | (siz << 19) | (line << 9),
                      ((pal & 15) << 20) | (2u << 18) | (2u << 8));                                           // SETTILE 0, clamped
@@ -2571,7 +2595,7 @@ static void bg_1cyc(H64Gfx *g, u32 addr)
         if (limW > 0 && frameW > limW) frameW = limW;
         if (limH > 0 && frameH > limH) frameH = limH;
     }
-    if (flip || (siz != 1 && siz != 2) || cycle > 1 || imageW <= 0 || imageH <= 0 || scaleW <= 0 || scaleH <= 0)
+    if (flip || siz > 2 || cycle > 1 || imageW <= 0 || imageH <= 0 || scaleW <= 0 || scaleH <= 0)
     {
         g->abort = 1;   // not handled here: the LLE RSP draws it
         return;

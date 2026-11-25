@@ -14,6 +14,7 @@
 #include "xb_audio.h"
 #include "xb_lang.h"
 #include "xb_logo.h"
+#include "xb_logo_anim.h"
 #include "xb_online_logo.h"
 #include "xb_logo_variants.h"
 #include "xb_ui_atlas.h"
@@ -2042,11 +2043,45 @@ IDirect3DTexture9 *UiLaikaEmblem(void)
     return s_emblem;
 }
 
+// The animated logo (xb_logo_anim.h): its atlas of frames, made on first use, kept.
+static IDirect3DTexture9 *brand_anim_tex(void)
+{
+    static IDirect3DTexture9 *s_tex;
+    static int s_tried;
+    if (!s_tried && s_dev)
+    {
+        int pw = 0, ph = 0;
+        unsigned char *rgba = h64_png_decode(s_logoAnimPng, sizeof(s_logoAnimPng), &pw, &ph, 2048 * 1024);
+        s_tried = 1;
+        if (rgba) { s_tex = UiImageCreate(s_dev, rgba, pw, ph); free(rgba); }
+    }
+    return s_tex;
+}
+
 float UiBrand(float x, float cy, float size)
 {
-    // The LAIKA 64 logo (mark and name in one picture), whatever the skin.
+    // The LAIKA 64 logo (mark and name in one picture), whatever the skin; animated in its own colours.
     float pw, ph, lh = size * 1.9f, lw;
-    IDirect3DTexture9 *tex = brand_tex(&pw, &ph);
+    IDirect3DTexture9 *tex;
+    if (s_logoVarShown < 0 && (tex = brand_anim_tex()) != NULL)
+    {
+        const int rows = (UI_LOGO_ANIM_FRAMES + UI_LOGO_ANIM_COLS - 1) / UI_LOGO_ANIM_COLS;
+        const int f = (int)(UiTime() * 1000.0f / UI_LOGO_ANIM_MS) % UI_LOGO_ANIM_FRAMES;
+        const float u0 = (float)(f % UI_LOGO_ANIM_COLS) / UI_LOGO_ANIM_COLS, u1 = u0 + 1.0f / UI_LOGO_ANIM_COLS;
+        const float v0 = (float)(f / UI_LOGO_ANIM_COLS) / rows, v1 = v0 + 1.0f / rows;
+        float xy[6], uv[6];
+        lw = lh * UI_LOGO_ANIM_W / UI_LOGO_ANIM_H;
+        UiQuadsBegin(tex);
+        xy[0] = x; xy[1] = cy - lh * 0.5f; xy[2] = x + lw; xy[3] = xy[1]; xy[4] = x; xy[5] = cy + lh * 0.5f;
+        uv[0] = u0; uv[1] = v0; uv[2] = u1; uv[3] = v0; uv[4] = u0; uv[5] = v1;
+        UiTrisAdd(xy, uv, D3DCOLOR_ARGB(255, 255, 255, 255));
+        xy[0] = x + lw; xy[1] = cy - lh * 0.5f; xy[2] = x + lw; xy[3] = cy + lh * 0.5f; xy[4] = x; xy[5] = xy[3];
+        uv[0] = u1; uv[1] = v0; uv[2] = u1; uv[3] = v1; uv[4] = u0; uv[5] = v1;
+        UiTrisAdd(xy, uv, D3DCOLOR_ARGB(255, 255, 255, 255));
+        UiQuadsEnd();
+        return lw;
+    }
+    tex = brand_tex(&pw, &ph);
     lw = lh * pw / ph;
     if (tex) UiImage(tex, x, cy - lh * 0.5f, lw, lh, 0.0f, D3DCOLOR_ARGB(255, 255, 255, 255));
     else UiText(UI_BOLD, size, x, cy, UI_COL_TEXT, "LAIKA 64", UI_LEFT);
@@ -2075,7 +2110,7 @@ void UiOnlineLogo(float cx, float cy, float h, float alpha)
 float UiBrandWidth(float size)
 {
     int v = s_logoVarShown;
-    return size * 1.9f * (v >= 0 && v < UI_LOGO_VAR_COUNT ? s_logoVarW[v] / 192.0f : (float)UI_LAIKA_LOGO_W / UI_LAIKA_LOGO_H);
+    return size * 1.9f * (v >= 0 && v < UI_LOGO_VAR_COUNT ? s_logoVarW[v] / 192.0f : (float)UI_LOGO_ANIM_W / UI_LOGO_ANIM_H);
 }
 
 void UiBrandFit(float x, float y, float w, float h)

@@ -2321,7 +2321,17 @@ int ArtKeyFromCode(const char *name, const char *code, char *key)
     strncpy(rom.name, name, sizeof(rom.name) - 1);
     strncpy(rom.gameCode, gc, sizeof(rom.gameCode) - 1);
     rom.crc1 = (u32)crc;
-    art_key(&rom, key);
+    {
+        // Known by its CRC1 only: the catalogue by it says hack or original, as rom_is_hack does with both CRCs for a
+        // ROM file. (art_key with no CRC2 found nothing in the catalogue and took every original for a hack: "X<crc>"
+        // instead of its code's key, and the ranking and the profiles showed only the hacks' boxes.)
+        const int k = h64_rom_catalogue_crc1(rom.crc1);
+        int i, code = 1;
+        for (i = 0; i < 4; i++)
+            code = code && ((rom.gameCode[i] >= 'A' && rom.gameCode[i] <= 'Z') || (rom.gameCode[i] >= '0' && rom.gameCode[i] <= '9'));
+        if (k == H64_ROMKIND_HACK || k == H64_ROMKIND_OTHER || (k == H64_ROMKIND_UNKNOWN && code)) sprintf(key, "X%08X", (unsigned)rom.crc1);
+        else h64_gameinfo_key(rom.gameCode, rom.crc1, key);
+    }
     return 1;
 }
 

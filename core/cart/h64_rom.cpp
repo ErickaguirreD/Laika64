@@ -173,3 +173,17 @@ int h64_rom_catalogue(u32 crc1, u32 crc2, const char **name)
     }
     return H64_ROMKIND_UNKNOWN;
 }
+
+int h64_rom_catalogue_crc1(u32 crc1)
+{
+    int lo = 0, hi = (int)(sizeof(s_romDb) / sizeof(s_romDb[0])) - 1;
+    while (lo <= hi)   // sorted by CRC1 first
+    {
+        int mid = (lo + hi) / 2;
+        const RomDbEntry *e = &s_romDb[mid];
+        if (e->crc1 == crc1) return e->kind;
+        if (e->crc1 < crc1) lo = mid + 1;
+        else hi = mid - 1;
+    }
+    return H64_ROMKIND_UNKNOWN;
+}

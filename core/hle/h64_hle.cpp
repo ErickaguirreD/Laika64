@@ -270,6 +270,7 @@ static ucode_func_t try_normal_task_detection(struct hle_t *hle)
     case 0x2c85a: return &jpeg_decode_PS0;   // Pokemon Stadium (J)
     case 0x2caa6: return &jpeg_decode_PS;    // Ocarina of Time, Pokemon Stadium 1 and 2
     case 0x130de: case 0x278b0: return &jpeg_decode_OB;   // Ogre Battle 64, Bottom of the 9th
+    case 0xd33e: return &npn_video_task;     // Pokemon Puzzle League's movie (type 7)
     }
     return NULL;
 }
@@ -788,10 +789,11 @@ int h64_hle_try_task(H64System *sys, u32 *statusBits, u32 *busyCycles, int *dpIn
     }
 
     hle->forwarded = 0;
+    hle->taskCycles = 0;
     hle->sp_status = 0;
     hle->dirtyLo = hle->dirtyHi = 0;
     hle->dirtyCount = 0;
-    if (sys->asyncAudioStart && !sys->options.hleAudioCheck && info->uc_pfunc != &forward_task)
+    if (sys->asyncAudioStart && !sys->options.hleAudioCheck && info->uc_pfunc != &forward_task && info->uc_pfunc != &npn_video_task)
     {
         // On the audio worker; the end (status bits, RDRAM output) is taken at
         // the end of the busy time, where the CPU waits for it.
@@ -832,6 +834,6 @@ int h64_hle_try_task(H64System *sys, u32 *statusBits, u32 *busyCycles, int *dpIn
 
     hle_notify_dirty(sys, hle);
     *statusBits = hle->sp_status;
-    *busyCycles = H64_HLE_AUDIO_CYCLES;
+    *busyCycles = hle->taskCycles ? hle->taskCycles : H64_HLE_AUDIO_CYCLES;
     return 1;
 }
