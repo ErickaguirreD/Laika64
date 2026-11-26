@@ -214,6 +214,9 @@ async function profiles(cmd, q, request, env) {
         db.prepare("SELECT u.name, u.avatar FROM requests r JOIN users u ON u.id = r.from_id WHERE r.to_id = ? ORDER BY r.at LIMIT 20").bind(me),
         db.prepare("SELECT d.id, u.name, d.text FROM dm d JOIN users u ON u.id = d.from_id WHERE d.to_id = ? AND d.id > ? ORDER BY d.id LIMIT 20").bind(me, since),
       ]);
+      // The messages handed to this console: delivered (the sender's two grey ticks).
+      if (msgs.results.length)
+        await db.prepare("UPDATE dm SET got = ? WHERE to_id = ? AND got = 0 AND id <= ?").bind(t, me, msgs.results[msgs.results.length - 1].id).run();
       return ["OK", ...(cc !== "--" ? ["c\t" + cc] : []), ...(latest ? ["u\t" + latest] : []), ...friends.results.map((f) => ["f", f.name, t - f.seen < ONLINE_S ? 1 : 0, f.avatar].join("\t")),
         ...asked.results.map((r) => ["r", r.name, r.avatar].join("\t")), ...msgs.results.map((m) => ["m", m.id, m.name, m.text].join("\t"))];
     }
@@ -296,10 +299,14 @@ async function profiles(cmd, q, request, env) {
       const other = await db.prepare("SELECT id FROM users WHERE lower = ?").bind((q.get("with") ?? "").toLowerCase()).first();
       if (!other) return ["ERR name"];
       const since = Math.max(0, parseInt(q.get("since") ?? "0", 10) || 0);
-      const { results } = await db.prepare("SELECT id, from_id, text, at FROM dm WHERE ((from_id = ?1 AND to_id = ?2) OR (from_id = ?2 AND to_id = ?1)) AND id > ?3 " +
+      // Opened: the friend's messages to this player seen (their sender's blue ticks).
+      await db.prepare("UPDATE dm SET seen = ?1, got = CASE WHEN got = 0 THEN ?1 ELSE got END WHERE to_id = ?2 AND from_id = ?3 AND seen = 0").bind(t, me, other.id).run();
+      const { results } = await db.prepare("SELECT id, from_id, text, at, got, seen FROM dm WHERE ((from_id = ?1 AND to_id = ?2) OR (from_id = ?2 AND to_id = ?1)) AND id > ?3 " +
         "ORDER BY id DESC LIMIT 40").bind(me, other.id, since).all();
-      // How long ago each was sent (seconds; as the general chat's): the console shows its time and day.
-      return ["OK", ...results.reverse().map((m) => [m.id, m.from_id === me ? 1 : 0, m.text, Math.max(0, t - m.at)].join("\t"))];
+      // How long ago each was sent (seconds; as the general chat's): the console shows its time and day. Then, for the
+      // player's own, its state (0 sent, 1 delivered, 2 seen; "" for the friend's): a LAIKA before 3.6.1 reads 4 fields.
+      return ["OK", ...results.reverse().map((m) => [m.id, m.from_id === me ? 1 : 0, m.text, Math.max(0, t - m.at),
+        m.from_id === me ? (m.seen ? 2 : m.got ? 1 : 0) : ""].join("\t"))];
     }
     case "lobby": {
       const since = Math.max(0, parseInt(q.get("since") ?? "0", 10) || 0);

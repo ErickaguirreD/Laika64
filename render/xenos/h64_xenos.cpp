@@ -107,6 +107,12 @@ struct FbSlot
     int cleanSnap;          // they went into the RDRAM snapshot of job cleanGen only (not RDRAM)
     u32 cleanGen;
     u32 lastUse;
+    // Profile gfxCpuOverGpu: a hash of each line of its RDRAM when the GPU started drawing into it (the GPU leaves
+    // RDRAM as it was): a line changed since was written by the CPU (Halo 64's heap), not to be copied back over.
+#define FB_SIG_ROWS 480
+    u32 sig[FB_SIG_ROWS];
+    u32 sigRowBytes, sigRows;
+    int sigValid;
 };
 
 // A texture load kept for replay (resolve_loads).
@@ -249,6 +255,7 @@ struct Xenos
     // each change of colour image let the characters inside Conker's pub
     // show through the closed door (it draws small images mid-frame).
     u32 edramDepthAddr;
+    u32 lastDepthAddr;   // the depth image last drawn with (profile gfxCpuOverGpu: a fill there is a depth clear)
     std::vector<u32> copyBuf;
     IDirect3DSurface9 *rbSurf;     // EDRAM target at EDRAM_READBACK
     IDirect3DTexture9 *rbTex;      // its resolve, in CPU-cached memory (D3DUSAGE_CPU_CACHED_MEMORY)
@@ -1528,6 +1535,7 @@ static u32 fb_height(const Xenos *x, u32 width)
     // showed its top half stretched over the screen).
     if (x->sys->options.gfxTallFrame && width <= 320 && (x->sys->vi.regs[2] & 0xFFF) == width * 2) return 480;
     if (x->tallH && width == x->tallW) return x->tallH;
+    if (x->sys->options.gfxWide240 && width > 320 && !(x->sys->vi.regs[0] & 0x40)) return 240;   // VI not interlaced
     return width <= 320 ? 240 : width * 3 / 4;
 }
 
@@ -2081,6 +2089,41 @@ static void frame_to_rdram(Xenos *x, int slot)
     x->stats.tCopyBack += h64_prof_now(x->sys) - t0;
 }
 
+// Profile gfxCpuOverGpu: one line of an image's RDRAM, hashed (all of it: a malloc header is a few bytes).
+static u32 fb_row_sig(const u8 *ram, u32 a, u32 rowBytes)
+{
+    u32 h = 0x811C9DC5u, i;
+    for (i = 0; i + 4 <= rowBytes; i += 4) h = (h ^ h64_load_be32(ram + a + i)) * 16777619u;
+    return h;
+}
+
+static void fb_sig_rows(Xenos *x, FbSlot *s, u32 r0, u32 r1)
+{
+    u32 y;
+    for (y = r0; y < r1 && y < s->sigRows; y++) s->sig[y] = fb_row_sig(x->sys->rdram, s->addr + y * s->sigRowBytes, s->sigRowBytes);
+}
+
+static void fb_sig_take(Xenos *x, FbSlot *s)
+{
+    u32 rows = s->height ? s->height : 240, rowBytes = s->width * s->bytes;
+    s->sigValid = 0;
+    if (!rowBytes || rows > FB_SIG_ROWS || s->addr + rows * rowBytes > H64_RDRAM_SIZE) return;
+    s->sigRowBytes = rowBytes;
+    s->sigRows = rows;
+    fb_sig_rows(x, s, 0, rows);
+    s->sigValid = 1;
+}
+
+// Whether the CPU wrote over lines [r0, r1) of the image since the GPU started drawing into it.
+static int fb_cpu_wrote(Xenos *x, const FbSlot *s, u32 r0, u32 r1)
+{
+    u32 y;
+    if (!s->sigValid || s->sigRowBytes != s->width * s->bytes) return 0;
+    for (y = r0; y < r1 && y < s->sigRows; y++)
+        if (fb_row_sig(x->sys->rdram, s->addr + y * s->sigRowBytes, s->sigRowBytes) != s->sig[y]) return 1;
+    return 0;
+}
+
 // Makes the N64 target hold the colour image the RDP draws to now.
 static void select_framebuffer(Xenos *x)
 {
@@ -2122,6 +2165,7 @@ static void select_framebuffer(Xenos *x)
         s->addr = addr;
         s->valid = 0;
         s->drawnH = 0;
+        s->sigValid = 0;   // another image: its own lines are hashed below
         memset(s->latePending, 0, sizeof(s->latePending));   // another image: no copy of the frame before
         memset(s->lateValid, 0, sizeof(s->lateValid));
         s->copyRun = 0;
@@ -2172,6 +2216,8 @@ static void select_framebuffer(Xenos *x)
         x->ramCopyLo = x->ramCopyHi = 0;
         x->stateDirty = 1;
     }
+    {
+    const int wasDirty = s->gpuDirty;
     s->gpuDirty = 1;
     s->ramFresh = 0;
     s->cleanLo = s->cleanHi = 0;
@@ -2183,6 +2229,8 @@ static void select_framebuffer(Xenos *x)
     s->bytes = s->fmt == FB_RGBA8888 ? 4 : (s->fmt == FB_RGBA5551 || s->fmt == FB_IA88) ? 2 : 1;
     s->lastUse = ++x->useCounter;
     x->curSlot = best;
+    if (x->sys->options.gfxCpuOverGpu && (!wasDirty || !s->sigValid)) fb_sig_take(x, s);   // RDRAM as the GPU starts on it
+    }
 }
 
 // Writes a GPU frame back into RDRAM (scaled to the N64 size, in the colour
@@ -2221,6 +2269,17 @@ static void copy_back_rows(Xenos *x, int slot, u32 r0, u32 r1)
     if (s->fmt == FB_I4) { s->gpuDirty = 0; return; }   // 4-bit colour images: not copied back
     if (r1 > hc) r1 = hc;
     if (r0 >= r1) return;
+    if (x->sys->options.gfxCpuOverGpu && !snap && fb_cpu_wrote(x, s, r0, r1))
+    {
+        // The CPU took this memory for something else since the GPU drew here: the GPU's picture is gone.
+        static int s_told;
+        if (s_told++ < 8)
+            H64_INFO("[xenos] image %06X (%u wide): the CPU wrote over it since it was drawn, not copied back", s->addr, w);
+        s->gpuDirty = 0;
+        s->valid = 0;
+        s->sigValid = 0;
+        return;
+    }
     flush_batch(x);
     if (slot == x->curSlot && x->targetBound) resolve_current(x);
     if (!s->tex || !s->valid) return;
@@ -2372,6 +2431,7 @@ static void copy_back_rows(Xenos *x, int slot, u32 r0, u32 r1)
     }
     else
         h64_jit_notify_write(x->sys, s->addr + w * r0 * s->bytes, w * (r1 - r0) * s->bytes);
+    if (!snap && s->sigValid) fb_sig_rows(x, s, r0, r1);   // gfxCpuOverGpu: these lines hold our copy now
     // The lines copied back so far (one range: a separate one replaces it),
     // for this snapshot only if it went into one.
     if (s->cleanSnap != (snap != NULL) || (snap && s->cleanGen != x->st->loadRamGen)) s->cleanLo = s->cleanHi = 0;
@@ -2749,6 +2809,7 @@ static void set_depth(Xenos *x, int hasDepth)
         x->dev->Clear(0, NULL, D3DCLEAR_ZBUFFER, 0, 1.0f, 0);
         x->edramDepthAddr = st->depthAddr & 0xFFFFFF;
     }
+    if (test || update) x->lastDepthAddr = st->depthAddr & 0xFFFFFF;
     x->dev->SetRenderState(D3DRS_ZENABLE, test || update ? TRUE : FALSE);
     x->dev->SetRenderState(D3DRS_ZFUNC, test ? D3DCMP_LESSEQUAL : D3DCMP_ALWAYS);
     x->dev->SetRenderState(D3DRS_ZWRITEENABLE, update && st->zMode != 3 ? TRUE : FALSE);
@@ -3119,7 +3180,10 @@ static void fill_rect(Xenos *x, const u32 *w)
     if (r.y2 > (LONG)x->rtH) r.y2 = (LONG)x->rtH;
     if (r.x1 >= r.x2 || r.y1 >= r.y2) return;
     x->stats.fills++;
-    if ((st->colorAddr & 0xFFFFFF) == (st->depthAddr & 0xFFFFFF))
+    // Profile gfxCpuOverGpu (Halo 64, libdragon's rdpq_attach(zbuf, NULL)): its depth clear is a fill with the depth
+    // image as the colour image and no depth image set again, so it is told by the depth image last drawn with.
+    if ((st->colorAddr & 0xFFFFFF) == (st->depthAddr & 0xFFFFFF) ||
+        (x->sys->options.gfxCpuOverGpu && x->lastDepthAddr && (st->colorAddr & 0xFFFFFF) == x->lastDepthAddr))
     {
         // Filling the depth image: a depth clear of the frame being drawn.
         // Whatever colour image the EDRAM target holds (the depth is separate
@@ -3133,7 +3197,7 @@ static void fill_rect(Xenos *x, const u32 *w)
         // by this fill, as in RDRAM: its slot is dropped. Conker's pause keeps its
         // last frame in the depth image's memory; the slot stayed, and each later
         // load of depth rows copied that old frame back over them.
-        u32 i, depth = st->depthAddr & 0xFFFFFF;
+        u32 i, depth = (st->colorAddr & 0xFFFFFF) == (st->depthAddr & 0xFFFFFF) ? st->depthAddr & 0xFFFFFF : x->lastDepthAddr;
         for (i = 0; i < FB_SLOTS; i++)
         {
             FbSlot *s = &x->fb[i];
@@ -4220,6 +4284,7 @@ H64Renderer *h64_xenos_create(H64System *sys, IDirect3DDevice9 *dev)
     };
     Xenos *x = new Xenos;
     int i;
+    x->lastDepthAddr = 0;
     memset(x->arenaUse, 0, sizeof(x->arenaUse));
     memset(x->presentFence, 0, sizeof(x->presentFence));
     memset(&x->ramLoad, 0, sizeof(x->ramLoad));

@@ -1280,13 +1280,14 @@ static void NetP2pOff(int tell);
 #define NET_BACK_MENU_MS 1200       // BACK held this long: the menu (online), not the quick chat
 #define NET_CHAT_SHOW_MS 14000      // a message stays this long beside the game
 #define NET_CHAT_LINES 8
-#define QC_TEXTS 34   // the quick chat's texts (T_QC_1...): sent as their number, "@q<n>" (the first 8 as before 2.2.2)
-#define QC_CATS 4     // ... in tabs (LB/RB): the game, teasing, notices, greetings - 8 each
+#define QC_TEXTS 40   // the quick chat's texts (T_QC_1...): sent as their number, "@q<n>" (the first 8 as before 2.2.2)
+#define QC_CATS 5     // ... in tabs (LB/RB): the game, teasing, notices, greetings, community - 8 each
 static const unsigned char s_qcTab[QC_CATS][8] = {
     { 0, 1, 3, 6, 8, 9, 10, 11 },          // the game: good game, well played, rematch?, let's go, so close, lucky, I won, one more
     { 12, 13, 14, 15, 16, 17, 18, 19 },    // teasing: the best player, sore loser, that was a cheat...
     { 2, 20, 21, 22, 23, 24, 25, 26 },     // notices: wait a moment, the bathroom, back soon, the internet went...
-    { 4, 5, 7, 27, 28, 29, 30, 31 } };     // greetings: haha, oops, bye, hi, thanks, sorry, good night, see you tomorrow
+    { 4, 5, 7, 27, 28, 29, 30, 31 },       // greetings: haha, oops, bye, hi, thanks, sorry, good night, see you tomorrow
+    { 32, 33, 34, 35, 36, 37, 38, 39 } };  // community: Discord, Telegram, add me, another room, I'll invite you, join my room, tomorrow, fun playing
 struct NetChatLine { char tag[16], text[84]; DWORD at; };
 static NetChatLine s_netChat[NET_CHAT_LINES];   // the last messages, the newest last
 static int s_netChatCount;

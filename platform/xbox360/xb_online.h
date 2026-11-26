@@ -22,6 +22,7 @@
 
 #define ONLINE_TAG_MIN 3
 #define ONLINE_TAG_MAX 15
+#define ONLINE_AVATAR_CUSTOM 1000   // custom avatars (drawn for one player each, xb_avatar_custom.h): from here
 #define ONLINE_AVATARS 1024  // avatar numbers the server keeps (0-1023): xb_avatars.h's (63 the team's), xb_avatars2.h's from 64,
                              // the animated ones (xb_avatars3.h) from 256
 
@@ -75,7 +76,7 @@ int OnlineInvite(const char *name, unsigned code, int *live);
 unsigned OnlineInvitedTo(void);
 
 // ---- Messages between friends ----
-struct OnlineDmLine { int id, mine; std::string text; char when[8]; int daysAgo; };   // when "HH:MM" ("" not known), daysAgo -1 not known
+struct OnlineDmLine { int id, mine; std::string text; char when[8]; int daysAgo; int state; };   // state (own ones): 0 sent, 1 delivered, 2 seen, -1 not known   // when "HH:MM" ("" not known), daysAgo -1 not known
 int OnlineDm(const char *to, const char *text);   // OnlineError "busy": too soon after the last one
 int OnlineConv(const char *with, int since, std::vector<OnlineDmLine> *out);   // the messages with a friend after `since`
 int OnlineUnread(const char *name);   // messages of that friend not read yet ("" : all of them)
@@ -210,6 +211,7 @@ struct OnlineLobby
     int startPlayers, startPort, startLocal;
     unsigned char startOwner[ONLINE_ROOM_PLAYERS + 1];   // each port's console (its first port)
     std::vector<OnlineChatLine> chat;                 // the room's last messages, the newest last
+    std::vector<std::string> ready;                   // the consoles ready (their tags: "@r1"/"@r0" in the chat, not shown)
 };
 int OnlineRoomCreate(const char *name, const char *password, const char *game, u32 crc1, u32 crc2, const char *art, int max, unsigned *code);
 int OnlineRoomJoin(unsigned code, const char *password);

@@ -9,6 +9,7 @@
 #include "../common/h64_endian.h"
 #include "../common/h64_log.h"
 #include "../hle/h64_hle.h"
+#include "h64_rsp_libdragon.h"
 #include "../rdp/h64_rdp.h"
 #include "../system/h64_system.h"
 
@@ -219,6 +220,7 @@ void h64_rsp_reset(H64System *sys)
     rsp->current.length = 0xFF8;
     rsp->pending.length = 0;
     h64_rsp_vu_init_tables(rsp);
+    h64_rsp_libdragon_imem_written();
     {
         H64RspOp nop;
         u32 i;
@@ -251,6 +253,7 @@ void h64_sp_dma_event(H64System *sys)
     u32 i;
     if (!rsp->dmaBusy) return;
     if (d->toRdram) h64_jit_notify_write(sys, d->dramAddr & 0xFFFFF8, d->length + 8);
+    else if (d->memAddr & 0x1000) h64_rsp_libdragon_imem_written();   // libdragon HLE: commands looked for again
     for (i = 0; i <= d->length; i += 8)
     {
         u32 m = (d->memAddr & 0x1000) | (d->memAddr & 0xFF8);
@@ -433,7 +436,15 @@ static void do_break(H64System *sys)
 // COP0: SP registers (0..7) and DP registers (8..15).
 static u32 cop0_read(H64System *sys, u32 rd)
 {
+    H64Rsp *rsp = &sys->rsp;
     if (rd & 8) return h64_dp_read(sys, rd & 7);
+    if (sys->options.rspFast && (rd & 7) >= 4 && (rd & 7) <= 6)
+    {
+        // Profile rspFast: the microcode waits for its DMA (SP_STATUS, DMA_FULL, DMA_BUSY in a loop): done now. Its end
+        // is a scheduler event the CPU side takes, so the RSP spun the whole of its slice in that loop (58% of Halo
+        // 64's RSP instructions).
+        while (rsp->dmaBusy) h64_sp_dma_event(sys);
+    }
     return h64_sp_read(sys, rd & 7);
 }
 
@@ -574,6 +585,53 @@ void h64_rsp_advance(H64System *sys, u32 cpuCycles)
     if ((rsp->status & ST_HALT) || rsp->hleBusy) return;
     // 2 RCP cycles per 3 CPU cycles; a group of n RCP cycles costs 3n.
     rsp->cycleFrac += (s32)(cpuCycles * 2);
+    if (sys->options.rspFast)
+    {
+        // Profile rspFast: one instruction for 2/3 of an RCP cycle (2 of the 3 units), no pipeline model.
+        // Profile libdragonHle: libdragon's queue jumps to each command with "jr cmd; li ra, RSPQ_Loop"; at that
+        // entry a command known in C runs there, and the RSP goes on at RSPQ_Loop (not state: a jump in flight).
+        static u32 s_ldEntry = 0xFFFFFFFF, s_ldCmd, s_ldLoop;
+        while (rsp->cycleFrac >= 2)
+        {
+            u32 pc0 = rsp->pc & 0xFFC, w0;
+            if (pc0 == s_ldEntry)
+            {
+                u32 cycles = 0;
+                s_ldEntry = 0xFFFFFFFF;
+                if (h64_rsp_libdragon_command(sys, pc0, s_ldCmd, &cycles))
+                {
+                    rsp->pc = s_ldLoop;
+                    rsp->nextPc = (s_ldLoop + 4) & 0xFFF;
+                    rsp->cycleFrac -= 3 * (s32)cycles;
+                    if (rsp->status & ST_HALT) { rsp->cycleFrac = 0; return; }
+                    continue;
+                }
+            }
+            w0 = h64_load_be32(imem(sys) + pc0);
+            if (sys->options.libdragonHle && (w0 & 0xFC1FFFFF) == 0x00000008)
+            {
+                const u32 ds = h64_load_be32(imem(sys) + ((pc0 + 4) & 0xFFC));
+                if ((ds >> 16) == 0x241F || (ds >> 16) == 0x341F)
+                {
+                    s_ldEntry = rsp->r[(w0 >> 21) & 31] & 0xFFC;
+                    s_ldCmd = rsp->r[4] >> 24;
+                    s_ldLoop = ds & 0xFFC;
+                }
+            }
+            exec_next(sys, w0);
+            rsp->branchTaken = 0;
+            rsp->cycleFrac -= 2;
+            rsp->clocks++;
+            if (rsp->status & ST_SSTEP) rsp->status |= ST_HALT;
+            if (rsp->status & ST_HALT)
+            {
+                rsp->cycleFrac = 0;
+                if (sys->options.hleAudioCheck) h64_hle_check_end(sys);
+                return;
+            }
+        }
+        return;
+    }
     while (rsp->cycleFrac >= 3)
     {
         rsp->cycleFrac -= 3 * (s32)h64_rsp_issue(sys);
@@ -610,6 +668,7 @@ void h64_rsp_sync(H64System *sys)
             delta -= c;
         }
         sys->prof[H64_PROF_RSP_LLE] += h64_prof_now(sys) - t0;
+
     }
     rsp->inSync = 0;
 }

@@ -270,6 +270,18 @@ int OnlineSetProfile(const char *country, int avatar)
     return 1;
 }
 
+// Players with an avatar of their own come first in a list (the others keep their order).
+static void custom_first(std::vector<OnlineUser> *users)
+{
+    std::vector<OnlineUser> custom, rest;
+    size_t k;
+    for (k = 0; k < users->size(); k++)
+        ((*users)[k].avatar >= ONLINE_AVATAR_CUSTOM ? custom : rest).push_back((*users)[k]);
+    if (custom.empty()) return;
+    custom.insert(custom.end(), rest.begin(), rest.end());
+    users->swap(custom);
+}
+
 int OnlineList(int kind, int offset, std::vector<OnlineUser> *out)
 {
     std::vector<std::string> rows;
@@ -307,6 +319,7 @@ int OnlineList(int kind, int offset, std::vector<OnlineUser> *out)
         }
         if (u.name[0]) out->push_back(u);
     }
+    if (kind == ONLINE_LIST_USERS || kind == ONLINE_LIST_FRIENDS) custom_first(out);
     return 1;
 }
 
@@ -405,6 +418,7 @@ int OnlineConv(const char *with, int since, std::vector<OnlineDmLine> *out)
         m.text = field(rows[k], 2);
         m.when[0] = 0;
         m.daysAgo = -1;
+        m.state = field(rows[k], 4).empty() ? -1 : atoi(field(rows[k], 4).c_str());   // (a server before 3.6.1: none)
         if (!field(rows[k], 3).empty())
         {
             // Its time and day on this console's clock (a server before 2.2.2 tells neither).
@@ -1381,7 +1395,7 @@ static std::string qc_expand(const std::string &s)
             (i == 0 || s[i - 1] == ' ') && (i + 4 == s.size() || s[i + 4] == ' '))
         {
             const int n = (s[i + 2] - '0') * 10 + (s[i + 3] - '0');
-            if (n < 34) { out += Tr(T_QC_1 + n); i += 4; continue; }
+            if (n < 40) { out += Tr(T_QC_1 + n); i += 4; continue; }   // (QC_TEXTS: main.cpp)
         }
         out += s[i++];
     }
@@ -1536,6 +1550,7 @@ static void lobby_parse(const std::vector<std::string> &rows, std::vector<Online
             if (m.id) chat->push_back(m);
         }
     }
+    custom_first(users);
 }
 
 int OnlineChatSay(const char *text)
@@ -1582,6 +1597,16 @@ void OnlineRoomClose(void)
     s_lobby.game[0] = s_lobby.name[0] = 0;
     s_lobby.crc1 = s_lobby.crc2 = 0;
     s_lobby.chat.clear();
+    s_lobby.ready.clear();
+}
+
+// A console ready or not (its "@r1"/"@r0").
+static void room_set_ready(const char *tag, int on)
+{
+    size_t k;
+    for (k = 0; k < s_lobby.ready.size(); k++)
+        if (s_lobby.ready[k] == tag) { s_lobby.ready.erase(s_lobby.ready.begin() + k); break; }
+    if (on) s_lobby.ready.push_back(tag);
 }
 
 const OnlineLobby *OnlineRoomLobby(void) { return &s_lobby; }
@@ -1658,6 +1683,13 @@ static int room_line(char *line)
         for (size_t k = 0; k < (size_t)s_lobby.count; k++)
             if (!strcmp(s_lobby.tag[k], m.tag)) m.avatar = s_lobby.avatar[k];
         m.text = f[2];
+        if (m.text.size() == 3 && m.text[0] == '@' && m.text[1] == 'r')
+        {
+            // Ready or not: kept apart from the chat's last lines (never shown).
+            room_set_ready(m.tag, m.text[2] == '1');
+            H64_INFO("[online] room: %s %s", m.tag, m.text[2] == '1' ? "ready" : "not ready");
+            return 1;
+        }
         // A quick chat text of the game's ("@q<n>", main.cpp's 8): in this console's language.
         if (m.text.size() == 3 && m.text[0] == '@' && m.text[1] == 'q' && m.text[2] >= '0' && m.text[2] < '8') m.text = Tr(T_QC_1 + (m.text[2] - '0'));
         chat_when(m.when, 0);
@@ -1691,6 +1723,7 @@ static int room_line(char *line)
         for (size_t k = 0; k < (size_t)s_lobby.count; k++)
             if (!strcmp(s_lobby.tag[k], m.tag)) m.avatar = s_lobby.avatar[k];
         m.text = Tr(f[2] == "nogame" ? T_ONLINE_LEFT_NOGAME : f[2] == "gone" ? T_ONLINE_LEFT_GONE : f[2] == "kicked" ? T_ONLINE_LEFT_KICKED : T_ONLINE_LEFT);
+        room_set_ready(m.tag, 0);
         chat_when(m.when, 0);
         s_lobby.chat.push_back(m);
         if (s_lobby.chat.size() > ONLINE_ROOM_CHAT) s_lobby.chat.erase(s_lobby.chat.begin());
@@ -1719,6 +1752,7 @@ static int room_line(char *line)
             if (comma == std::string::npos) break;
             at = comma + 1;
         }
+        s_lobby.ready.clear();   // back in the room after it: nobody ready yet
         return 2;
     }
     if (!strncmp(line, "created ", 8)) { s_lobby.code = (unsigned)atoi(line + 8); return 1; }

@@ -28,21 +28,17 @@ static void vset_byte(u16 *v, u32 i, u8 b)
     else v[i >> 1] = (u16)((v[i >> 1] & 0x00FF) | (b << 8));
 }
 
-// Element selector e (0..15) applied to vt.
-static void vsel(u16 *out, const u16 *in, u32 e)
-{
-    u32 n;
-    for (n = 0; n < 8; n++)
-    {
-        u32 src;
-        if (e < 2) src = n;
-        else if (e == 2) src = n & ~1u;
-        else if (e == 3) src = n | 1u;
-        else if (e < 8) src = (n & 4u) | (e - 4);
-        else src = e - 8;
-        out[n] = in[src];
-    }
-}
+// Element selector e (0..15) applied to vt: the source element of each lane.
+static const u8 s_esel[16][8] = {
+    { 0, 1, 2, 3, 4, 5, 6, 7 }, { 0, 1, 2, 3, 4, 5, 6, 7 },   // vector
+    { 0, 0, 2, 2, 4, 4, 6, 6 }, { 1, 1, 3, 3, 5, 5, 7, 7 },   // 0q 1q
+    { 0, 0, 0, 0, 4, 4, 4, 4 }, { 1, 1, 1, 1, 5, 5, 5, 5 },   // 0h 1h
+    { 2, 2, 2, 2, 6, 6, 6, 6 }, { 3, 3, 3, 3, 7, 7, 7, 7 },   // 2h 3h
+    { 0, 0, 0, 0, 0, 0, 0, 0 }, { 1, 1, 1, 1, 1, 1, 1, 1 },   // 0..7
+    { 2, 2, 2, 2, 2, 2, 2, 2 }, { 3, 3, 3, 3, 3, 3, 3, 3 },
+    { 4, 4, 4, 4, 4, 4, 4, 4 }, { 5, 5, 5, 5, 5, 5, 5, 5 },
+    { 6, 6, 6, 6, 6, 6, 6, 6 }, { 7, 7, 7, 7, 7, 7, 7, 7 },
+};
 
 static int flag(const u16 *f, u32 n) { return f[n] != 0; }
 static int set_flag(u16 *f, u32 n, int v) { f[n] = (u16)(v ? 0xFFFF : 0); return v; }
@@ -151,11 +147,14 @@ static void op_vector(H64Rsp *r, u32 op)
 {
     u32 e = (op >> 21) & 15, vtn = (op >> 16) & 31, vsn = (op >> 11) & 31, vdn = (op >> 6) & 31, de = (op >> 11) & 7;
     u16 *vd = r->vr[vdn];
-    Vec vs, vt, vte, res;
+    Vec vs, vte, res;
+    const u16 *vt = r->vr[vtn];   // read (vt[e & 7], the reciprocals) before vd is written
     u32 n;
     memcpy(vs, r->vr[vsn], sizeof(Vec));
-    memcpy(vt, r->vr[vtn], sizeof(Vec));
-    vsel(vte, vt, e);
+    {
+        const u8 *sel = s_esel[e];
+        for (n = 0; n < 8; n++) vte[n] = vt[sel[n]];
+    }
 
     switch (op & 0x3F)
     {

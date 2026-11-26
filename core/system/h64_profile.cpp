@@ -249,10 +249,11 @@ static const GameProfile s_profiles[] = {
 
 // Options with no bit left in the flags above, set by h64_apply_game_profile.
 enum { H64_GX_SOFT_TINY = 1, H64_GX_TALL_SCISSOR = 2, H64_GX_SOFT_SMALL = 4, H64_GX_COPY_LATE = 8, H64_GX_COPY_SYNC = 16,
-       H64_GX_DEPTH_DROP = 32, H64_GX_FILL_RAM = 64, H64_GX_RDRAM_BOOT = 128, H64_GX_NO_LOAD_COPY = 256 };
+       H64_GX_DEPTH_DROP = 32, H64_GX_FILL_RAM = 64, H64_GX_RDRAM_BOOT = 128, H64_GX_NO_LOAD_COPY = 256,
+       H64_GX_CPU_OVER_GPU = 512, H64_GX_WIDE_240 = 1024, H64_GX_RSP_FAST = 2048, H64_GX_LIBDRAGON_HLE = 4096 };
                                                        // options.gfxSoftTiny, gfxTallScissor, gfxSoftSmall, gfxCopyBackLate,
                                                        // gfxCopyBackSync, gfxDepthDrawDrop, gfxFillOnlyRam, gfxRdramAtBoot,
-                                                       // gfxNoLoadCopy
+                                                       // gfxNoLoadCopy, gfxCpuOverGpu, gfxWide240, rspFast, libdragonHle
 struct GameExtra { const char *code; u32 extra; };
 static const GameExtra s_extras[] = {
     // Each character's shaded palette is drawn into a 16x1 image, then loaded
@@ -299,6 +300,17 @@ static const GameExtra s_extras[] = {
     { "NPN", H64_GX_RDRAM_BOOT | H64_GX_NO_LOAD_COPY },
 };
 
+// Homebrew built with libdragon keeps its generic game code ("NED"): told apart by the start of the header's name.
+struct NamedExtra { const char *code; const char *name; u32 extra; };
+static const NamedExtra s_namedExtras[] = {
+    // Halo 64 (github.com/JackTulli/halo-64; its multiplayer, campaign, Custom Edition and online cartridges): puts
+    // its frames and then its heap and HUD sprites in the same memory. A sprite loaded from where a frame was drawn
+    // copied that old frame back over them: malloc's headers became pixels (a crash at every map's start).
+    // Its matches show a 640 x 240 display (not interlaced): as 640 x 480 images, the top half of the screen only.
+    // Everything on the RSP is LLE (libdragon, tiny3d): ~460 ms a frame in a match with the pipeline model.
+    { "NED", "HALO ", H64_GX_CPU_OVER_GPU | H64_GX_WIDE_240 | H64_GX_RSP_FAST | H64_GX_LIBDRAGON_HLE },
+};
+
 static void apply_idle_yield(H64System *sys);
 
 u32 h64_game_profile(const char *gameCode, const char **name)
@@ -323,6 +335,13 @@ void h64_apply_game_profile(H64System *sys)
     apply_idle_yield(sys);
     for (i = 0; i < sizeof(s_extras) / sizeof(s_extras[0]); i++)
         if (!memcmp(sys->rom.gameCode, s_extras[i].code, 3)) extra = s_extras[i].extra;
+    for (i = 0; i < sizeof(s_namedExtras) / sizeof(s_namedExtras[0]); i++)
+        if (!memcmp(sys->rom.gameCode, s_namedExtras[i].code, 3) &&
+            !strncmp(sys->rom.name, s_namedExtras[i].name, strlen(s_namedExtras[i].name)))
+        {
+            extra = s_namedExtras[i].extra;
+            if (!name) name = sys->rom.name;
+        }
     sys->options.gfxSoftTiny = (extra & H64_GX_SOFT_TINY) != 0;
     sys->options.gfxTallScissor = (extra & H64_GX_TALL_SCISSOR) != 0;
     sys->options.gfxSoftSmall = (extra & H64_GX_SOFT_SMALL) != 0;
@@ -332,6 +351,10 @@ void h64_apply_game_profile(H64System *sys)
     sys->options.gfxFillOnlyRam = (extra & H64_GX_FILL_RAM) != 0;
     sys->options.gfxRdramAtBoot = (extra & H64_GX_RDRAM_BOOT) != 0;
     sys->options.gfxNoLoadCopy = (extra & H64_GX_NO_LOAD_COPY) != 0;
+    sys->options.gfxCpuOverGpu = (extra & H64_GX_CPU_OVER_GPU) != 0;
+    sys->options.gfxWide240 = (extra & H64_GX_WIDE_240) != 0;
+    sys->options.rspFast = (extra & H64_GX_RSP_FAST) != 0;
+    sys->options.libdragonHle = (extra & H64_GX_LIBDRAGON_HLE) != 0;
     if (name) H64_INFO("[profile] %s: flags %X%s", name, f, extra ? " (+ extra options)" : "");
 }
 

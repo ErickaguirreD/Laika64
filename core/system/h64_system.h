@@ -158,6 +158,14 @@ struct H64Options
                             // writes more of it; tasks run on the CPU thread (no graphics worker)
     int gfxCpuWritten;      // deferred rendering (game profile): loads from GPU images the CPU wrote over since
                             // read RDRAM (h64_gfx.cpp, CimgSig)
+    int gfxCpuOverGpu;      // GPU renderer (game profile): a GPU image whose RDRAM the CPU wrote over since it was
+                            // drawn is dropped, never copied back over the CPU's data (Xenos FbSlot.sig)
+    int gfxWide240;         // GPU renderer (game profile): an image wider than 320 is 240 lines tall while the VI is
+                            // not interlaced (Halo 64's 640 x 240 display), not width * 3 / 4
+    int rspFast;            // LLE RSP (game profile): instructions one at a time, 2/3 of an RCP cycle each, without
+                            // the pipeline model (no dual issue, no stalls): faster, and done a little sooner
+    int libdragonHle;       // LLE RSP with rspFast (game profile): known commands of libdragon's queue run in C
+                            // (h64_rsp_libdragon.cpp)
     int gfxCpuSprites;      // GPU renderer (game profile): what the CPU draws into a frame after the RDP is shown
                             // over the GPU's picture (H64System.cpuSprite)
     int gfxCostLog;     // h64test --gfx-cost-log: log each LLE graphics task's RSP time with its HLE counts
