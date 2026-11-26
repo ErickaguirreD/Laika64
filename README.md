@@ -177,7 +177,23 @@ You need Visual Studio 2010 and the Xbox 360 SDK. Open `platform/xbox360/laika64
 
 ## Support the project
 
-LAIKA 64 is free and always will be. If you enjoy it and want to help its development, you can make a voluntary donation through [PayPal](https://paypal.me/ErickAbrahamA). Thank you!
+LAIKA 64 is free and always will be. Your support pays for the online servers and the time to keep improving it. Thank you!
+
+- **Patreon** (monthly, with perks: credits, Discord roles, early access, monthly vote): [patreon.com/LAIKA64](https://www.patreon.com/LAIKA64)
+- **PayPal** (one-time): [paypal.me/ErickAbrahamA](https://paypal.me/ErickAbrahamA)
+- **Crypto** (one-time):
+
+| Coin | Address |
+|---|---|
+| Bitcoin (BTC) | `16jCNKHokn6LrfhVigeDpHbvhPnG1Dbrfo` |
+| Ethereum (ERC20) | `0xbf0432f162ce2aca8f5cd1e82ce44510cf97ce69` |
+| Solana (SOL) | `92Rc4mps8eGT9gK88oCMFH3D4BaQ5SH59E2Yyfpi4XT8` |
+| XRP (XRP Ledger) | `rNxp4h8apvRis6mJf9Sh8C6iRxfrDWN7AV` — **memo / destination tag `486379471` is required**, or the coins are lost |
+
+The same addresses (with QR codes) are in LAIKA 64 itself: Settings > About > Donations.
+
+*Español:* LAIKA 64 es y seguirá siendo gratis. Puedes apoyarlo en [Patreon](https://www.patreon.com/LAIKA64), por PayPal o con las criptomonedas de arriba (en XRP el memo `486379471` es obligatorio).
+*Português:* O LAIKA 64 é e continuará gratuito. Você pode apoiar no [Patreon](https://www.patreon.com/LAIKA64), pelo PayPal ou com as criptomoedas acima (no XRP o memo `486379471` é obrigatório).
 
 ## Credits and licence
 
