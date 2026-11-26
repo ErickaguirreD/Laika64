@@ -1947,11 +1947,11 @@ static const int s_startScreenLabels[3] = { T_START_MENU, T_START_LIST, T_START_
 static int s_notifyPage;             // Interface > Notifications
 static void settings_notify(UiMenu *m, const Config *c);
 static int s_hideHints;              // Config::hideHints (ui_from_config)
-// The ROM list's button prompts: START (Online) pulsing with a soft light so the online mode is seen; none at all
-// with Interface > Hide buttons.
+static int s_viewPanel;              // START's View panel is open over the list (its own button prompts)
+// The ROM list's button prompts (none glowing); none at all with Interface > Hide buttons, nor under the View panel.
 static void browser_footer(int empty)
 {
-    if (!s_hideHints) UiScreenFooterGlowSmall(Tr(empty ? T_FOOT_BROWSER_EMPTY : T_FOOT_BROWSER), "START");   // smaller, as the main menu's
+    if (!s_hideHints && !s_viewPanel) UiScreenFooterSmall(Tr(empty ? T_FOOT_BROWSER_EMPTY : T_FOOT_BROWSER));   // smaller, as the main menu's
 }
 static int s_gameBg;                 // Config::gameBackdrop (ui_from_config)
 static int s_videoBg;                // Config::videoBackdrop: the video behind every view, not over the game's picture
@@ -1972,28 +1972,47 @@ static const int s_designLabels[BD_COUNT] = { T_DESIGN_DETAILED, T_DESIGN_COVERS
                                               T_DESIGN_CARTRIDGE, T_DESIGN_CINEMA, T_DESIGN_BOX3D, T_DESIGN_SINGLE };
 // The views that move one game at a time, left and right (the others are grids, or the list).
 static int design_row(int d) { return d == BD_CAROUSEL || d == BD_SPOTLIGHT || d == BD_CARTRIDGE || d == BD_CINEMA || d == BD_BOX3D || d == BD_SINGLE; }
-// The views that show the 3D boxes (ART_KIND_BOX3D) and nothing else of a game's pictures.
-static int design_box3d(int d) { return d == BD_BOX3D || d == BD_SINGLE; }
-// The views whose games keep one picture: the 3D boxes', and the cartridges' (their own or the shell
-// with the box art; no video, no other pictures taking turns on the label).
-static int design_still(int d) { return design_box3d(d) || d == BD_CARTRIDGE; }
 // The ROM list's animated background (Config::bgEffect; drawn by browser_effect).
 enum { BGFX_OFF = 0, BGFX_WAVES, BGFX_PULSE, BGFX_RAIN, BGFX_VORTEX, BGFX_RIPPLES, BGFX_SILK, BGFX_EMBERS, BGFX_GRID,
        BGFX_UNDERWATER, BGFX_ENERGY, BGFX_AURORA, BGFX_LIQUID, BGFX_PARTICLES, BGFX_SMOKE, BGFX_XMB, BGFX_PS4_FLOW,
        BGFX_PS4_BOKEH, BGFX_NEBULA, BGFX_FIRE_DUST, BGFX_LAVA, BGFX_PRISM, BGFX_TOPO, BGFX_HEX, BGFX_SPIRAL, BGFX_INK, BGFX_HOLO,
-       BGFX_FRACTAL, BGFX_BURST, BGFX_WARP, BGFX_PSP, BGFX_COUNT };
+       BGFX_FRACTAL, BGFX_BURST, BGFX_WARP, BGFX_PSP, BGFX_GALAXY, BGFX_COSMIC_NEBULA, BGFX_PLANET, BGFX_METEORS, BGFX_BLACK_HOLE, BGFX_ASTEROIDS, BGFX_ECLIPSE, BGFX_SOLAR, BGFX_PULSAR, BGFX_COMET, BGFX_MILKY, BGFX_SUPERNOVA, BGFX_EARTH, BGFX_CONSTELLATIONS, BGFX_DEEP_FIELD, BGFX_CYBER_CITY, BGFX_MOON_OCEAN, BGFX_FIREFLIES, BGFX_DUNES, BGFX_JELLYFISH, BGFX_DIGITAL_RAIN, BGFX_CIRCUIT, BGFX_SYNTHWAVE, BGFX_STORM, BGFX_KALEIDOSCOPE, BGFX_PIXEL_LAND, BGFX_FLOW_FIELD, BGFX_SAKURA, BGFX_GEARS, BGFX_N64_CUBES, BGFX_VOLCANO, BGFX_ISLANDS, BGFX_FIREWORKS, BGFX_CORAL_REEF, BGFX_SNOW_CABIN, BGFX_EQUALIZER, BGFX_AUTUMN, BGFX_GLASS_RAIN, BGFX_BOKEH_LIGHTS, BGFX_CITY_AIR, BGFX_DNA, BGFX_LOW_POLY, BGFX_NIGHT_TRAIN, BGFX_BALLOONS, BGFX_PORTAL, BGFX_MILKY_DESERT, BGFX_MILKY_LAKE, BGFX_MILKY_ARCH, BGFX_MILKY_CORE, BGFX_MILKY_TRAILS, BGFX_ANDROMEDA, BGFX_WHIRLPOOL, BGFX_SOMBRERO, BGFX_ELLIPTICAL, BGFX_BARRED, BGFX_COLLISION, BGFX_RING_GALAXY, BGFX_GAL_CLUSTER, BGFX_QUASAR, BGFX_MAGELLANIC, BGFX_PILLARS, BGFX_ORION, BGFX_CRAB, BGFX_HORSEHEAD, BGFX_HELIX, BGFX_RING_NEB, BGFX_CARINA, BGFX_BUTTERFLY, BGFX_LAGOON, BGFX_COUNT };
 static const int s_fxLabels[BGFX_COUNT] = { T_OFF, T_FX_WAVES, T_FX_PULSE, T_FX_RAIN, T_FX_VORTEX, T_FX_RIPPLES, T_FX_SILK,
                                             T_FX_EMBERS, T_FX_GRID, T_FX_UNDERWATER, T_FX_ENERGY, T_FX_AURORA, T_FX_LIQUID,
                                             T_FX_PARTICLES, T_FX_SMOKE, T_FX_XMB, T_FX_PS4_FLOW, T_FX_PS4_BOKEH,
                                             T_FX_NEBULA, T_FX_FIRE_DUST, T_FX_LAVA, T_FX_PRISM, T_FX_TOPO, T_FX_HEX, T_FX_SPIRAL,
-                                            T_FX_INK, T_FX_HOLO, T_FX_FRACTAL, T_FX_BURST, T_FX_WARP, T_FX_PSP };
+                                            T_FX_INK, T_FX_HOLO, T_FX_FRACTAL, T_FX_BURST, T_FX_WARP, T_FX_PSP, T_FX_GALAXY, T_FX_COSMIC_NEBULA, T_FX_PLANET, T_FX_METEORS, T_FX_BLACK_HOLE, T_FX_ASTEROIDS, T_FX_ECLIPSE, T_FX_SOLAR, T_FX_PULSAR, T_FX_COMET, T_FX_MILKY, T_FX_SUPERNOVA, T_FX_EARTH, T_FX_CONSTELLATIONS, T_FX_DEEP_FIELD, T_FX_CYBER_CITY, T_FX_MOON_OCEAN, T_FX_FIREFLIES, T_FX_DUNES, T_FX_JELLYFISH, T_FX_DIGITAL_RAIN, T_FX_CIRCUIT, T_FX_SYNTHWAVE, T_FX_STORM, T_FX_KALEIDOSCOPE, T_FX_PIXEL_LAND, T_FX_FLOW_FIELD, T_FX_SAKURA, T_FX_GEARS, T_FX_N64_CUBES, T_FX_VOLCANO, T_FX_ISLANDS, T_FX_FIREWORKS, T_FX_CORAL_REEF, T_FX_SNOW_CABIN, T_FX_EQUALIZER, T_FX_AUTUMN, T_FX_GLASS_RAIN, T_FX_BOKEH_LIGHTS, T_FX_CITY_AIR, T_FX_DNA, T_FX_LOW_POLY, T_FX_NIGHT_TRAIN, T_FX_BALLOONS, T_FX_PORTAL, T_FX_MILKY_DESERT, T_FX_MILKY_LAKE, T_FX_MILKY_ARCH, T_FX_MILKY_CORE, T_FX_MILKY_TRAILS, T_FX_ANDROMEDA, T_FX_WHIRLPOOL, T_FX_SOMBRERO, T_FX_ELLIPTICAL, T_FX_BARRED, T_FX_COLLISION, T_FX_RING_GALAXY, T_FX_GAL_CLUSTER, T_FX_QUASAR, T_FX_MAGELLANIC, T_FX_PILLARS, T_FX_ORION, T_FX_CRAB, T_FX_HORSEHEAD, T_FX_HELIX, T_FX_RING_NEB, T_FX_CARINA, T_FX_BUTTERFLY, T_FX_LAGOON };
+// The order the effects are offered in (Interface > Background effect, left and right): by kind, not as they were
+// added (their numbers, Config::bgEffect, stay as saved):
+static const unsigned char s_fxOrder[BGFX_COUNT] = {
+    BGFX_OFF,
+    BGFX_XMB, BGFX_PSP, BGFX_PS4_FLOW, BGFX_PS4_BOKEH, BGFX_N64_CUBES,   // consoles
+    BGFX_WAVES, BGFX_PULSE, BGFX_RIPPLES, BGFX_SILK, BGFX_RAIN, BGFX_VORTEX, BGFX_SPIRAL, BGFX_ENERGY, BGFX_LIQUID, BGFX_PARTICLES, BGFX_SMOKE, BGFX_INK, BGFX_PRISM, BGFX_HOLO, BGFX_FRACTAL, BGFX_BURST, BGFX_WARP, BGFX_KALEIDOSCOPE, BGFX_FLOW_FIELD, BGFX_BOKEH_LIGHTS, BGFX_LOW_POLY, BGFX_PORTAL,   // abstract
+    BGFX_GRID, BGFX_SYNTHWAVE, BGFX_HEX, BGFX_TOPO, BGFX_CIRCUIT, BGFX_DIGITAL_RAIN, BGFX_PIXEL_LAND, BGFX_EQUALIZER, BGFX_DNA, BGFX_GEARS, BGFX_CYBER_CITY,   // retro and technology
+    BGFX_EMBERS, BGFX_FIRE_DUST, BGFX_LAVA, BGFX_VOLCANO, BGFX_STORM, BGFX_GLASS_RAIN,   // fire and storm
+    BGFX_AURORA, BGFX_UNDERWATER, BGFX_CORAL_REEF, BGFX_JELLYFISH, BGFX_FIREFLIES, BGFX_SAKURA, BGFX_AUTUMN, BGFX_DUNES, BGFX_ISLANDS, BGFX_MOON_OCEAN, BGFX_SNOW_CABIN, BGFX_CITY_AIR, BGFX_NIGHT_TRAIN, BGFX_BALLOONS, BGFX_FIREWORKS,   // nature and places
+    BGFX_PLANET, BGFX_EARTH, BGFX_ECLIPSE, BGFX_SOLAR, BGFX_COMET, BGFX_METEORS, BGFX_ASTEROIDS, BGFX_CONSTELLATIONS,   // the solar system
+    BGFX_MILKY, BGFX_MILKY_DESERT, BGFX_MILKY_LAKE, BGFX_MILKY_ARCH, BGFX_MILKY_CORE, BGFX_MILKY_TRAILS,   // the Milky Way
+    BGFX_GALAXY, BGFX_ANDROMEDA, BGFX_WHIRLPOOL, BGFX_SOMBRERO, BGFX_ELLIPTICAL, BGFX_BARRED, BGFX_COLLISION, BGFX_RING_GALAXY, BGFX_GAL_CLUSTER, BGFX_MAGELLANIC, BGFX_QUASAR, BGFX_DEEP_FIELD,   // galaxies
+    BGFX_NEBULA, BGFX_COSMIC_NEBULA, BGFX_PILLARS, BGFX_ORION, BGFX_CRAB, BGFX_HORSEHEAD, BGFX_HELIX, BGFX_RING_NEB, BGFX_CARINA, BGFX_BUTTERFLY, BGFX_LAGOON, BGFX_SUPERNOVA, BGFX_PULSAR, BGFX_BLACK_HOLE,   // nebulae and stars
+};
+// The effect `dir` places from `fx` in that order (round at the ends).
+static int fx_step(int fx, int dir)
+{
+    int i;
+    for (i = 0; i < BGFX_COUNT && s_fxOrder[i] != fx; i++) {}
+    if (i == BGFX_COUNT) i = 0;
+    return s_fxOrder[((i + dir) % BGFX_COUNT + BGFX_COUNT) % BGFX_COUNT];
+}
 static int s_bgEffect = BGFX_WAVES;   // what the ROM list draws (set from Config::bgEffect)
 // The colours the effect page offers (Config::fxColor; 0: none - the effect's own colours for colour 1, unused for 2 and 3).
-#define FX_PALETTE_COUNT 13
+#define FX_PALETTE_COUNT 21
 static const int s_fxPalette[FX_PALETTE_COUNT + 1][3] = {
     { 0, 0, 0 },
     { 240, 242, 255 }, { 255, 60, 70 }, { 255, 140, 40 }, { 255, 220, 60 }, { 140, 240, 80 }, { 40, 210, 120 }, { 40, 220, 210 },
     { 60, 200, 255 }, { 60, 120, 255 }, { 110, 80, 255 }, { 170, 80, 240 }, { 240, 70, 200 }, { 255, 130, 180 },
+    // (added after: the indices above stay as the settings saved them)
+    { 190, 25, 55 }, { 160, 95, 50 }, { 235, 175, 45 }, { 160, 180, 60 }, { 150, 250, 205 }, { 35, 55, 150 }, { 195, 175, 255 }, { 170, 176, 192 },
 };
 static int s_fxColor[3], s_fxOpacity = 100, s_fxSpeed = 100;   // what the ROM list draws with (ui_from_config)
 static float s_fxClock = 50.0f, s_fxLast = -1.0f;   // the effects' own time (run at s_fxSpeed), and UiTime() when it last moved
@@ -2927,16 +2946,15 @@ static int notify_input(UiMenu *m, Config *c, WORD down)
 // logo (libretro-thumbnails; the box shows until that one is downloaded, or
 // when there is none) - and whether missing pictures are downloaded.
 enum { IM_KIND = 0, IM_DOWNLOAD, IM_EXTRAS, IM_BACKGROUND, IM_VIDEO, IM_MUSIC, IM_CYCLE, IM_BOX3D, IM_SSACCOUNT };
-static const int s_artKindLabels[CONFIG_ART_COUNT] = { T_KIND_BOX2D, T_KIND_BOX3D, T_KIND_SNAP, T_KIND_TITLE, T_KIND_LOGO };
+static const int s_artKindLabels[CONFIG_ART_COUNT] = { T_KIND_BOX2D, T_KIND_BOX3D, T_KIND_SNAP, T_KIND_TITLE, T_KIND_LOGO, T_KIND_CART };
 
-// The worker's kind of picture for Config::artKind (the 3D box is the box, drawn otherwise).
+// The worker's kind of picture for Config::artKind, the same in every view (none forces its own: the
+// cartridges' shelf shows the picture chosen on its label, the 3D boxes' floor the box made from it).
+// The 3D box: ScreenScraper's with Game images > ScreenScraper's 3D boxes, else the box art drawn in 3D.
 static int art_kind_of(const Config *c)
 {
-    static const int kinds[CONFIG_ART_COUNT] = { ART_KIND_BOX, ART_KIND_BOX, ART_KIND_SNAP, ART_KIND_TITLE, ART_KIND_LOGO };
-    // Those views show 3D boxes, whatever Game images says: ScreenScraper's (Game images > ScreenScraper's
-    // 3D boxes), else each drawn from the box art.
-    if (design_box3d(c->browserDesign)) return c->artBox3dSs ? ART_KIND_BOX3D : ART_KIND_BOX;
-    if (c->browserDesign == BD_CARTRIDGE) return ART_KIND_CART;  // and that one each game's cartridge
+    static const int kinds[CONFIG_ART_COUNT] = { ART_KIND_BOX, ART_KIND_BOX, ART_KIND_SNAP, ART_KIND_TITLE, ART_KIND_LOGO, ART_KIND_CART };
+    if (c->artKind == CONFIG_ART_BOX3D && c->artBox3dSs) return ART_KIND_BOX3D;
     return kinds[c->artKind >= 0 && c->artKind < CONFIG_ART_COUNT ? c->artKind : 0];
 }
 
@@ -3329,7 +3347,8 @@ static int fx_input(UiMenu *m, Config *c, WORD down)
     switch (m->sel)
     {
     case FXP_EFFECT:
-        c->bgEffect = ((c->bgEffect >= 0 && c->bgEffect < BGFX_COUNT ? c->bgEffect : 0) + (dir ? dir : 1) + BGFX_COUNT) % BGFX_COUNT;
+        c->bgEffect = fx_step(c->bgEffect >= 0 && c->bgEffect < BGFX_COUNT ? c->bgEffect : 0, dir ? dir : 1);   // (by kind)
+        c->fxColor[0] = c->fxColor[1] = c->fxColor[2] = 0;   // each background with its own colours to start from
         break;
     case FXP_COLOR1: case FXP_COLOR2: case FXP_COLOR3:
     {
@@ -3363,7 +3382,7 @@ static int fx_input(UiMenu *m, Config *c, WORD down)
 // One colour's row of swatches: "none" (a crossed-out ring) then the palette, the chosen one ringed.
 static void fx_swatches(float x, float cy, int chosen, int selected)
 {
-    const float r = 12, step = 34, rr = r + 4;
+    const float step = 512.0f / (FX_PALETTE_COUNT + 1) < 34 ? 512.0f / (FX_PALETTE_COUNT + 1) : 34, r = step * 0.36f, rr = r + 4;
     int i;
     for (i = 0; i <= FX_PALETTE_COUNT; i++)
     {
@@ -8057,12 +8076,18 @@ static int server_words(char *title, size_t ts, char *line, size_t ls, D3DCOLOR 
 
 // A bar of the main menu (the server's state, a download): one plain border, a dot (or none), a title and a line
 // fitted to its width whatever the language.
+static int s_homeGlass;   // the main menu draws its panels as clear glass (the background effect seen through them)
+static void home_glass(float x, float y, float w, float h, float r, int on, float a);   // with the main menu
 static void home_bar(float x, float y, float w, D3DCOLOR dot, const char *title, const char *line, float a)
 {
     const float h = 58, tx = dot ? x + 44 : x + 20, tw = x + w - 16 - tx;
     char fit[160];
-    UiRoundRect(x, y, w, h, 14, UiAlpha(D3DCOLOR_ARGB(235, 26, 28, 44), a), UiAlpha(D3DCOLOR_ARGB(235, 26, 28, 44), a));
-    UiRoundRing(x, y, w, h, 14, 1.0f, UiAlpha(UI_COL_LINE, a));
+    if (s_homeGlass) home_glass(x, y, w, h, 14, 0, a);
+    else
+    {
+        UiRoundRect(x, y, w, h, 14, UiAlpha(D3DCOLOR_ARGB(235, 26, 28, 44), a), UiAlpha(D3DCOLOR_ARGB(235, 26, 28, 44), a));
+        UiRoundRing(x, y, w, h, 14, 1.0f, UiAlpha(UI_COL_LINE, a));
+    }
     if (dot) UiCircle(x + 24, y + h * 0.5f, 6, UiAlpha(dot, a));
     UiTextFit(UI_BOLD, 16, tw, title, fit, sizeof(fit));
     UiText(UI_BOLD, 16, tx, line[0] ? y + 20 : y + h * 0.5f, UiAlpha(UI_COL_TEXT, a), fit, UI_LEFT);
@@ -8589,7 +8614,7 @@ static void wiz_step(WizState *w, int row, int dx)
     }
     if (w->page == WZ_FX)
     {
-        if (row == 0) c->bgEffect = ((c->bgEffect >= 0 && c->bgEffect < BGFX_COUNT ? c->bgEffect : 0) + dx + BGFX_COUNT) % BGFX_COUNT;
+        if (row == 0) c->bgEffect = fx_step(c->bgEffect >= 0 && c->bgEffect < BGFX_COUNT ? c->bgEffect : 0, dx);   // (by kind)
         if (row >= 1 && row <= 3)
         {
             int *v = &c->fxColor[row - 1];
@@ -10397,9 +10422,11 @@ static int tab_is_usb(int tab) { return s_usbMerged >= 0 && tab == 4 + s_catCoun
 static std::map<std::string, int> s_hdOf;
 static std::map<std::string, std::string> s_hdFolderOf;   // ROM file -> its texture folder name ("" not a ROM)
 static std::map<std::string, int> s_hdDirs;               // texture folder (lower case) -> 2 .hts, 3 PNG pack
+static std::map<std::string, std::string> s_hdDirName;    // ... -> its name as it is on the drive
+static std::map<std::string, std::string> s_hdLinks;      // ... -> its link.txt: another game's folder, "-" none
 static int s_hdDirsLoaded;
 static int hd_of_file(const std::string &file);   // with HiresScanPacks
-static void hd_forget(void) { s_hdOf.clear(); s_hdDirs.clear(); s_hdDirsLoaded = 0; }
+static void hd_forget(void) { s_hdOf.clear(); s_hdDirs.clear(); s_hdDirName.clear(); s_hdLinks.clear(); s_hdDirsLoaded = 0; }
 static int rom_on_usb(const std::string &file)
 {
     char pre[8];
@@ -10796,6 +10823,9 @@ int RomFolderName(const char *path, char *out, size_t size)
 static char s_hiresPacks[HIRES_PACKS_MAX][160];   // full path - HiresPackName strips the folder
 static int s_hiresPackCount;
 static char s_hiresDir[128] = "game:\\hires_texture";   // Settings > Paths > Textures
+static int s_hiresSrc;                 // HiresPackSource: HSRC_*
+static char s_hiresSrcFolder[64];      // HiresPackFolder
+static char s_hiresOwnDir[192];        // the game's own folder (its active.txt and link.txt), with or without packs
 
 void HiresSetFolder(const char *folder)
 {
@@ -10816,14 +10846,13 @@ static void hires_pack_dir(int k, char *dir, size_t size)
     dir[n] = 0;
 }
 
-// Which of them is in use: the folder's active.txt, else Settings > Graphics' pick, else the first.
+// Which of them is in use: the game's active.txt (HiresActiveFor), else Settings > Graphics' pick, else the first.
 static int hires_active_index(const Config *c)
 {
-    char dir[192], active[128];
+    char active[128];
     int k, n = HiresPackCount(), act;
     if (!n) return 0;
-    hires_pack_dir(0, dir, sizeof(dir));
-    act = s_kodiSim ? 0 : HiresActiveRead(dir, active, sizeof(active));   // the list's dry run writes no file: hiTexFile then
+    act = s_kodiSim ? 0 : HiresActiveFor(active, sizeof(active));   // the list's dry run writes no file: hiTexFile then
     for (k = 0; k < n; k++)
         if (!_stricmp(HiresPackName(k), act == 1 ? active : c->hiTexFile)) return k;
     return 0;
@@ -10846,6 +10875,46 @@ static std::string lower_str(const char *s)
     size_t i;
     for (i = 0; i < l.size(); i++) l[i] = (char)tolower((unsigned char)l[i]);
     return l;
+}
+
+// A game's folder's link.txt (Details > HD textures > Use another game's pack): 1 with the other
+// game's folder in `out`, -1 "-" (no pack at all for this game), 0 none (its code's game, automatic).
+static int hires_link_read(const char *dir, char *out, size_t size)
+{
+    char path[256], line[96];
+    FILE *f;
+    size_t n;
+    if (size) out[0] = 0;
+    _snprintf(path, sizeof(path) - 1, "%s\\link.txt", dir);
+    path[sizeof(path) - 1] = 0;
+    if (!(f = fopen(path, "r"))) return 0;
+    line[0] = 0;
+    if (!fgets(line, sizeof(line), f)) line[0] = 0;
+    fclose(f);
+    n = strlen(line);
+    while (n && (line[n - 1] == '\n' || line[n - 1] == '\r' || line[n - 1] == ' ')) line[--n] = 0;
+    if (!n) return 0;
+    strncpy(out, line, size - 1);
+    out[size - 1] = 0;
+    return strcmp(line, "-") ? 1 : -1;
+}
+
+// ... written (NULL: removed, automatic again; "-": none). The game's active.txt goes with it: it named one of the old packs.
+static void hires_link_write(const char *dir, const char *folder)
+{
+    char path[256];
+    FILE *f;
+    _snprintf(path, sizeof(path) - 1, "%s\\active.txt", dir);
+    path[sizeof(path) - 1] = 0;
+    DeleteFileA(path);
+    _snprintf(path, sizeof(path) - 1, "%s\\link.txt", dir);
+    path[sizeof(path) - 1] = 0;
+    if (!folder) { DeleteFileA(path); return; }
+    mkdir_p(dir);
+    if (!(f = fopen(path, "w"))) return;
+    fprintf(f, "%s\n", folder);
+    fclose(f);
+    H64_INFO("[hires] %s: packs of %s", dir, folder);
 }
 
 // The texture folders there are and what they hold: one look at the folder of folders.
@@ -10874,7 +10943,13 @@ static void hd_dirs_load(void)
         h2 = FindFirstFileA(hts, &f2);
         if (h2 != INVALID_HANDLE_VALUE) { FindClose(h2); hd = 2; }
         else if (HiresPngPresent(dir)) hd = 3;
-        if (hd) s_hdDirs[lower_str(fd.cFileName)] = hd;
+        if (hd) { s_hdDirs[lower_str(fd.cFileName)] = hd; s_hdDirName[lower_str(fd.cFileName)] = fd.cFileName; }
+        else
+        {
+            // a folder with no pack of its own: its link.txt, another game's packs used for it
+            char link[64];
+            if (hires_link_read(dir, link, sizeof(link))) s_hdLinks[lower_str(fd.cFileName)] = link;
+        }
     } while (FindNextFileA(h, &fd));
     FindClose(h);
 }
@@ -10890,6 +10965,8 @@ static int hd_dir_state(const char *romName)
     return d != s_hdDirs.end() ? d->second : 0;
 }
 
+static std::map<std::string, std::string> s_hdCodeOf;   // ROM file -> its cartridge code (with s_hdFolderOf)
+static int hires_other_folder(const char *own, const char *code, const char *romPath);   // with hires_scan
 static int hd_of_file(const std::string &file)
 {
     std::map<std::string, int>::const_iterator it = s_hdOf.find(file);
@@ -10904,6 +10981,7 @@ static int hd_of_file(const std::string &file)
         if (read_header(file.c_str(), &rom))
         {
             HiresFolderName(rom.name, folder, sizeof(folder));
+            s_hdCodeOf[file] = rom.gameCode;
             h64_rom_free(&rom);
         }
         fo = s_hdFolderOf.insert(std::make_pair(file, std::string(folder))).first;
@@ -10915,35 +10993,10 @@ static int hd_of_file(const std::string &file)
         d = s_hdDirs.find(lower_str(fo->second.c_str()));
         if (d != s_hdDirs.end()) hd = d->second;
         else if (HiresPackCountFor(fo->second.c_str())) hd = 1;
+        else if (hires_other_folder(fo->second.c_str(), s_hdCodeOf[file].c_str(), file.c_str())) hd = 2;   // a hack: its original's pack
     }
     s_hdOf[file] = hd;
     return hd;
-}
-
-void HiresScanPacks(const char *romName)
-{
-    char dir[160], pattern[176], folder[64];
-    WIN32_FIND_DATAA fd;
-    HANDLE h;
-    s_hiresPackCount = 0;
-    strncpy(s_hiresRom, romName ? romName : "", sizeof(s_hiresRom) - 1);
-    s_hiresRom[sizeof(s_hiresRom) - 1] = 0;
-    if (!romName || !romName[0]) return;
-    HiresFolderName(romName, folder, sizeof(folder));   // as GLideN64 names it, and the downloads put it
-    _snprintf(dir, sizeof(dir) - 1, "%s\\%s", s_hiresDir, folder);
-    dir[sizeof(dir) - 1] = 0;
-    _snprintf(pattern, sizeof(pattern) - 1, "%s\\*.hts", dir);
-    pattern[sizeof(pattern) - 1] = 0;
-    h = FindFirstFileA(pattern, &fd);
-    if (h == INVALID_HANDLE_VALUE) return;
-    do
-    {
-        if (s_hiresPackCount >= HIRES_PACKS_MAX) break;
-        _snprintf(s_hiresPacks[s_hiresPackCount], sizeof(s_hiresPacks[0]) - 1, "%s\\%s", dir, fd.cFileName);
-        s_hiresPacks[s_hiresPackCount][sizeof(s_hiresPacks[0]) - 1] = 0;
-        s_hiresPackCount++;
-    } while (FindNextFileA(h, &fd));
-    FindClose(h);
 }
 
 // ---- Skins (see xb_menu.h) ----
@@ -10994,7 +11047,8 @@ static const char *hires_author_of(int k)
     int j, n = HiresPackTotal();
     const char *name = HiresPackName(k);
     if (!name[0]) return NULL;
-    HiresFolderName(s_hiresRom, want, sizeof(want));
+    strncpy(want, s_hiresSrcFolder, sizeof(want) - 1);   // the folder its packs are in (another game's for a hack)
+    want[sizeof(want) - 1] = 0;
     for (j = 0; j < n; j++)
     {
         const HiresPackEntry *e = HiresPackAt(j);
@@ -11020,6 +11074,7 @@ void HiresSelect(Config *c, int k)
         strncpy(c->hiTexFile, HiresPackName(k), sizeof(c->hiTexFile) - 1);
         c->hiTexFile[sizeof(c->hiTexFile) - 1] = 0;
         hires_pack_dir(k, dirName, sizeof(dirName));
+        if (s_hiresSrc != HSRC_OWN && s_hiresOwnDir[0]) { mkdir_p(s_hiresOwnDir); strcpy(dirName, s_hiresOwnDir); }   // a hack's choice: its own
         HiresActiveWrite(dirName, HiresPackName(k));   // the game's pack in use (HiresOpen)
     }
     profile_set_hires(c);   // kept in the game's profile
@@ -12016,11 +12071,14 @@ static void packs_screen(IDirect3DDevice9 *dev, Config *c)
                     if (!strcmp(HiresPackAt(j)->romName, games[k].c_str())) pick = j;
                 row[SR_GAMES].push_back(pick);
             }
-            for (k = 0; k < (int)row[SR_MINE].size() && here[row[SR_MINE][k]].installed; k++) {}
+            // the featured pack: one with its picture, for the player's games and not installed, else any not installed
+            for (k = 0; k < (int)row[SR_MINE].size() && (here[row[SR_MINE][k]].installed || !HiresPackAt(row[SR_MINE][k])->image); k++) {}
             if (k < (int)row[SR_MINE].size()) row[SR_FEATURED].push_back(row[SR_MINE][k]);
             else
             {
-                for (k = 0; k < (int)row[SR_ALL].size() && here[row[SR_ALL][k]].installed; k++) {}
+                for (k = 0; k < (int)row[SR_ALL].size() && (here[row[SR_ALL][k]].installed || !HiresPackAt(row[SR_ALL][k])->image); k++) {}
+                if (k == (int)row[SR_ALL].size())
+                    for (k = 0; k < (int)row[SR_ALL].size() && !HiresPackAt(row[SR_ALL][k])->image; k++) {}   // (all installed: any with its picture)
                 row[SR_FEATURED].push_back(k < (int)row[SR_ALL].size() ? row[SR_ALL][k] : row[SR_ALL][0]);
             }
             for (k = 0; k < SR_COUNT; k++)
@@ -13434,6 +13492,223 @@ static int s_detailsLang = -1;
 static std::vector<std::string> s_detailsQueue;       // under s_detailsLock: the ROMs to read ahead
 static HANDLE s_detailsEvent;
 
+// The texture folder holding a .hts of the game whose cartridge code is `code` (the header's
+// "NKTE": its two middle letters are the game, kept by its hacks and shared by its regions),
+// not `own`: the catalog's games first, then the list's original ROMs (their details read ahead).
+static int hires_folder_of_code(const char *code, const char *own, char *out, size_t size)
+{
+    static const char *const ids[][2] = {
+        { "KT", "MARIOKART64" }, { "AL", "SMASH BROTHERS" }, { "SM", "SUPER MARIO 64" }, { "ZL", "THE LEGEND OF ZELDA" },
+        { "ZS", "ZELDA MAJORA'S MASK" }, { "FX", "STARFOX64" }, { "GE", "GOLDENEYE" }, { "BK", "Banjo-Kazooie" },
+        { "B7", "BANJO TOOIE" }, { "MQ", "PAPER MARIO" }, { "DY", "Diddy Kong Racing" }, { "FZ", "F-ZERO X" },
+        { "FU", "CONKER BFD" }, { "RE", "Resident Evil II" }, { "DM", "DUKE NUKEM" }, { "YW", "HARVESTMOON64" },
+        { "D3", "CASTLEVANIA" }, { "D4", "CASTLEVANIA2" }, { "GU", "TSUMI TO BATSU" },
+    };
+    int k, got = 0;
+    if (!code || strlen(code) < 3) return 0;
+    hd_dirs_load();   // (not while the details' lock is held)
+    for (k = 0; k < (int)(sizeof(ids) / sizeof(ids[0])) && !got; k++)
+        if (!strncmp(code + 1, ids[k][0], 2) && _stricmp(ids[k][1], own) && hd_dir_state(ids[k][1]) == 2)
+        {
+            strncpy(out, ids[k][1], size - 1);
+            got = 1;
+        }
+    if (!got && s_detailsEvent)
+    {
+        std::map<std::string, RomInfo>::const_iterator it;
+        EnterCriticalSection(&s_detailsLock);
+        for (it = s_detailsMemo.begin(); it != s_detailsMemo.end() && !got; ++it)
+        {
+            const RomInfo &r = it->second;
+            char f[64];
+            if (!r.ok || r.kind != H64_ROMKIND_ORIGINAL || strlen(r.code) < 3 || strncmp(r.code + 1, code + 1, 2)) continue;
+            HiresFolderName(r.name, f, sizeof(f));
+            if (_stricmp(f, own) && hd_dir_state(f) == 2) { strncpy(out, f, size - 1); got = 1; }
+        }
+        LeaveCriticalSection(&s_detailsLock);
+    }
+    if (got) out[size - 1] = 0;
+    return got;
+}
+
+// A name in lower case letters and digits only ("Mario Kart 64" and "MARIOKART64": "mariokart64").
+static std::string hires_norm(const char *s)
+{
+    std::string n;
+    for (; s && *s; s++)
+        if (isalnum((unsigned char)*s)) n += (char)tolower((unsigned char)*s);
+    return n;
+}
+
+// The texture folder holding a .hts of the original game a hack is made from, by name (its code its
+// own: Mario Kart 64 Amped Up is NEDE): the one whose folder or usual name (HiresGameName) its file's
+// name or its "hack of" name (the game information) holds, the longest such; not one followed by a
+// digit ("MarioParty" in "MarioParty2": another game). Not for an original ROM (the catalogue's).
+static int hires_folder_of_name(const char *romPath, const char *own, char *out, size_t size)
+{
+    static std::map<std::string, std::string> baseOf;   // each ROM's "hack of" name, read once (its header and information)
+    std::map<std::string, int>::const_iterator d;
+    std::string name;
+    const char *b;
+    size_t best = 0;
+    int pass;
+    if (!romPath || !romPath[0]) return 0;
+    if (s_detailsEvent)
+    {
+        std::map<std::string, RomInfo>::const_iterator it;
+        int original = 0;
+        EnterCriticalSection(&s_detailsLock);
+        it = s_detailsMemo.find(romPath);
+        if (it != s_detailsMemo.end()) original = it->second.kind == H64_ROMKIND_ORIGINAL;
+        LeaveCriticalSection(&s_detailsLock);
+        if (original) return 0;
+    }
+    hd_dirs_load();
+    // its file's name first (no reading), then its "hack of" name
+    for (pass = 0; pass < 2 && !best; pass++)
+    {
+        if (pass == 0)
+        {
+            b = strrchr(romPath, '\\');
+            name = hires_norm(b ? b + 1 : romPath);
+        }
+        else
+        {
+            std::map<std::string, std::string>::iterator bo = baseOf.find(romPath);
+            if (bo == baseOf.end())
+            {
+                H64GameInfo gi;
+                memset(&gi, 0, sizeof(gi));
+                bo = baseOf.insert(std::make_pair(std::string(romPath), ArtReadInfo(romPath, &gi) ? hires_norm(gi.base) : std::string())).first;
+            }
+            name = bo->second;
+        }
+        if (name.empty()) continue;
+        for (d = s_hdDirs.begin(); d != s_hdDirs.end(); ++d)
+        {
+            std::map<std::string, std::string>::const_iterator dn = s_hdDirName.find(d->first);
+            const char *folder;
+            std::string forms[2];
+            int f;
+            if (d->second != 2 || dn == s_hdDirName.end() || !_stricmp(dn->second.c_str(), own)) continue;
+            folder = dn->second.c_str();
+            forms[0] = hires_norm(folder);
+            forms[1] = hires_norm(HiresGameName(folder));
+            for (f = 0; f < 2; f++)
+            {
+                const std::string &w = forms[f];
+                size_t at;
+                if (w.size() < 6 || w.size() <= best || (at = name.find(w)) == std::string::npos) continue;
+                if (at + w.size() < name.size() && isdigit((unsigned char)name[at + w.size()])) continue;
+                strncpy(out, folder, size - 1);
+                out[size - 1] = 0;
+                best = w.size();
+            }
+        }
+    }
+    return best > 0;
+}
+
+// The packs a game uses (HiresScanPacks). lookOwn: its own folder looked at on the drive; else as
+// the folders looked at once say (the ROM list's moves: no look at the drive for a game without one).
+static void hires_scan(const char *romName, const char *code, int lookOwn, const char *romPath)
+{
+    char own[64], folder[64], dir[160], pattern[176];
+    std::map<std::string, std::string>::const_iterator li, dn;
+    WIN32_FIND_DATAA fd;
+    HANDLE h;
+    int src;
+    s_hiresPackCount = 0;
+    s_hiresSrc = HSRC_NONE;
+    s_hiresSrcFolder[0] = s_hiresOwnDir[0] = 0;
+    strncpy(s_hiresRom, romName ? romName : "", sizeof(s_hiresRom) - 1);
+    s_hiresRom[sizeof(s_hiresRom) - 1] = 0;
+    if (!romName || !romName[0]) return;
+    HiresFolderName(romName, own, sizeof(own));   // as GLideN64 names it, and the downloads put it
+    _snprintf(s_hiresOwnDir, sizeof(s_hiresOwnDir) - 1, "%s\\%s", s_hiresDir, own);
+    s_hiresOwnDir[sizeof(s_hiresOwnDir) - 1] = 0;
+    for (src = HSRC_OWN; src <= HSRC_AUTO; src++)
+    {
+        if (src == HSRC_OWN)
+        {
+            if (!lookOwn) continue;
+            strcpy(folder, own);
+        }
+        else
+        {
+            // none of its own: the one chosen for it, else its code's game
+            hd_dirs_load();
+            li = s_hdLinks.find(lower_str(own));
+            if (li != s_hdLinks.end() && li->second == "-") break;
+            if (src == HSRC_LINK)
+            {
+                if (li == s_hdLinks.end() || hd_dir_state(li->second.c_str()) != 2) continue;
+                strncpy(folder, li->second.c_str(), sizeof(folder) - 1);
+                folder[sizeof(folder) - 1] = 0;
+            }
+            else if (!hires_folder_of_code(code, own, folder, sizeof(folder)) && !hires_folder_of_name(romPath, own, folder, sizeof(folder))) break;
+            dn = s_hdDirName.find(lower_str(folder));
+            if (dn != s_hdDirName.end()) { strncpy(folder, dn->second.c_str(), sizeof(folder) - 1); folder[sizeof(folder) - 1] = 0; }
+        }
+        _snprintf(dir, sizeof(dir) - 1, "%s\\%s", s_hiresDir, folder);
+        dir[sizeof(dir) - 1] = 0;
+        _snprintf(pattern, sizeof(pattern) - 1, "%s\\*.hts", dir);
+        pattern[sizeof(pattern) - 1] = 0;
+        h = FindFirstFileA(pattern, &fd);
+        if (h == INVALID_HANDLE_VALUE) continue;
+        do
+        {
+            if (s_hiresPackCount >= HIRES_PACKS_MAX) break;
+            _snprintf(s_hiresPacks[s_hiresPackCount], sizeof(s_hiresPacks[0]) - 1, "%s\\%s", dir, fd.cFileName);
+            s_hiresPacks[s_hiresPackCount][sizeof(s_hiresPacks[0]) - 1] = 0;
+            s_hiresPackCount++;
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+        if (s_hiresPackCount)
+        {
+            s_hiresSrc = src;
+            strcpy(s_hiresSrcFolder, folder);
+            if (src != HSRC_OWN && lookOwn)
+                H64_INFO("[hires] %s (%s): packs of %s (%s)", romName, code ? code : "", folder, src == HSRC_LINK ? "chosen" : "its code's");
+            break;
+        }
+    }
+}
+
+void HiresScanPacks(const char *romName, const char *code, const char *romPath) { hires_scan(romName, code, 1, romPath); }
+
+// Whether a game without packs of its own (`own`: its folder's name) uses another game's: the one chosen for it, else
+// its original's (as hires_scan finds them) - the list's HD mark.
+static int hires_other_folder(const char *own, const char *code, const char *romPath)
+{
+    char folder[64];
+    std::map<std::string, std::string>::const_iterator li;
+    hd_dirs_load();
+    li = s_hdLinks.find(lower_str(own));
+    if (li != s_hdLinks.end() && li->second == "-") return 0;
+    if (li != s_hdLinks.end() && hd_dir_state(li->second.c_str()) == 2) return 1;
+    return hires_folder_of_code(code, own, folder, sizeof(folder)) || hires_folder_of_name(romPath, own, folder, sizeof(folder));
+}
+int HiresPackSource(void) { return s_hiresSrc; }
+const char *HiresPackFolder(void) { return s_hiresSrcFolder; }
+
+int HiresActiveFor(char *file, size_t size)
+{
+    char dir[192];
+    int act = 0;
+    if (size) file[0] = 0;
+    if (!HiresPackCount()) return 0;
+    if (s_hiresOwnDir[0]) act = HiresActiveRead(s_hiresOwnDir, file, size);
+    if (act == 0 && s_hiresSrc != HSRC_OWN)
+    {
+        // the other game's pack in use, not its "none" (that game's HD off, not this one's)
+        hires_pack_dir(0, dir, sizeof(dir));
+        act = HiresActiveRead(dir, file, size);
+        if (act == -1) act = 0;
+    }
+    return act;
+}
+
 // The name of a ROM's kind (H64_ROMKIND_*) when it is not an original dump (0: the original, or not known).
 static int rom_kind_label(int kind)
 {
@@ -13538,13 +13813,7 @@ static void rom_details(const char *path, RomInfo *info)
     if (!info->ok) return;
     // Keeps the Graphics settings' pack picker matching this ROM. A game whose folder holds
     // no .hts (known from the folders looked at once) costs no look at the drive.
-    if (hd_dir_state(info->name) == 2) HiresScanPacks(info->name);
-    else
-    {
-        HiresScanPacks("");
-        strncpy(s_hiresRom, info->name, sizeof(s_hiresRom) - 1);   // still this game's (download, PNG rows)
-        s_hiresRom[sizeof(s_hiresRom) - 1] = 0;
-    }
+    hires_scan(info->name, info->code, hd_dir_state(info->name) == 2, path);
     info->hd = HiresPackCount() ? 2 : hd_dir_state(info->name) == 3 ? 3 : HiresPackCountFor(info->name) ? 1 : 0;
 }
 
@@ -17449,43 +17718,59 @@ static const char *const s_telegramQr[29] = {
 };
 
 
-// ---- The online intro: down a tunnel of data, the LAIKA 64 ONLINE logo coming out of it ----
-// Every time online play opens: 4 s down the tunnel and out into its light (A, B or START go straight out), the
-// first screen coming out of that light (s_arrive), the menus' music stopped meanwhile and its own sound
-// (xb_audio_online_intro, timed to it), the controllers vibrating with it. The tunnel is drawn here: its wall in sectors and slices in
-// perspective, each sector a lane of words and numbers (xb_tunnel_data.h) flowing at its own speed, rings and
-// lines over it, packets of light racing out; its far end swings, so it bends. The logo comes from the far end
-// and lands in front at 2.2 s with a flash.
-#include "xb_tunnel_data.h"
+// ---- The online intro: still stars speeding into a tunnel, out of it onto the LAIKA 64 ONLINE logo ----
+// Every time online play opens (5 s; A, B or START go straight out): the stars of LAIKA's own intro still for a
+// moment, then speeding into streaks and down a tunnel - one of eight, picked at random each time (s_tunStyle) -
+// out of its end into a flash and onto the logo among the stars; online play's first screen comes out of that
+// (s_arrive). Leaving online play goes down the same tunnel. Its own sound (xb_audio_online_intro) is timed to it,
+// the menus' music stopped meanwhile, the controllers vibrating with it. The tunnels (tun_style_draw): rings in
+// the N64 colours, a neon wireframe, turning hexagons, a wormhole, the wormhole in the N64 colours, arcs of a
+// circuit, frames in the colours of the logo's cubes, a network of nodes; each rushes past in perspective, its far
+// end swinging (it bends).
 
-#define TUN_SECTORS 24
-#define TUN_SLICES 18
-#define TUN_SLICE 0.55f      // a slice's length (the tunnel's radius is 1)
-#define TUN_SUB 3            // each slice drawn in this many parts (the picture bent less across it)
-#define TUN_NEAR 0.16f       // the nearest depth drawn
-#define TUN_FAR (TUN_NEAR + TUN_SLICES * TUN_SLICE)
-#define TUN_FOCAL 330.0f     // pixels for a radius 1 at depth 1
-#define TUN_PACKETS 56
-#define INTRO_EXIT 3.0f      // the way out begins: the logo flying past, the tunnel's end coming
+#define TUN_NEAR 0.2f
+#define TUN_FAR 11.0f
+#define TUN_FOCAL 560.0f     // pixels for a radius 1 at depth 1
+#define TUN_STYLES 8
+#define TUN_NODES 150
+#define INTRO_STILL 0.7f     // the stars still ...
+#define INTRO_FAST 1.4f      // ... speeding into streaks until here, the tunnel coming in
+#define INTRO_LANDS 2.2f     // the tunnel at full speed (the sound's thump: a pulse of blue)
+#define INTRO_EXIT 3.0f      // its end coming ...
 #define INTRO_LIGHT 1.0f     // ... until its light fills the screen (the sound's swell and chord)
-#define INTRO_LANDS 2.2f     // the logo in front (the sound's thump)
-#define INTRO_LOGO_H 180.0f
+#define INTRO_LOGO 1.0f      // then the logo among the stars, before online play's first screen
+#define INTRO_LOGO_H 150.0f
 #define OUTRO_TOTAL 1.6f
 #define OUTRO_OUT 1.15f      // out of the tunnel: its end's light fills the screen (the sound's swell)
-#define ARRIVE_TOTAL 0.6f    // online play's first screen coming out of the light
+#define ARRIVE_TOTAL 0.6f    // online play's first screen coming out of the dark
 
-struct TunPacket { float ang, z, speed, len; D3DCOLOR col; };
+// The colour the tunnel opens into going out (the menus' dark blue), and the dark online play comes out of.
+#define TUN_DARK_R 4
+#define TUN_DARK_G 9
+#define TUN_DARK_B 20
+#define TUN_DARK(a) D3DCOLOR_ARGB((int)(a), TUN_DARK_R, TUN_DARK_G, TUN_DARK_B)
+
+struct TunNode { float ang, z0, rad; };
+
+// The tunnel's state: its style and, for the network, its nodes.
+struct Tunnel
+{
+    int style;
+    unsigned seed;
+    TunNode nodes[TUN_NODES];
+};
+
+static int s_tunStyle = -1;   // the style of the last way in (the way out goes down the same one)
 
 static float tun_frac(float v) { return v - floorf(v); }
 
-// The tunnel's speed at `t` (world units a second): 2 speeding up to 6 by the logo's landing ...
-static float tun_speed(float t) { return 2.0f + 4.0f * (t < INTRO_LANDS ? t / INTRO_LANDS : 1.0f); }
-
-// ... and how far it has gone.
-static float tun_dist(float t)
+static unsigned tun_rand(unsigned *seed)
 {
-    return 2.0f * t + 4.0f * (t < INTRO_LANDS ? t * t / (2.0f * INTRO_LANDS) : INTRO_LANDS * 0.5f + (t - INTRO_LANDS));
+    *seed = *seed * 1664525u + 1013904223u;
+    return *seed >> 8;
 }
+
+static float tun_unit(unsigned *seed) { return (tun_rand(seed) % 10000) / 10000.0f; }
 
 // The centre of the tunnel at depth z on the screen: the far end swings slowly (the tunnel bends).
 static void tun_centre(float z, float t, float *x, float *y)
@@ -17495,77 +17780,77 @@ static void tun_centre(float z, float t, float *x, float *y)
     *y = UI_HEIGHT * 0.5f + 90.0f * sinf(t * 0.8f + 1.0f) * k;
 }
 
-static void tun_point(float a, float z, float t, float *x, float *y)
+// A point of the wall: angle a, depth z, `rad` the radius (1 the tunnel's), `sq` its height to its width.
+static void tun_point(float a, float z, float t, float rad, float sq, float *x, float *y)
 {
     tun_centre(z, t, x, y);
-    *x += cosf(a) * TUN_FOCAL / z;
-    *y += sinf(a) * TUN_FOCAL / z;
+    *x += cosf(a) * TUN_FOCAL * rad / z;
+    *y += sinf(a) * TUN_FOCAL * rad * sq / z;
 }
 
-// The light of the wall at depth z: dim far away, faded out very near (where its picture would be huge).
+// The light at depth z: faded in from the far end, out very near (where its picture would be huge).
 static float tun_light(float z)
 {
-    float farF = 1.15f - z / TUN_FAR, nearF = (z - TUN_NEAR) / 0.45f;
+    float farF = (TUN_FAR - z) / 3.0f, nearF = (z - TUN_NEAR * 0.5f) / 0.35f;
     if (farF > 1) farF = 1;
     if (nearF > 1) nearF = 1;
     return farF < nearF ? (farF < 0 ? 0 : farF) : (nearF < 0 ? 0 : nearF);
 }
 
-static unsigned tun_rand(unsigned *seed)
+static D3DCOLOR tun_col(int r, int g, int b, float a)
 {
-    *seed = *seed * 1664525u + 1013904223u;
-    return *seed >> 8;
+    return D3DCOLOR_ARGB((int)(255 * (a < 0 ? 0 : a > 1 ? 1 : a)), r, g, b);
 }
 
-static void tun_packet(TunPacket *p, unsigned *seed, int anywhere)
+// A line and a polyline with a glow: a wide faint one under the bright one.
+static void tun_glow_line(float x0, float y0, float x1, float y1, float thick, D3DCOLOR c)
 {
-    // Its colour: mostly cyan and white, now and then one of the logo's (red, green, yellow, blue).
-    static const D3DCOLOR cols[8] = { D3DCOLOR_ARGB(255, 90, 230, 255), D3DCOLOR_ARGB(255, 230, 250, 255), D3DCOLOR_ARGB(255, 90, 230, 255),
-        D3DCOLOR_ARGB(255, 160, 240, 255), D3DCOLOR_ARGB(255, 255, 80, 70), D3DCOLOR_ARGB(255, 70, 230, 90),
-        D3DCOLOR_ARGB(255, 255, 220, 60), D3DCOLOR_ARGB(255, 70, 120, 255) };
-    p->ang = (tun_rand(seed) % TUN_SECTORS) * 6.2831853f / TUN_SECTORS;
-    p->z = anywhere ? TUN_NEAR + 0.3f + (tun_rand(seed) % 1000) / 1000.0f * (TUN_FAR - 0.5f) : TUN_FAR + (tun_rand(seed) % 100) / 50.0f;
-    p->speed = 5.0f + (tun_rand(seed) % 100) / 10.0f;
-    p->len = 0.5f + (tun_rand(seed) % 100) / 80.0f;
-    p->col = cols[tun_rand(seed) % 8];
+    UiLine(x0, y0, x1, y1, thick * 3.2f, UiAlpha(c, 0.22f));
+    UiLine(x0, y0, x1, y1, thick, c);
 }
 
-// The tunnel's state: its packets of light, each sector's lane of data and speed, the data's picture.
-struct Tunnel
+static void tun_glow_poly(const float *xy, int n, float thick, D3DCOLOR c)
 {
-    TunPacket packets[TUN_PACKETS];
-    float speedOf[TUN_SECTORS];
-    int laneOf[TUN_SECTORS];
-    unsigned seed;
-    IDirect3DTexture9 *data;
-};
+    UiPolyline(xy, n, thick * 3.2f, thick * 1.5f, UiAlpha(c, 0.22f));
+    UiPolyline(xy, n, thick, 1.0f, c);
+}
 
-static void tun_open(IDirect3DDevice9 *dev, Tunnel *tn)
+static void tun_glow_dot(float x, float y, float r, D3DCOLOR c)
 {
-    int w = 0, h = 0, i;
-    u8 *rgba = h64_png_decode(s_tunnelDataPng, sizeof(s_tunnelDataPng), &w, &h, 1024 * 1024);
+    UiCircle(x, y, r * 2.2f, UiAlpha(c, 0.25f));
+    UiCircle(x, y, r, c);
+}
+
+// A thickness for depth z: `px` pixels at depth 1, within [lo, hi].
+static float tun_thick(float px, float z, float lo, float hi)
+{
+    const float v = px / z;
+    return v < lo ? lo : v > hi ? hi : v;
+}
+
+static void tun_open(Tunnel *tn, int style)
+{
+    int i;
+    tn->style = style;
     tn->seed = GetTickCount() | 1;
-    tn->data = NULL;
-    if (rgba) { tn->data = UiImageCreate(dev, rgba, w, h); free(rgba); }
-    for (i = 0; i < TUN_SECTORS; i++)
+    for (i = 0; i < TUN_NODES; i++)
     {
-        tn->laneOf[i] = (i * 5) % TUNNEL_DATA_LANES;
-        tn->speedOf[i] = 0.85f + (tun_rand(&tn->seed) % 100) / 160.0f;   // each lane of data flows at its own speed
+        tn->nodes[i].ang = tun_unit(&tn->seed) * 6.2831853f;
+        tn->nodes[i].z0 = tun_unit(&tn->seed) * (TUN_FAR - TUN_NEAR);
+        tn->nodes[i].rad = 0.75f + 0.25f * tun_unit(&tn->seed);
     }
-    for (i = 0; i < TUN_PACKETS; i++) tun_packet(&tn->packets[i], &tn->seed, 1);
 }
 
-static void tun_close(IDirect3DDevice9 *dev, Tunnel *tn)
+// Another style than the last one, at random.
+static int tun_pick(void)
 {
-    if (tn->data) UiImageRelease(dev, tn->data);
-    tn->data = NULL;
+    unsigned seed = GetTickCount() ^ 0x9E3779B9u;
+    int k = (int)(tun_rand(&seed) % TUN_STYLES);
+    if (k == s_tunStyle) k = (k + 1 + (int)(tun_rand(&seed) % (TUN_STYLES - 1))) % TUN_STYLES;
+    return k;
 }
 
-// The colour the tunnel opens into, coming in and going out (the menus' dark blue; it was a white light).
-#define TUN_DARK_R 4
-#define TUN_DARK_G 9
-#define TUN_DARK_B 20
-#define TUN_DARK(a) D3DCOLOR_ARGB((int)(a), TUN_DARK_R, TUN_DARK_G, TUN_DARK_B)
+static const int s_tunN64[4][3] = { { 230, 50, 50 }, { 250, 200, 40 }, { 40, 200, 80 }, { 50, 110, 240 } };   // red, yellow, green, blue
 
 // The way out: the tunnel's end at `out` (0 at its far end, 1 past the viewer: its opening fills the screen).
 static float tun_exit_depth(float out)
@@ -17573,91 +17858,164 @@ static float tun_exit_depth(float out)
     return TUN_NEAR * 0.7f + (TUN_FAR + 0.3f - TUN_NEAR * 0.7f) * (1.0f - out * out * out);
 }
 
-// The tunnel at `t` (its bend and turn), gone `dist` along at `speed` (dt since the last frame); its light times
-// `fade`. exit: nothing drawn past depth zx, where its end is an opening into the dark.
-static void tun_draw(Tunnel *tn, float t, float dt, float dist, float speed, int exit, float zx, float fade)
+// The tunnel at `t`, gone `dist` along, its light times `a`; nothing past depth zx (where its end opens).
+static void tun_style_draw(Tunnel *tn, float t, float dist, float a, float zx)
 {
-    const float rot = t * 0.22f;
-    float vx, vy, xy[8];
-    int i, k, s;
-    if (exit)
+    float xy[50 * 2];
+    int i, k, j;
+    if (a < 0.01f) return;
+    switch (tn->style)
     {
-        // The way out: an opening as wide as the tunnel at depth zx, behind the wall still before it - into the dark
-        // blue of the menus (it was white).
-        tun_centre(zx, t, &vx, &vy);
-        UiCircle(vx, vy, TUN_FOCAL / zx, D3DCOLOR_ARGB((int)(fade * 255), 14, 36, 80));
-        UiCircle(vx, vy, TUN_FOCAL / zx * 0.8f, D3DCOLOR_ARGB((int)(fade * 255), TUN_DARK_R, TUN_DARK_G, TUN_DARK_B));
-    }
-    // (No glow at the far end any more: it showed as a white sphere that vanished as the way out began.)
-    // The wall's data, far to near: each sector's lane in slices, eight slices a lane's length.
-    if (tn->data)
+    case 0:   // rings in the N64 colours rushing past
+    case 2:   // hexagonal frames turning as they pass, light blue and white, blocks of data on their sides
+    case 5:   // rings broken into arcs turning each way, cyan and orange, like the tracks of a circuit
+    case 6:   // square frames, each wall in a colour of the logo's cubes
     {
-        UiQuadsBegin(tn->data);
-        for (k = TUN_SLICES - 1; k >= 0; k--)
-            for (i = 0; i < TUN_SECTORS; i++)
+        const float sp = tn->style == 0 ? 0.45f : 0.48f, ph = dist / sp;
+        const int n = (int)((TUN_FAR - TUN_NEAR) / sp) + 1;
+        for (k = n; k >= 0; k--)
+        {
+            const float z = TUN_NEAR + (k - tun_frac(ph)) * sp, light = tun_light(z) * a;
+            const int id = k + (int)floorf(ph);
+            float cx, cy;
+            if (z < TUN_NEAR * 0.5f || z > zx || light < 0.02f) continue;
+            tun_centre(z, t, &cx, &cy);
+            if (tn->style == 0)
             {
-                const float phase = dist * tn->speedOf[i] / TUN_SLICE, z0 = TUN_NEAR + (k - tun_frac(phase)) * TUN_SLICE;
-                const int cell = (k + (int)floorf(phase) + i * 3) & 7;
-                const float a0 = rot + i * 6.2831853f / TUN_SECTORS, a1 = a0 + 6.2831853f / TUN_SECTORS;
-                const float v0 = tn->laneOf[i] / (float)TUNNEL_DATA_LANES, v1 = (tn->laneOf[i] + 1) / (float)TUNNEL_DATA_LANES;
-                for (s = 0; s < TUN_SUB; s++)
+                const int *c = s_tunN64[id & 3];
+                for (i = 0; i <= 48; i++) tun_point(i * 6.2831853f / 48, z, t, 0.95f, 0.92f, &xy[i * 2], &xy[i * 2 + 1]);
+                tun_glow_poly(xy, 49, tun_thick(12.0f, z, 1.0f, 18.0f), tun_col(c[0], c[1], c[2], light));
+            }
+            else if (tn->style == 2)
+            {
+                const float rot = t * 0.6f + id * 0.12f;
+                const D3DCOLOR c = id % 3 ? tun_col(70, 170, 255, light) : tun_col(235, 245, 255, light);
+                for (i = 0; i <= 6; i++) tun_point(rot + i * 1.0471976f, z, t, 0.9f, 1.0f, &xy[i * 2], &xy[i * 2 + 1]);
+                tun_glow_poly(xy, 7, tun_thick(13.0f, z, 1.0f, 18.0f), c);
+                if (!(id & 1))
+                    for (i = 0; i < 6; i++)
+                    {
+                        const float mx = (xy[i * 2] + xy[i * 2 + 2]) * 0.5f, my = (xy[i * 2 + 1] + xy[i * 2 + 3]) * 0.5f, s = tun_thick(9.0f, z, 1.0f, 30.0f);
+                        UiRect(mx - s, my - s * 0.5f, s * 2, s, c);
+                    }
+            }
+            else if (tn->style == 5)
+            {
+                const float turn = ((id & 1) ? t * 1.22f : -t * 0.96f) + id * 0.4f, th = tun_thick(11.0f, z, 1.0f, 16.0f);
+                const D3DCOLOR c = (id & 1) ? tun_col(255, 150, 40, light) : tun_col(40, 220, 255, light);
+                for (j = 0; j < 5; j++)
                 {
-                    float za = z0 + TUN_SLICE * s / TUN_SUB, zb = z0 + TUN_SLICE * (s + 1) / TUN_SUB, ua, ub, light;
-                    if (zb <= TUN_NEAR || za >= zx) continue;
-                    if (za < TUN_NEAR) za = TUN_NEAR;
-                    if (zb > zx) zb = zx;
-                    ua = (cell + (za - z0) / TUN_SLICE) / 8.0f;
-                    ub = (cell + (zb - z0) / TUN_SLICE) / 8.0f;
-                    light = tun_light((za + zb) * 0.5f) * fade;
-                    if (light < 0.02f) continue;
-                    tun_point(a0, za, t, &xy[0], &xy[1]);
-                    tun_point(a0, zb, t, &xy[2], &xy[3]);
-                    tun_point(a1, za, t, &xy[4], &xy[5]);
-                    tun_point(a1, zb, t, &xy[6], &xy[7]);
-                    UiQuadsAdd(xy, ua, v0, ub, v1, D3DCOLOR_ARGB((int)(225 * light), 70, 220, 255));
+                    const float st = turn + j * 1.2566371f;
+                    for (i = 0; i <= 8; i++) tun_point(st + i * 0.0959931f, z, t, 0.9f, 1.0f, &xy[i * 2], &xy[i * 2 + 1]);   // 44 degrees
+                    tun_glow_poly(xy, 9, th, c);
+                    UiCircle(xy[16], xy[17], tun_thick(8.0f, z, 1.5f, 12.0f), tun_col(255, 255, 255, light));
                 }
             }
-        UiQuadsEnd();
-    }
-    {
-        // The rings (one a slice, every third one brighter) and the lines along the tunnel.
-        const float phase = dist / TUN_SLICE, lineFar = zx < TUN_FAR ? zx : TUN_FAR;
-        float ring[49 * 2];
-        for (k = TUN_SLICES - 1; k >= 0; k--)
-        {
-            const float z = TUN_NEAR + (k - tun_frac(phase)) * TUN_SLICE, light = tun_light(z) * fade;
-            const int bright = ((k + (int)floorf(phase)) % 3) == 0;
-            float thick;
-            if (z < 0.3f || z > zx || light < 0.02f) continue;
-            for (i = 0; i <= 48; i++) tun_point(rot + i * 6.2831853f / 48, z, t, &ring[i * 2], &ring[i * 2 + 1]);
-            thick = (bright ? 5.0f : 2.5f) / z;
-            if (thick < 1.0f) thick = 1.0f;
-            if (thick > 9.0f) thick = 9.0f;
-            UiPolyline(ring, 49, thick, 1.5f, D3DCOLOR_ARGB((int)(light * (bright ? 230 : 90)), 210, 245, 255));
+            else
+            {
+                // bottom blue, left yellow, top green, right red; a light where the walls meet
+                static const int wall[4] = { 3, 1, 2, 0 };
+                const float rot = sinf(t * 0.8f) * 0.25f, th = tun_thick(13.0f, z, 1.0f, 18.0f);
+                for (i = 0; i < 4; i++) tun_point(rot + 0.7853982f + i * 1.5707963f, z, t, 0.85f, 1.0f, &xy[i * 2], &xy[i * 2 + 1]);
+                for (i = 0; i < 4; i++)
+                {
+                    const int *c = s_tunN64[wall[i]];
+                    tun_glow_line(xy[i * 2], xy[i * 2 + 1], xy[((i + 1) & 3) * 2], xy[((i + 1) & 3) * 2 + 1], th, tun_col(c[0], c[1], c[2], light));
+                }
+                for (i = 0; i < 4; i++) tun_glow_dot(xy[i * 2], xy[i * 2 + 1], tun_thick(5.0f, z, 1.0f, 10.0f), tun_col(255, 255, 255, light));
+            }
         }
-        for (i = 0; i < TUN_SECTORS && lineFar > 0.35f; i++)
-        {
-            float line[8 * 2];
-            for (k = 0; k < 8; k++) tun_point(rot + i * 6.2831853f / TUN_SECTORS, 0.3f + k * (lineFar - 0.3f) / 7, t, &line[k * 2], &line[k * 2 + 1]);
-            UiPolyline(line, 8, 1.5f, 1.0f, D3DCOLOR_ARGB((int)(fade * 45), 120, 200, 255));
-        }
+        break;
     }
-    // The packets of light, racing out of the tunnel (faster as it speeds up).
-    for (i = 0; i < TUN_PACKETS; i++)
+    case 1:
     {
-        TunPacket *p = &tn->packets[i];
-        float x0, y0, x1, y1, thick, light;
-        p->z -= p->speed * dt * speed * 0.25f;
-        if (p->z < TUN_NEAR + 0.08f) { tun_packet(p, &tn->seed, 0); continue; }
-        light = tun_light(p->z) * fade;
-        if (p->z > TUN_FAR || p->z + p->len > zx || light < 0.02f) continue;
-        tun_point(rot + p->ang, p->z, t, &x0, &y0);
-        tun_point(rot + p->ang, p->z + p->len, t, &x1, &y1);
-        thick = 3.5f / p->z;
-        if (thick < 1.2f) thick = 1.2f;
-        if (thick > 7.0f) thick = 7.0f;
-        UiLine(x1, y1, x0, y0, thick, UiAlpha(p->col, light * 0.9f));
-        UiCircle(x0, y0, thick * 0.9f, UiAlpha(D3DCOLOR_ARGB(255, 255, 255, 255), light));
+        // A neon wireframe: magenta rings across, cyan lines along, packets of light running out along the lines.
+        const float sp = 0.5f, ph = dist / sp, rot = t * 0.3f, lineFar = zx < TUN_FAR ? zx : TUN_FAR;
+        const int n = (int)((TUN_FAR - TUN_NEAR) / sp) + 1;
+        for (k = n; k >= 0; k--)
+        {
+            const float z = TUN_NEAR + (k - tun_frac(ph)) * sp, light = tun_light(z) * a;
+            if (z < TUN_NEAR * 0.5f || z > zx || light < 0.02f) continue;
+            for (i = 0; i <= 20; i++) tun_point(rot + i * 0.3141593f, z, t, 1.0f, 0.8f, &xy[i * 2], &xy[i * 2 + 1]);
+            tun_glow_poly(xy, 21, 1.6f, tun_col(255, 60, 220, light));
+        }
+        for (i = 0; i < 20 && lineFar > 0.3f; i++)
+        {
+            for (k = 0; k < 12; k++) tun_point(rot + i * 0.3141593f, 0.25f + k * (lineFar - 0.25f) / 11, t, 1.0f, 0.8f, &xy[k * 2], &xy[k * 2 + 1]);
+            tun_glow_poly(xy, 12, 1.6f, tun_col(40, 230, 255, a * 0.9f));
+        }
+        for (i = 0; i < 60; i++)
+        {
+            unsigned s = 0x5bd1e995u * (i + 1);
+            const int lane = (int)(tun_rand(&s) % 20);
+            const float z = tun_frac((tun_unit(&s) * 11.0f - dist * 1.4f) / 11.0f) * 11.0f + TUN_NEAR, light = tun_light(z) * a;
+            float x, y;
+            if (z > zx || light < 0.02f) continue;
+            tun_point(rot + lane * 0.3141593f, z, t, 1.0f, 0.8f, &x, &y);
+            tun_glow_dot(x, y, tun_thick(8.0f, z, 2.0f, 14.0f), tun_col(255, 255, 255, light));
+        }
+        break;
+    }
+    case 3:   // a wormhole: arms of light twisting around the way, violet to blue, a glow at its far end
+    case 4:   // the same in the N64 colours, a white glow
+    {
+        const int arms = tn->style == 3 ? 7 : 8;
+        const float sp = tn->style == 3 ? 0.16f : 0.17f, ph = dist / sp, twist = tn->style == 3 ? 0.9f : 0.8f, spin = tn->style == 3 ? 2.2f : 2.0f;
+        const int per = (int)((TUN_FAR - TUN_NEAR) / sp) + 1;
+        float gx, gy;
+        tun_centre(TUN_FAR, t, &gx, &gy);
+        if (zx > TUN_FAR - 1)
+        {
+            const int w = tn->style == 4;
+            UiCircle(gx, gy, 80, tun_col(w ? 255 : 120, w ? 255 : 80, 255, a * 0.12f));
+            UiCircle(gx, gy, 40, tun_col(w ? 255 : 140, w ? 255 : 100, 255, a * 0.3f));
+            UiCircle(gx, gy, 16, tun_col(w ? 255 : 200, w ? 255 : 170, 255, a * 0.8f));
+        }
+        for (j = per; j >= 0; j--)
+        {
+            const float z = TUN_NEAR + (j - tun_frac(ph)) * sp, light = tun_light(z) * a, r = tun_thick(12.0f, z, 1.5f, 16.0f);
+            const float mix = z / TUN_FAR > 1 ? 1 : z / TUN_FAR;
+            if (z < TUN_NEAR * 0.5f || z > zx || light < 0.02f) continue;
+            for (k = 0; k < arms; k++)
+            {
+                float x, y;
+                tun_point(k * 6.2831853f / arms + z * twist - t * spin, z, t, 0.85f, 1.0f, &x, &y);
+                if (tn->style == 3) tun_glow_dot(x, y, r, tun_col((int)(170 - 120 * mix), (int)(80 + 60 * mix), 255, light));
+                else tun_glow_dot(x, y, r, tun_col(s_tunN64[k & 3][0], s_tunN64[k & 3][1], s_tunN64[k & 3][2], light));
+            }
+        }
+        break;
+    }
+    default:
+    {
+        // A network flying past: nodes on the wall, linked to their neighbours, pulses running along the links.
+        static float px[TUN_NODES], py[TUN_NODES], pz[TUN_NODES], pa[TUN_NODES];
+        for (i = 0; i < TUN_NODES; i++)
+        {
+            const TunNode *nd = &tn->nodes[i];
+            pz[i] = tun_frac((nd->z0 - dist) / (TUN_FAR - TUN_NEAR)) * (TUN_FAR - TUN_NEAR) + TUN_NEAR;
+            pa[i] = nd->ang;
+            tun_point(nd->ang + t * 0.2f, pz[i], t, nd->rad, 1.0f, &px[i], &py[i]);
+        }
+        for (i = 0; i < TUN_NODES; i++)
+        {
+            const float light = tun_light(pz[i]) * a;
+            if (pz[i] > zx || light < 0.02f) continue;
+            for (j = i + 1; j < TUN_NODES; j++)
+            {
+                float da = fabsf(pa[i] - pa[j]);
+                if (da > 3.1415927f) da = 6.2831853f - da;
+                if (fabsf(pz[i] - pz[j]) < 0.9f && da < 0.7f && pz[j] <= zx)
+                {
+                    const float f = tun_frac(t * 1.5f + i * 0.37f);
+                    tun_glow_line(px[i], py[i], px[j], py[j], 1.4f, tun_col(60, 140, 255, light));
+                    UiCircle(px[i] + (px[j] - px[i]) * f, py[i] + (py[j] - py[i]) * f, 2.2f, tun_col(255, 255, 255, light));
+                }
+            }
+            tun_glow_dot(px[i], py[i], tun_thick(9.0f, pz[i], 1.5f, 14.0f), tun_col(150, 220, 255, light));
+        }
+        break;
+    }
     }
 }
 
@@ -17729,20 +18087,23 @@ static void arrive_over(void)
     UiRect(0, 0, UI_WIDTH, UI_HEIGHT, TUN_DARK(255 * (1.0f - wiz_ease(te / ARRIVE_TOTAL))));
 }
 
-// leaving: the way out when online play closes (1.6 s): already at full speed, the logo flying past, the
-// tunnel's end coming closer as a disc of light until it fills the screen, then fading to the menus.
-// Else the way in, in one go with its sound: speeding up, the logo landing (INTRO_LANDS) and floating, then from
-// INTRO_EXIT (sooner when A, B or START cut it short) the logo flying past and the tunnel's end coming as a disc of
-// light until it fills the screen (INTRO_LIGHT later); online play's first screen comes out of that light
-// (s_arrive). The controllers vibrate along (rumble: Settings > Controls > Rumble's strength, 0 none).
+// leaving: the way out when online play closes (1.6 s), down the tunnel of the way in: already at full speed, the
+// logo flying past, the tunnel's end coming closer until its opening fills the screen, then fading to the menus.
+// Else the way in, in one go with its sound: the stars still (INTRO_STILL), speeding into streaks (INTRO_FAST) and
+// down a tunnel picked at random, at full speed by INTRO_LANDS; from INTRO_EXIT (sooner when A, B or START cut it
+// short) its end coming until its light fills the screen (INTRO_LIGHT later); out of the flash, the logo among the
+// stars (INTRO_LOGO; A, B or START again end it), then online play's first screen out of the dark (s_arrive). The
+// controllers vibrate along (rumble: Settings > Controls > Rumble's strength, 0 none).
 static void online_intro(IDirect3DDevice9 *dev, int leaving = 0, int rumble = 0)
 {
-    Tunnel tn;
-    float last, exitAt = leaving ? 0.0f : INTRO_EXIT, end = leaving ? OUTRO_TOTAL : INTRO_EXIT + INTRO_LIGHT;
-    const float start = UiTime();
+    static Tunnel tn;   // (its nodes: off the stack)
+    float last, dist = 0, exitAt = leaving ? 0.0f : INTRO_EXIT, end = leaving ? OUTRO_TOTAL : INTRO_EXIT + INTRO_LIGHT + INTRO_LOGO;
+    const float start = UiTime(), cx = UI_WIDTH * 0.5f, cy = UI_HEIGHT * 0.5f;
     UiInput in;
     arrive_end();
-    tun_open(dev, &tn);
+    if (!leaving || s_tunStyle < 0) s_tunStyle = tun_pick();   // (leaving: the way in's)
+    tun_open(&tn, s_tunStyle);
+    intro_stars_init(cx, cy);
     xb_audio_music_pause(1);
     xb_audio_online_intro(leaving ? 2 : 1);
     UiInputInit(&in);
@@ -17752,98 +18113,104 @@ static void online_intro(IDirect3DDevice9 *dev, int leaving = 0, int rumble = 0)
     {
         const float t = UiTime() - start, dt = t - last > 0.1f ? 0.1f : t - last;
         const WORD down = UiInputPoll(&in);
-        float fade, dist, speed, out, zx, te;
+        float fade, speed, out, zx, te, a, tl;
         if (t >= end) break;
-        if ((down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_START)) && t > 0.3f && t < exitAt && !leaving)
+        if ((down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_START)) && t > 0.3f && !leaving)
         {
-            // Cut short: out of the tunnel at once (its sound with it).
-            exitAt = t;
-            end = t + INTRO_LIGHT;
-            xb_audio_online_intro(2);
+            if (t < exitAt)
+            {
+                // Cut short: out of the tunnel at once (its sound with it).
+                exitAt = t;
+                end = t + INTRO_LIGHT + INTRO_LOGO;
+                xb_audio_online_intro(2);
+            }
+            else if (t - exitAt > INTRO_LIGHT) end = t < end - 0.25f ? t + 0.25f : end;   // the logo: to the first screen now
         }
-        te = t - exitAt;   // into the way out (leaving: all of it)
+        te = t - exitAt;                                     // into the way out (leaving: all of it)
+        tl = leaving ? -1.0f : te - INTRO_LIGHT;            // the logo among the stars (the way in, after the flash)
         fade = leaving ? (t < 0.15f ? wiz_ease(t / 0.15f) : 1.0f) : (t < 0.35f ? wiz_ease(t / 0.35f) : 1.0f);
-        // The way out: at full speed and quickening; the tunnel's end (depth zx) coming in, nothing drawn past it.
-        dist = leaving ? 6.0f * t + 3.0f * t * t : tun_dist(t) + (te > 0 ? 3.0f * te * te : 0.0f);
-        speed = leaving ? 6.0f + 6.0f * t : tun_speed(t) + (te > 0 ? 6.0f * te : 0.0f);
+        if (leaving) speed = 6.0f + 6.0f * t;
+        else if (tl >= 0) speed = 6.0f * (1.0f - wiz_ease(tl / 0.5f > 1 ? 1 : tl / 0.5f)) + 0.05f;
+        else
+        {
+            if (t < INTRO_STILL) speed = 0.04f;
+            else if (t < INTRO_FAST) { const float e = (t - INTRO_STILL) / (INTRO_FAST - INTRO_STILL); speed = 0.04f + 4.0f * e * e; }
+            else if (t < INTRO_LANDS) speed = 4.0f + 2.0f * (t - INTRO_FAST) / (INTRO_LANDS - INTRO_FAST);
+            else speed = 6.0f;
+            if (te > 0) speed += 6.0f * te;
+        }
+        dist += speed * dt;
         out = te <= 0 ? 0.0f : leaving ? (te < OUTRO_OUT ? te / OUTRO_OUT : 1.0f) : (te < INTRO_LIGHT ? te / INTRO_LIGHT : 1.0f);
         zx = te > 0 || leaving ? tun_exit_depth(out) : TUN_FAR + 10.0f;
+        // The tunnel's strength: coming in as the stars stretch; gone once out of it.
+        a = leaving ? fade : tl >= 0 ? 0.0f : t < INTRO_FAST - 0.4f ? 0.0f : t < INTRO_FAST + 0.3f ? wiz_ease((t - (INTRO_FAST - 0.4f)) / 0.7f) : 1.0f;
         last = t;
-        if (!leaving)
         {
-            // The controllers: humming up with the speed, a thump as the logo lands, a hum while it floats, then
-            // harder and harder towards the light.
+            // The controllers, with the picture and its sound: still with the stars; humming up with the speed (a
+            // flutter as the stars stretch); a hard pulse at full speed (the thump), then a hum; harder and harder
+            // towards the tunnel's end; a hit at the flash, then a tap as the logo settles. Leaving: rising to the
+            // way out, then dying away.
             const float since = t - INTRO_LANDS;
-            tun_rumble(rumble, te > 0 ? 0.3f + 0.7f * out * out : since < 0 ? 0.1f + 0.3f * t / INTRO_LANDS : since < 0.16f ? 1.0f : 0.2f + 0.05f * sinf(since * 9.0f));
+            float lv;
+            if (leaving) lv = t < OUTRO_OUT ? 0.4f + 0.6f * (t / OUTRO_OUT) * (t / OUTRO_OUT) : expf(-(t - OUTRO_OUT) / 0.15f);
+            else if (tl >= 0) lv = tl < 0.2f ? 1.0f - tl * 3.0f : tl > 0.45f && tl < 0.55f ? 0.35f : 0.0f;
+            else if (te > 0) lv = 0.35f + 0.65f * out * out;
+            else if (t < INTRO_STILL) lv = 0.0f;
+            else if (since < 0) lv = 0.05f + 0.5f * speed / 6.0f + (t < INTRO_FAST ? 0.05f * sinf(t * 40.0f) : 0.0f);
+            else lv = since < 0.16f ? 1.0f : 0.35f + 0.05f * sinf(since * 9.0f);
+            tun_rumble(rumble, lv);
         }
-        dev->Clear(0, NULL, D3DCLEAR_TARGET, D3DCOLOR_ARGB(255, 2, 6, 12), 1.0f, 0);
+        dev->Clear(0, NULL, D3DCLEAR_TARGET, D3DCOLOR_ARGB(255, 3, 4, 12), 1.0f, 0);
         UiBegin(dev);
-        tun_draw(&tn, t, dt, dist, speed, te > 0 || leaving, zx, fade);
-        if (te > 0 || leaving)
+        if ((te > 0 || leaving) && tl < 0)
         {
-            // The logo where it floated, flying past (bigger, fading) in 0.5 s ...
-            if (te < 0.5f)
+            // The way out: an opening as wide as the tunnel at depth zx, into the dark blue of the menus.
+            float vx, vy;
+            tun_centre(zx, t, &vx, &vy);
+            UiCircle(vx, vy, TUN_FOCAL * 0.95f / zx, D3DCOLOR_ARGB((int)(fade * 255), 14, 36, 80));
+            UiCircle(vx, vy, TUN_FOCAL * 0.95f / zx * 0.8f, D3DCOLOR_ARGB((int)(fade * 255), TUN_DARK_R, TUN_DARK_G, TUN_DARK_B));
+        }
+        tun_style_draw(&tn, t, dist, a, zx);
+        intro_stars(cx, cy, speed, dt, t, fade);
+        if (!leaving && tl < 0 && t > INTRO_LANDS && t < INTRO_LANDS + 0.5f)
+            UiRect(0, 0, UI_WIDTH, UI_HEIGHT, D3DCOLOR_ARGB((int)(70 * expf(-(t - INTRO_LANDS) / 0.1f)), 40, 140, 255));   // full speed: a blue pulse
+        if (leaving)
+        {
+            // The logo flying past (bigger, fading) in 0.5 s, then out of the tunnel the dark filling the screen.
+            if (te < 0.5f) UiOnlineLogo(cx, cy, INTRO_LOGO_H * (1.0f + 3.0f * te * te / 0.25f), 1.0f - te / 0.5f);
+            if (t > OUTRO_OUT - 0.25f)
             {
-                const float e = te / 0.5f, h = INTRO_LOGO_H * (1.0f + 3.0f * e * e);
-                float lx = UI_WIDTH * 0.5f, ly = UI_HEIGHT * 0.5f;
-                if (!leaving && t > INTRO_LANDS)
-                {
-                    tun_centre(1.0f, t, &lx, &ly);
-                    ly += 3.0f * sinf((t - INTRO_LANDS) * 2.2f);
-                }
-                UiOnlineLogo(lx, ly, h * (t > INTRO_LANDS || leaving ? 1.0f : 0.5f), 1.0f - e);
-            }
-            if (leaving)
-            {
-                // ... then, out of the tunnel, the light filling the screen and fading to the menus.
-                if (t > OUTRO_OUT - 0.25f)
-                {
-                    const float w = t < OUTRO_OUT ? (t - (OUTRO_OUT - 0.25f)) / 0.25f : 1.0f;
-                    UiRect(0, 0, UI_WIDTH, UI_HEIGHT, TUN_DARK(255 * w));
-                }
-            }
-            else if (te > INTRO_LIGHT - 0.3f)
-            {
-                // ... then the light filling the screen: online play's first screen comes out of it.
-                const float w = (te - (INTRO_LIGHT - 0.3f)) / 0.3f;
-                UiRect(0, 0, UI_WIDTH, UI_HEIGHT, TUN_DARK(255 * (w > 1 ? 1 : w)));
+                const float w = t < OUTRO_OUT ? (t - (OUTRO_OUT - 0.25f)) / 0.25f : 1.0f;
+                UiRect(0, 0, UI_WIDTH, UI_HEIGHT, TUN_DARK(255 * w));
             }
         }
-        else if (t > 0.9f)
+        else if (te > 0)
         {
-            // The logo: from the far end (its depth eased in 1.3 s), landing in front with a flash and a ring.
-            const float e = wiz_ease((t - 0.9f) / (INTRO_LANDS - 0.9f)), inv = 1.0f / TUN_FAR + (1.0f - 1.0f / TUN_FAR) * e;
-            const float z = 1.0f / inv, since = t - INTRO_LANDS;
-            float lx, ly, h = INTRO_LOGO_H / z, a = (t - 0.9f) * 3.0f;
-            tun_centre(z, t, &lx, &ly);
-            if (a > 1) a = 1;
-            if (since > 0)
+            // The light of the tunnel's end filling the screen, then lifting off the logo among the stars; the dark
+            // at the end, online play's first screen coming out of it (s_arrive).
+            const float rise = te < INTRO_LIGHT - 0.4f ? 0.0f : tl < 0 ? (te - (INTRO_LIGHT - 0.4f)) / 0.4f : 1.0f - (tl / 0.45f > 1 ? 1 : tl / 0.45f);
+            if (tl >= 0)
             {
-                // Landed: a little bounce, a soft light behind, floating.
-                h *= 1.0f + 0.07f * sinf(since * 14.0f) * expf(-since * 5.0f);
-                ly += 3.0f * sinf(since * 2.2f);
-                UiShadow(lx - h * 2.4f, ly - h * 0.5f, h * 4.8f, h, h * 0.5f, 90, D3DCOLOR_ARGB((int)(fade * (70 + 30 * sinf(since * 3.0f))), 40, 170, 255));
+                const float k = wiz_ease(tl / 0.5f > 1 ? 1 : tl / 0.5f), left = end - t;
+                UiShadow(cx - 360, cy - 70, 720, 140, 70, 90, D3DCOLOR_ARGB((int)(60 * k), 40, 170, 255));
+                UiOnlineLogo(cx, cy, INTRO_LOGO_H * (1.25f - 0.25f * k), k);
+                if (left < 0.25f) UiRect(0, 0, UI_WIDTH, UI_HEIGHT, TUN_DARK(255 * (1.0f - left / 0.25f)));
             }
-            UiOnlineLogo(lx, ly, h, a * fade);
-            if (since > 0 && since < 0.7f)
-            {
-                const float r = 120.0f + since * 1300.0f;
-                UiRoundRing(lx - r, ly - r, r * 2, r * 2, r, 4.0f, D3DCOLOR_ARGB((int)(200 * (1.0f - since / 0.7f) * fade), 160, 235, 255));
-            }
-            if (since > 0 && since < 0.5f) UiRect(0, 0, UI_WIDTH, UI_HEIGHT, D3DCOLOR_ARGB((int)(90 * expf(-since / 0.1f) * fade), 40, 140, 255));   // a blue flash (not white)
+            if (rise > 0) UiRect(0, 0, UI_WIDTH, UI_HEIGHT, D3DCOLOR_ARGB((int)(215 * (rise > 1 ? 1 : rise)), 190, 210, 255));
         }
         UiRect(0, 0, UI_WIDTH, UI_HEIGHT, D3DCOLOR_ARGB((int)(255 * (1.0f - fade)), 0, 0, 0));
         UiEnd();
         dev->Present(NULL, NULL, NULL, NULL);
         Sleep(8);
     }
-    tun_close(dev, &tn);
     if (leaving)
     {
+        tun_rumble(rumble, 0);
+        s_tunRumbleSent = -1;
         xb_audio_music_pause(0);
         return;
     }
-    // Out into the light: online play's first screen comes out of it (the music back when it has).
+    // Out of the dark: online play's first screen comes out of it (the music back when it has).
     s_arrive.at = UiTime();
     s_arrive.rumble = rumble;
     s_arrive.drawing = 0;
@@ -18315,12 +18682,35 @@ static int online_hub(IDirect3DDevice9 *dev, Config *c)
     laika_free(dev);
     online_avatars_free(dev);
     room_covers_free(dev);
-    if (!r) online_intro(dev, 1);   // back to the menus: out of the tunnel (a game starting goes straight in)
+    if (!r) online_intro(dev, 1, c->rumble);   // back to the menus: out of the tunnel (a game starting goes straight in)
     return r;
 }
 
 #define HUB_PANEL_S 0.28f      // the hub's right side changing kind: seconds
 #define HUB_PANEL_MOVE 36.0f   // ... and how far each one moves
+// Most played (the hub's panel): its ranking asked for on a thread of its own (the request held the menu for a moment
+// as the panel came up), one period at a time; kept while online play is open.
+struct TopFetch { volatile LONG state; char period; int ok; std::vector<OnlineTopGame> games; };   // state: 0 idle, 1 asking, 2 answered
+static TopFetch s_topFetch;
+static DWORD WINAPI top_fetch(LPVOID)
+{
+    std::vector<OnlineTopGame> g;
+    s_topFetch.ok = OnlineTopGames(s_topFetch.period, &g);
+    s_topFetch.games.swap(g);
+    InterlockedExchange(&s_topFetch.state, 2);
+    return 0;
+}
+static void top_fetch_start(char period)
+{
+    HANDLE h;
+    if (s_topFetch.state != 0) return;
+    s_topFetch.period = period;
+    InterlockedExchange(&s_topFetch.state, 1);
+    h = CreateThread(NULL, 0, top_fetch, NULL, 0, NULL);
+    if (h) CloseHandle(h);
+    else InterlockedExchange(&s_topFetch.state, 0);
+}
+
 static int online_hub_run(IDirect3DDevice9 *dev, Config *c)
 {
     static UiAnim selAnim;
@@ -18335,8 +18725,8 @@ static int online_hub_run(IDirect3DDevice9 *dev, Config *c)
                                                 D3DCOLOR_ARGB(255, 40, 200, 190), D3DCOLOR_ARGB(255, 180, 140, 255), D3DCOLOR_ARGB(255, 255, 92, 130) };
     static const char periods[3] = { 'w', 'm', 'a' };
     static const int periodLabel[3] = { T_ONLINE_TAB_WEEK, T_TOP_MONTH, T_TOP_ALL };
-    std::vector<OnlineTopGame> top;   // Most played: the ranking of `topPeriod`, read when first shown (topLoaded)
-    int topPeriod = 0, topLoaded = -1, topSel = 0, topFocus = 0, topTrig = 3, topAsk = 0;
+    std::vector<OnlineTopGame> top, topKept[3];   // Most played: the ranking of `topPeriod` (topLoaded), each period's kept
+    int topPeriod = 0, topLoaded = -1, topSel = 0, topFocus = 0, topTrig = 3, topHave[3] = { 0, 0, 0 };
     std::vector<OnlineChatLine> chat, fresh;
     std::vector<OnlineRoomInfo> rooms;
     std::vector<OnlineGameInfo> games;
@@ -18373,18 +18763,29 @@ static int online_hub_run(IDirect3DDevice9 *dev, Config *c)
             online = (int)users.size();
             if ((int)chat.size() > shown * 4) chat.erase(chat.begin(), chat.end() - shown * 3);
         }
-        if (sel == OH_TOP && topLoaded != topPeriod)
         {
-            // Most played: its ranking read a frame after "connecting" is shown in the panel (one request, kept an hour
-            // by the server).
-            if (topAsk++ >= 1)
+            // Most played: each period's ranking asked for on its own thread (the week's as soon as the hub opens, the
+            // others when picked; "connecting" in the panel meanwhile), kept once answered (the server keeps it an hour).
+            int k2;
+            if (s_topFetch.state == 2)
             {
-                if (!OnlineTopGames(periods[topPeriod], &top)) top.clear();
-                if (top.size() > 6) top.resize(6);
+                for (k2 = 0; k2 < 3 && periods[k2] != s_topFetch.period; k2++) {}
+                if (k2 < 3)
+                {
+                    topKept[k2].swap(s_topFetch.games);
+                    if (!s_topFetch.ok) topKept[k2].clear();
+                    if (topKept[k2].size() > 6) topKept[k2].resize(6);
+                    topHave[k2] = 1;
+                }
+                s_topFetch.games.clear();
+                InterlockedExchange(&s_topFetch.state, 0);
+            }
+            if (!topHave[topPeriod] && (sel == OH_TOP || topPeriod == 0)) top_fetch_start(periods[topPeriod]);
+            if (topHave[topPeriod] && topLoaded != topPeriod)
+            {
+                top = topKept[topPeriod];
                 topLoaded = topPeriod;
                 topSel = 0;
-                topAsk = 0;
-                UiInputInit(&in);
             }
         }
         if (sel == OH_TOP)
@@ -19179,11 +19580,52 @@ static void view_cover(const ArtView *v, float x, float y, float w, float h, flo
     preview_draw(x, y, w, h, r, va * ((color >> 24) / 255.0f));
 }
 
+static void box_fit(const ArtView *v, float maxW, float maxH, float *w, float *h);   // with the 3D boxes view
+
+// A game shown as a 3D box (Game images > 3D box): the box art made a box, or ScreenScraper's 3D box.
+static int view_is_3d(const ArtView *v)
+{
+    return v && v->cover && ((s_cover3d && v->shownKind == ART_KIND_BOX) || v->shownKind == ART_KIND_BOX3D);
+}
+
+// Where it stands in a room of the layout: as the 3D boxes view draws it, its own proportions (not
+// stretched to the room's), on the room's bottom, in its middle.
+static void view_box_rect(const ArtView *v, float x, float y, float w, float h, float *bx, float *by, float *bw, float *bh)
+{
+    box_fit(v, w, h, bw, bh);
+    *bx = x + (w - *bw) * 0.5f;
+    *by = y + h - *bh;
+}
+
+// The selection's glow round a game's picture in a room of the layout: round the 3D box itself when it shows one (its
+// outline, as the 3D boxes view glows it), else round the room (its glow and ring, `pad` out from it).
+static void view_sel_glow(const ArtView *v, float x, float y, float w, float h, float pad, float r, float a)
+{
+    if (view_is_3d(v))
+    {
+        float bx, by, bw, bh;
+        view_box_rect(v, x, y, w, h, &bx, &by, &bw, &bh);
+        if (v->shownKind == ART_KIND_BOX) box_glow(bx, by, bw, bh, 18, SEL_GLOW(a * 0.55f));
+        else UiShadow(bx + bw * 0.1f, by + bh - 8, bw * 0.8f, 16, 8, 18, SEL_RING(a * 0.5f));   // (its outline unknown: on the floor)
+        return;
+    }
+    selection_glow(x - pad, y - pad, w + 2 * pad, h + 2 * pad, r, a);
+    UiRoundRing(x - pad, y - pad, w + 2 * pad, h + 2 * pad, r, 3.0f, SEL_RING(a));
+}
+
 static void view_cover_still(const ArtView *v, float x, float y, float w, float h, float r, D3DCOLOR color)
 {
     const float e = view_swap(v);
     const int a = (int)(color >> 24);
     const D3DCOLOR rgb = color & 0xFFFFFF;
+    if (view_is_3d(v))
+    {
+        float bx, by, bw, bh;
+        view_box_rect(v, x, y, w, h, &bx, &by, &bw, &bh);
+        if (v->shownKind == ART_KIND_BOX) box_from_cover(v->cover, bx, by, bw, bh, color);
+        else UiImage(v->cover, bx, by, bw, bh, 0, color);
+        return;
+    }
     if (e < 1.0f)
     {
         const float gw = w * 0.04f * e, gh = h * 0.04f * e, sw = w * 0.04f * (1.0f - e), sh = h * 0.04f * (1.0f - e);
@@ -19202,6 +19644,15 @@ static void view_mirror(const ArtView *v, float x, float y, float w, float h, fl
 {
     const float keep = 1.0f - preview_spot(v->path), e = view_swap(v);
     if (keep <= 0) return;
+    if (view_is_3d(v))
+    {
+        // a 3D box: its reflection as the 3D boxes view draws it, from under the box itself
+        float bx, by, bw, bh;
+        view_box_rect(v, x, y, w, h, &bx, &by, &bw, &bh);
+        if (v->shownKind == ART_KIND_BOX) box_reflection(v->cover, bx, y - bh, bw, bh, 0, UiAlpha(top, keep * 0.8f));
+        else UiImageMirror(v->cover, bx, y, bw, bh, 0, frac, UiAlpha(top, keep), UiAlpha(bottom, keep));
+        return;
+    }
     if (e < 1.0f && v->prev)
         UiImageMirror(v->prev, x, y, w, h, r, frac, UiAlpha(top, keep * (1.0f - e * e)), UiAlpha(bottom, keep * (1.0f - e * e)));
     UiImageMirror(v->cover, x, y, w, h, r, frac, UiAlpha(top, keep * (e < 1.0f ? e : 1.0f)), UiAlpha(bottom, keep * (e < 1.0f ? e : 1.0f)));
@@ -19935,9 +20386,65 @@ static float fx_rand(int i)
     return (x & 0xFFFF) / 65535.0f;
 }
 
-// Every colour of the effects comes through here: the chosen opacity applies to all.
+// The effects drawn in colours of their own (the space ones and after): the chosen colours (Color 1, 2, 3) take
+// the place of the effect's own three (s_fxDefault) - each colour drawn goes to the chosen one in place of its
+// nearest own one, its hue moved as much, its saturation scaled, its lightness kept; greys (stars, shadows) stay.
+static int s_fxRemap;                         // on while such an effect draws with chosen colours (browser_effect)
+static float s_fxFromH[3], s_fxFromS[3], s_fxToH[3], s_fxToS[3];
+static int s_fxFrom[3][3], s_fxFromN;         // its own colours that have a hue (greys left out)
+static u32 s_fxRemapKey[256], s_fxRemapVal[256], s_fxRemapSig;
+static void fx_to_hsl(int r, int g, int b, float *h, float *s, float *l)
+{
+    const float R = r / 255.0f, G = g / 255.0f, B = b / 255.0f;
+    const float mx = R > G ? (R > B ? R : B) : (G > B ? G : B), mn = R < G ? (R < B ? R : B) : (G < B ? G : B), d = mx - mn;
+    *l = (mx + mn) * 0.5f;
+    *s = d <= 0 ? 0 : d / (1 - fabsf(2 * *l - 1) + 1e-6f);
+    if (d <= 0) *h = 0;
+    else if (mx == R) *h = 60 * fmodf((G - B) / d + 6, 6.0f);
+    else if (mx == G) *h = 60 * ((B - R) / d + 2);
+    else *h = 60 * ((R - G) / d + 4);
+}
+static void fx_from_hsl(float h, float s, float l, int *rgb)
+{
+    float c = (1 - fabsf(2 * l - 1)) * s, hp, x, m, r = 0, g = 0, b = 0;
+    h = fmodf(h, 360.0f);
+    if (h < 0) h += 360;
+    hp = h / 60.0f;
+    x = c * (1 - fabsf(fmodf(hp, 2.0f) - 1));
+    m = l - c / 2;
+    if (hp < 1) { r = c; g = x; } else if (hp < 2) { r = x; g = c; } else if (hp < 3) { g = c; b = x; }
+    else if (hp < 4) { g = x; b = c; } else if (hp < 5) { r = x; b = c; } else { r = c; b = x; }
+    rgb[0] = (int)((r + m) * 255 + 0.5f); rgb[1] = (int)((g + m) * 255 + 0.5f); rgb[2] = (int)((b + m) * 255 + 0.5f);
+}
+static void fx_remap(int *r, int *g, int *b)
+{
+    const u32 key = 0x1000000u | ((u32)*r << 16) | ((u32)*g << 8) | (u32)*b, slot = ((u32)*r * 7 + (u32)*g * 13 + (u32)*b * 31) & 255;
+    float h, sat, l;
+    int k, best = 0, out[3];
+    long bd = 0x7FFFFFFF;
+    if (s_fxRemapKey[slot] == key) { *r = (s_fxRemapVal[slot] >> 16) & 255; *g = (s_fxRemapVal[slot] >> 8) & 255; *b = s_fxRemapVal[slot] & 255; return; }
+    fx_to_hsl(*r, *g, *b, &h, &sat, &l);
+    if (sat >= 0.12f && l > 0.03f && l < 0.97f)
+    {
+        for (k = 0; k < s_fxFromN; k++)
+        {
+            const long dr = *r - s_fxFrom[k][0], dg = *g - s_fxFrom[k][1], db = *b - s_fxFrom[k][2], dd = dr * dr + dg * dg + db * db;
+            if (dd < bd) { bd = dd; best = k; }
+        }
+        sat = sat * s_fxToS[best] / (s_fxFromS[best] > 0.15f ? s_fxFromS[best] : 0.15f);
+        fx_from_hsl(h - s_fxFromH[best] + s_fxToH[best], sat > 1 ? 1 : sat, l, out);
+        *r = out[0] < 0 ? 0 : out[0] > 255 ? 255 : out[0];
+        *g = out[1] < 0 ? 0 : out[1] > 255 ? 255 : out[1];
+        *b = out[2] < 0 ? 0 : out[2] > 255 ? 255 : out[2];
+    }
+    s_fxRemapKey[slot] = key;
+    s_fxRemapVal[slot] = ((u32)*r << 16) | ((u32)*g << 8) | (u32)*b;
+}
+
+// Every colour of the effects comes through here: the chosen opacity applies to all (and the chosen colours, fx_remap).
 static D3DCOLOR fx_col(int a, int r, int g, int b)
 {
+    if (s_fxRemap) fx_remap(&r, &g, &b);
     a = a * s_fxOpacity / 100;
     return D3DCOLOR_ARGB(a < 0 ? 0 : a > 255 ? 255 : a, r, g, b);
 }
@@ -20696,6 +21203,2805 @@ static void fx_warp(float t)
     }
 }
 
+// ---- The scene backgrounds (3.6): whole pictures made from the UI's shapes - space, nature, places, machines ----
+// Each paints the whole screen (a sky, a sea, a city...) rather than lights over the backdrop: the chosen opacity
+// still applies to all of it (fx_col). Their pictures of noise (clouds, gas, a planet's bands) are made the first time
+// the effect shows and kept. Positions are in the UI's 1280x720; SP_K scales the sizes of the 960-wide prototypes.
+#define SP_W ((float)UI_WIDTH)
+#define SP_H ((float)UI_HEIGHT)
+#define SP_K (SP_W / 960.0f)
+#define SP_TAU 6.2831853f
+static IDirect3DTexture9 *s_spWhite;
+
+static float sp_clamp01(float v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+static float sp_ease(float a, float b, float t) { const float x = sp_clamp01((t - a) / (b - a)); return x * x * (3 - 2 * x); }
+// A steady pseudo-random number around 0 (about -1..1, most near 0), for `i`.
+static float sp_gauss(int i) { return (fx_rand(i) + fx_rand(i + 7777) + fx_rand(i + 15551) + fx_rand(i + 23339) - 2.0f) * 0.5f; }
+
+// Filled shapes: triangles of a small white picture, tinted.
+static IDirect3DTexture9 *sp_white(void)
+{
+    if (!s_spWhite && UiDevice())
+    {
+        unsigned char px[4 * 4 * 4];
+        memset(px, 255, sizeof(px));
+        s_spWhite = UiImageCreate(UiDevice(), px, 4, 4);
+    }
+    return s_spWhite;
+}
+static int sp_begin(void) { if (!sp_white()) return 0; UiQuadsBegin(s_spWhite); return 1; }
+static void sp_end(void) { UiQuadsEnd(); }
+static void sp_tri(float x0, float y0, float x1, float y1, float x2, float y2, D3DCOLOR c)
+{
+    static const float uv[6] = { 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f };
+    float xy[6];
+    xy[0] = x0; xy[1] = y0; xy[2] = x1; xy[3] = y1; xy[4] = x2; xy[5] = y2;
+    UiTrisAdd(xy, uv, c);
+}
+// A polygon (xy[2n]) filled as a fan from its middle: convex shapes, and shapes seen whole from their middle.
+static void sp_fill(const float *xy, int n, D3DCOLOR c)
+{
+    float mx = 0, my = 0;
+    int i;
+    if (n < 3 || !sp_begin()) return;
+    for (i = 0; i < n; i++) { mx += xy[i * 2]; my += xy[i * 2 + 1]; }
+    mx /= n; my /= n;
+    for (i = 0; i < n; i++) sp_tri(mx, my, xy[i * 2], xy[i * 2 + 1], xy[((i + 1) % n) * 2], xy[((i + 1) % n) * 2 + 1], c);
+    sp_end();
+}
+// An ellipse (rotated by rot), from angle a0 to a1: filled, or its outline.
+static void sp_ellipse(float cx, float cy, float rx, float ry, float rot, D3DCOLOR c)
+{
+    float xy[40 * 2];
+    const float cr = cosf(rot), sr = sinf(rot);
+    int i;
+    for (i = 0; i < 40; i++)
+    {
+        const float a = i * SP_TAU / 40, x = cosf(a) * rx, y = sinf(a) * ry;
+        xy[i * 2] = cx + x * cr - y * sr;
+        xy[i * 2 + 1] = cy + x * sr + y * cr;
+    }
+    sp_fill(xy, 40, c);
+}
+static void sp_arc(float cx, float cy, float rx, float ry, float rot, float a0, float a1, float thick, D3DCOLOR c)
+{
+    float xy[49 * 2];
+    const float cr = cosf(rot), sr = sinf(rot);
+    int i;
+    for (i = 0; i <= 48; i++)
+    {
+        const float a = a0 + (a1 - a0) * i / 48, x = cosf(a) * rx, y = sinf(a) * ry;
+        xy[i * 2] = cx + x * cr - y * sr;
+        xy[i * 2 + 1] = cy + x * sr + y * cr;
+    }
+    UiPolyline(xy, 49, thick, 1.0f, c);
+}
+// A soft round light of radius r.
+static void sp_glow(float x, float y, float r, D3DCOLOR c) { UiShadow(x - r * 0.35f, y - r * 0.35f, r * 0.7f, r * 0.7f, r * 0.35f, r * 0.65f, c); }
+// A vertical gradient across the screen from y0 to y1.
+static void sp_vgrad(float y0, float y1, D3DCOLOR top, D3DCOLOR bottom) { UiRoundRect(0, y0, SP_W, y1 - y0, 0, top, bottom); }
+// A line fading out from (x0, y0) to (x1, y1), in `steps` parts.
+static void sp_fade_line(float x0, float y0, float x1, float y1, float thick, int r, int g, int b, int a, int steps)
+{
+    int k;
+    for (k = 0; k < steps; k++)
+    {
+        const float f0 = (float)k / steps, f1 = (float)(k + 1) / steps;
+        UiLine(x0 + (x1 - x0) * f0, y0 + (y1 - y0) * f0, x0 + (x1 - x0) * f1, y0 + (y1 - y0) * f1, thick * (1 - f0 * 0.5f), fx_col((int)(a * (1 - f0)), r, g, b));
+    }
+}
+
+// Value noise and its octaves (fbm), 0..1.
+static float sp_vnoise(int seed, float x, float y)
+{
+    const int xi = (int)floorf(x), yi = (int)floorf(y);
+    const float xf = x - xi, yf = y - yi, u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+    const float a = fx_rand(xi * 7919 + yi * 104729 + seed * 15485863), b = fx_rand((xi + 1) * 7919 + yi * 104729 + seed * 15485863);
+    const float c = fx_rand(xi * 7919 + (yi + 1) * 104729 + seed * 15485863), d = fx_rand((xi + 1) * 7919 + (yi + 1) * 104729 + seed * 15485863);
+    return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+}
+static float sp_fbm(int seed, float x, float y, int oct)
+{
+    float v = 0, amp = 0.5f, f = 1;
+    int i;
+    for (i = 0; i < oct; i++) { v += amp * sp_vnoise(seed + i * 31, x * f, y * f); f *= 2.03f; amp *= 0.5f; }
+    return v;
+}
+// ... repeating across: u from 0 to 1 joins its start.
+static float sp_fbm_tile(int seed, float u, float v, float su, float sv, int oct)
+{
+    return sp_fbm(seed, u * su, v * sv, oct) * (1 - u) + sp_fbm(seed, (u - 1) * su, v * sv, oct) * u;
+}
+
+// A picture of noise: a colour, its alpha from the noise over a threshold (shaped by pw, times gain) and a mask.
+enum { SPM_NONE, SPM_SIN, SPM_DOWN, SPM_ROUND };
+struct SpNoise { int seed; float su, sv, th, gain, pw; int r, g, b, tile, mask, oct; };
+static IDirect3DTexture9 *sp_noise_tex(IDirect3DTexture9 **slot, int w, int h, const SpNoise *p)
+{
+    unsigned char *px;
+    int i, j;
+    if (*slot || !UiDevice()) return *slot;
+    px = (unsigned char *)malloc(w * h * 4);
+    if (!px) return NULL;
+    for (j = 0; j < h; j++)
+        for (i = 0; i < w; i++)
+        {
+            const float u = (float)i / w, v = (float)j / h;
+            const float n = p->tile ? sp_fbm_tile(p->seed, u, v, p->su, p->sv, p->oct) : sp_fbm(p->seed, u * p->su, v * p->sv, p->oct);
+            float a = n - p->th, m = 1;
+            unsigned char *o = px + (j * w + i) * 4;
+            a = a > 0 ? powf(a / (1 - p->th), p->pw) * p->gain : 0;
+            if (p->mask == SPM_SIN) m = sinf(v * 3.14159f) * sinf(v * 3.14159f);
+            else if (p->mask == SPM_DOWN) m = powf(1 - v, 1.3f);
+            else if (p->mask == SPM_ROUND) { const float dx = u - 0.5f, dy = (v - 0.5f) * 0.6f; m = sp_clamp01(1 - sqrtf(dx * dx + dy * dy) * 2.2f); }
+            a *= m;
+            o[0] = (unsigned char)p->r; o[1] = (unsigned char)p->g; o[2] = (unsigned char)p->b;
+            o[3] = (unsigned char)(a > 255 ? 255 : a);
+        }
+    *slot = UiImageCreate(UiDevice(), px, w, h);
+    free(px);
+    return *slot;
+}
+// A picture drawn twice side by side, moved `off` pixels to the left: it scrolls without an edge.
+static void sp_scroll(IDirect3DTexture9 *tex, float off, float y, float h, int a)
+{
+    if (!tex) return;
+    off = fmodf(off, SP_W);
+    if (off < 0) off += SP_W;
+    UiImagePart(tex, -off, y, SP_W, h, 0, 0, 1, 1, fx_col(a, 255, 255, 255));
+    UiImagePart(tex, SP_W - off, y, SP_W, h, 0, 0, 1, 1, fx_col(a, 255, 255, 255));
+}
+
+// A field of stars: `n` of them from `seed`, twinkling, moved by (dx, dy) (scaled by each star's size: nearer moves
+// more), down to yMax; a few big ones with a glow and a cross of light.
+static void sp_stars(int seed, int n, float t, float dx, float dy, float alpha, float yMax)
+{
+    int i;
+    for (i = 0; i < n; i++)
+    {
+        const int k = seed * 1000 + i;
+        const int big = fx_rand(k + 1) < 0.04f;
+        const float s = big ? 1.2f + fx_rand(k + 2) * 1.4f : 0.4f + fx_rand(k + 2) * 0.9f;
+        float x = fmodf(fx_rand(k + 3) * SP_W + dx * s, SP_W), y = fmodf(fx_rand(k + 4) * yMax + dy * s, yMax);
+        const float tint = fx_rand(k + 5), b = (0.35f + fx_rand(k + 6) * 0.65f) * (0.7f + 0.3f * sinf(t * (0.5f + fx_rand(k + 7) * 2.5f) + fx_rand(k + 8) * SP_TAU)) * alpha;
+        const int r = tint < 0.15f ? 255 : tint < 0.35f ? 180 : 255, g = tint < 0.15f ? 210 : tint < 0.35f ? 200 : 255, bl = tint < 0.15f ? 170 : 255;
+        const float rad = s * SP_K;
+        if (x < 0) x += SP_W;
+        if (y < 0) y += yMax;
+        UiCircle(x, y, rad < 0.6f ? 0.6f : rad, fx_col((int)(255 * b), r, g, bl));
+        if (big)
+        {
+            const float l = rad * 7 * (0.8f + 0.2f * sinf(t * 2 + i));
+            sp_glow(x, y, rad * 6, fx_col((int)(120 * b), r, g, bl));
+            UiLine(x - l, y, x + l, y, 1.0f, fx_col((int)(150 * b), r, g, bl));
+            UiLine(x, y - l, x, y + l, 1.0f, fx_col((int)(150 * b), r, g, bl));
+        }
+    }
+}
+
+// 1. A spiral galaxy: three arms of stars turning, dust along them, pink knots of new stars, a golden core.
+static void fx_galaxy(float t)
+{
+    const float cx = SP_W * 0.5f, cy = SP_H * 0.52f, R = SP_H * 0.62f, tilt = 0.42f, cr = cosf(-0.35f), sr = sinf(-0.35f), spin = t * 0.05f;
+    int i;
+    sp_vgrad(0, SP_H, fx_col(255, 3, 4, 9), fx_col(255, 7, 6, 15));
+    sp_stars(11, 220, t, 0, 0, 0.6f, SP_H);
+    sp_glow(cx, cy, R * 1.2f, fx_col(50, 90, 70, 160));
+    for (i = 0; i < 6500; i++)
+    {
+        const int bulge = i < 1400, arm = i % 3;
+        float rr, ang, a, x, y, warm, s;
+        if (bulge) { rr = fabsf(sp_gauss(i)) * 0.22f; ang = fx_rand(i + 50000) * SP_TAU; }
+        else
+        {
+            rr = fabsf(powf(fx_rand(i + 10000), 0.6f) + sp_gauss(i + 20000) * 0.14f);
+            if (rr > 1.05f) rr = 1.05f;
+            ang = arm * 2.0944f + rr * 7.5f + sp_gauss(i + 30000) * (1.5f - 0.8f * rr);
+        }
+        a = ang + spin * (1.4f - rr);
+        x = cosf(a) * rr * R;
+        y = sinf(a) * rr * R * tilt;
+        warm = sp_clamp01(1 - rr * 1.6f);
+        s = fx_rand(i + 40000) < 0.03f ? 2.4f : 1.0f + fx_rand(i + 41000) * 1.3f;
+        UiRect(cx + x * cr - y * sr, cy + x * sr + y * cr, s, s, fx_col((int)(70 + 150 * fx_rand(i + 42000)), (int)(200 + 55 * warm), (int)(185 + 55 * warm), (int)(255 - 90 * warm)));
+    }
+    for (i = 0; i < 140; i++)
+    {
+        const float rr = 0.25f + fx_rand(i + 60000) * 0.7f, a = (i % 3) * 2.0944f + rr * 7.5f + sp_gauss(i + 61000) * 0.15f + spin * (1.4f - rr);
+        const float x = cosf(a) * rr * R, y = sinf(a) * rr * R * tilt;
+        sp_glow(cx + x * cr - y * sr, cy + x * sr + y * cr, (3 + fx_rand(i + 62000) * 6) * SP_K * 2.4f, fx_col(110, 255, 110, 190));
+    }
+    sp_glow(cx, cy, R * 0.45f, fx_col(170, 255, 200, 130));
+    sp_glow(cx, cy, R * 0.12f, fx_col(255, 255, 250, 230));
+}
+
+// 2. An emission nebula: clouds of gas in layers (magenta, cyan, orange) drifting, dark dust, young stars.
+static IDirect3DTexture9 *s_spNeb[4];
+static void fx_cosmic_nebula(float t)
+{
+    static const SpNoise lay[4] = { { 21, 3.0f, 1.7f, 0.42f, 420, 2, 255, 255, 255, 0, SPM_NONE, 5 }, { 22, 2.4f, 1.35f, 0.46f, 420, 2, 255, 255, 255, 0, SPM_NONE, 5 },
+                                    { 23, 3.6f, 2.0f, 0.50f, 420, 2, 255, 255, 255, 0, SPM_NONE, 5 }, { 24, 4.0f, 2.2f, 0.50f, 520, 1, 5, 3, 8, 0, SPM_NONE, 5 } };
+    static const int tints[3][3] = { { 230, 60, 160 }, { 40, 200, 230 }, { 255, 140, 60 } };
+    int i;
+    sp_vgrad(0, SP_H, fx_col(255, 5, 3, 12), fx_col(255, 10, 6, 20));
+    for (i = 0; i < 4; i++)
+    {
+        IDirect3DTexture9 *tex = sp_noise_tex(&s_spNeb[i], 256, 144, &lay[i]);
+        const float s = 1.3f + 0.04f * sinf(t * 0.1f + i), ox = sinf(t * 0.03f + i * 2) * SP_W * 0.05f, oy = cosf(t * 0.025f + i) * SP_H * 0.04f;
+        if (tex) UiImagePart(tex, (SP_W - SP_W * s) * 0.5f + ox, (SP_H - SP_H * s) * 0.5f + oy, SP_W * s, SP_H * s, 0, 0, 1, 1,
+                             i < 3 ? fx_col(230, tints[i][0], tints[i][1], tints[i][2]) : fx_col(255, 255, 255, 255));
+    }
+    sp_stars(25, 300, t, 0, 0, 1.0f, SP_H);
+}
+
+// 3. A ringed planet: a gas giant with bands turning, its rings in front and behind, a moon passing round it.
+static IDirect3DTexture9 *s_spPlanet;
+static void sp_planet_bands(float u, float v, unsigned char *o)
+{
+    // grey (tinted as it is drawn: its colour one that can be chosen)
+    const float band = sinf(v * 38 + sp_fbm_tile(31, u, v, 3, 9, 4) * 6) * 0.5f + 0.5f, n = sp_fbm_tile(32, u, v, 6, 20, 4);
+    const float l = 0.70f + 0.24f * band - 0.17f * n;
+    o[0] = o[1] = o[2] = (unsigned char)(255 * sp_clamp01(l)); o[3] = 255;
+}
+static IDirect3DTexture9 *sp_func_tex(IDirect3DTexture9 **slot, int w, int h, void (*fn)(float, float, unsigned char *))
+{
+    unsigned char *px;
+    int i, j;
+    if (*slot || !UiDevice()) return *slot;
+    px = (unsigned char *)malloc(w * h * 4);
+    if (!px) return NULL;
+    for (j = 0; j < h; j++)
+        for (i = 0; i < w; i++) fn((float)i / w, (float)j / h, px + (j * w + i) * 4);
+    *slot = UiImageCreate(UiDevice(), px, w, h);
+    free(px);
+    return *slot;
+}
+// One band of a picture between rows y0 and y1 - its left and right edges at xl0..xr0 above, xl1..xr1 below - u from
+// u0 across uspan (repeating past 1: split where it wraps), v0..v1. Between UiQuadsBegin(tex) and UiQuadsEnd.
+static void sp_band_quad(float y0, float xl0, float xr0, float y1, float xl1, float xr1, float u0, float uspan, float v0, float v1, D3DCOLOR c)
+{
+    float xy[8];
+    if (uspan <= 0) return;
+    u0 -= floorf(u0);
+    xy[1] = y0; xy[3] = y0; xy[5] = y1; xy[7] = y1;
+    if (u0 + uspan <= 1.0f)
+    {
+        xy[0] = xl0; xy[2] = xr0; xy[4] = xl1; xy[6] = xr1;
+        UiQuadsAdd(xy, u0, v0, u0 + uspan, v1, c);
+    }
+    else
+    {
+        const float f = (1.0f - u0) / uspan, xm0 = xl0 + (xr0 - xl0) * f, xm1 = xl1 + (xr1 - xl1) * f;
+        xy[0] = xl0; xy[2] = xm0; xy[4] = xl1; xy[6] = xm1;
+        UiQuadsAdd(xy, u0, v0, 1.0f, v1, c);
+        xy[0] = xm0; xy[2] = xr0; xy[4] = xm1; xy[6] = xr1;
+        UiQuadsAdd(xy, 0.0f, v0, u0 + uspan - 1.0f, v1, c);
+    }
+}
+// The shade of a sphere lit from the upper left, a little in front: none on its lit side, a soft terminator, the
+// night side dark, the edge darker all round. A disc of alpha (black), drawn over the sphere.
+static IDirect3DTexture9 *s_spShade;
+static void sp_shade_px(float u, float v, unsigned char *o)
+{
+    const float dx = u * 2 - 1, dy = v * 2 - 1, r2 = dx * dx + dy * dy;
+    float nz, lam, dark;
+    o[0] = o[1] = o[2] = 0;
+    if (r2 >= 1) { o[3] = 0; return; }
+    nz = sqrtf(1 - r2);
+    lam = -0.55f * dx - 0.45f * dy + 0.70f * nz;
+    dark = (1 - sp_ease(-0.2f, 0.55f, lam)) * 0.95f + (1 - nz) * (1 - nz) * 0.3f;
+    o[3] = (unsigned char)(255 * sp_clamp01(dark));
+}
+// A sphere of a picture (bands from top to bottom, each as wide as the sphere there), turning by `off`, tinted; its
+// shade over it (s_spShade).
+static void sp_sphere(IDirect3DTexture9 *tex, float cx, float cy, float R, float off, D3DCOLOR tint)
+{
+    const int bands = 64;
+    IDirect3DTexture9 *shade = sp_func_tex(&s_spShade, 192, 192, sp_shade_px);
+    int b;
+    if (!tex) return;
+    UiQuadsBegin(tex);
+    for (b = 0; b < bands; b++)
+    {
+        const float v0 = (float)b / bands, v1 = (float)(b + 1) / bands, y0 = cy - R + 2 * R * v0, y1 = cy - R + 2 * R * v1;
+        const float d0 = (y0 - cy) / R, d1 = (y1 - cy) / R, h0 = R * sqrtf(sp_clamp01(1 - d0 * d0)), h1 = R * sqrtf(sp_clamp01(1 - d1 * d1));
+        sp_band_quad(y0, cx - h0, cx + h0, y1, cx - h1, cx + h1, off, 1.0f, v0, v1, tint);
+    }
+    UiQuadsEnd();
+    if (shade) UiImage(shade, cx - R, cy - R, 2 * R, 2 * R, 0, fx_col(255, 255, 255, 255));
+}
+// An elliptical ring's arc (a0..a1) in pieces, each piece's alpha from `shade` (1 lit .. 0 in shadow): kept in runs
+// of the same light, so a ring is a few lines, not one per piece.
+static void sp_ring_arc(float cx, float cy, float rx, float ry, float rot, float a0, float a1, float thick, int a, int r, int g, int b,
+                        float (*shade)(float, float, void *), void *arg)
+{
+    float xy[65 * 2];
+    const float cr = cosf(rot), sr = sinf(rot);
+    int i, n = 0;
+    float runL = -1;
+    for (i = 0; i <= 64; i++)
+    {
+        const float ang = a0 + (a1 - a0) * i / 64, x = cosf(ang) * rx, y = sinf(ang) * ry;
+        const float px = cx + x * cr - y * sr, py = cy + x * sr + y * cr, L = shade ? shade(ang, rx, arg) : 1.0f;
+        const float q = floorf(L * 4 + 0.5f) / 4;   // (four steps of light: runs long enough)
+        if (n && q != runL)
+        {
+            xy[n * 2] = px; xy[n * 2 + 1] = py; n++;
+            UiPolyline(xy, n, thick, 1.0f, fx_col((int)(a * (0.12f + 0.88f * runL)), r, g, b));
+            xy[0] = px; xy[1] = py; n = 1;
+        }
+        else { xy[n * 2] = px; xy[n * 2 + 1] = py; n++; }
+        runL = q;
+    }
+    if (n > 1) UiPolyline(xy, n, thick, 1.0f, fx_col((int)(a * (0.12f + 0.88f * runL)), r, g, b));
+}
+// The planet's shadow on its rings: behind it, on the side away from the light (in the rings' own plane: the light
+// comes from the front left, the shadow goes back and right). `arg`: the planet's radius.
+static float sp_ring_shadow(float ang, float rr, void *arg)
+{
+    const float R = *(const float *)arg, X = cosf(ang) * rr, D = -sinf(ang) * rr, sx = 0.62f, sz = 0.785f;
+    const float along = X * sx + D * sz, across = fabsf(X * sz - D * sx);
+    if (along <= 0) return 1.0f;
+    return sp_clamp01((across - R * 0.92f) / (R * 0.12f));
+}
+static void fx_ringed_planet(float t)
+{
+    float R = SP_H * 0.38f;
+    const float cx = SP_W * 0.62f, cy = SP_H * 0.58f, tilt = 0.26f, rot = -0.28f;
+    const float ma = t * 0.35f, mx = cx + cosf(ma) * R * 2.3f, my = cy + sinf(ma) * R * 0.45f - R * 0.2f, mr = R * 0.12f;
+    const int behind = sinf(ma) < 0;
+    int i;
+    IDirect3DTexture9 *tex = sp_func_tex(&s_spPlanet, 256, 128, sp_planet_bands);
+    sp_vgrad(0, SP_H, fx_col(255, 2, 3, 10), fx_col(255, 6, 9, 18));
+    sp_stars(32, 280, t, t * 4, 0, 1.0f, SP_H);
+    if (behind) { sp_ellipse(mx, my, mr, mr, 0, fx_col(255, 150, 155, 170)); sp_glow(mx - mr * 0.3f, my - mr * 0.3f, mr * 1.2f, fx_col(90, 230, 232, 240)); }
+    for (i = 0; i < 40; i++)   // the rings behind the planet, its shadow on them
+    {
+        const float rr = R * (1.35f + i * 0.028f), gap = i > 17 && i < 20 ? 0.08f : 1.0f, a = (0.2f + 0.3f * fabsf(sinf(i * 1.7f))) * gap;
+        sp_ring_arc(cx, cy, rr, rr * tilt, rot, 3.14159f, SP_TAU, R * 0.022f, (int)(255 * a), 225 - i, 210 - i, 180 - i, sp_ring_shadow, &R);
+    }
+    sp_glow(cx - R * 0.25f, cy - R * 0.25f, R * 1.9f, fx_col(40, 255, 205, 140));   // its light on the dark around it
+    sp_sphere(tex, cx, cy, R, t * 0.012f, fx_col(255, 255, 205, 140));
+    sp_arc(cx, cy, R * 0.985f, R * 0.985f, 0, 3.14159f * 0.95f, 3.14159f * 1.55f, R * 0.025f, fx_col(70, 255, 225, 180));   // its lit edge
+    for (i = 0; i < 12; i++)
+    {
+        // the rings' shadow on the planet: their front, moved down and right as the light falls, inside the planet only
+        const float rr = R * (1.35f + i * 0.09f), ox = R * 0.05f, oy = R * 0.16f, cr = cosf(rot), sr = sinf(rot);
+        float xy[33 * 2];
+        int k, n = 0;
+        for (k = 0; k <= 32; k++)
+        {
+            const float ang = 3.14159f * k / 32, x = cosf(ang) * rr, y = sinf(ang) * rr * tilt;
+            const float px = cx + ox + x * cr - y * sr, py = cy + oy + x * sr + y * cr, dx = px - cx, dy = py - cy;
+            if (dx * dx + dy * dy < R * R * 0.97f) { xy[n * 2] = px; xy[n * 2 + 1] = py; n++; }
+            else if (n > 1) { UiPolyline(xy, n, R * 0.06f, 1.0f, fx_col(i == 6 ? 20 : 46, 0, 0, 0)); n = 0; }
+            else n = 0;
+        }
+        if (n > 1) UiPolyline(xy, n, R * 0.06f, 1.0f, fx_col(i == 6 ? 20 : 46, 0, 0, 0));
+    }
+    for (i = 0; i < 40; i++)   // ... and in front of it
+    {
+        const float rr = R * (1.35f + i * 0.028f), gap = i > 17 && i < 20 ? 0.08f : 1.0f, a = (0.2f + 0.3f * fabsf(sinf(i * 1.7f))) * gap;
+        sp_ring_arc(cx, cy, rr, rr * tilt, rot, 0, 3.14159f, R * 0.022f, (int)(255 * a), 225 - i, 210 - i, 180 - i, NULL, NULL);
+    }
+    if (!behind) { sp_ellipse(mx, my, mr, mr, 0, fx_col(255, 150, 155, 170)); sp_glow(mx - mr * 0.3f, my - mr * 0.3f, mr * 1.2f, fx_col(90, 230, 232, 240)); }
+    if (!behind) { IDirect3DTexture9 *sh = sp_func_tex(&s_spShade, 192, 192, sp_shade_px); if (sh) UiImage(sh, mx - mr, my - mr, 2 * mr, 2 * mr, 0, fx_col(255, 255, 255, 255)); }
+}
+
+// 4. A meteor shower: shooting stars across a starry sky with the Milky Way, now and then a fireball; hills.
+static void fx_meteors(float t)
+{
+    int i;
+    sp_vgrad(0, SP_H, fx_col(255, 3, 6, 22), fx_col(255, 12, 20, 48));
+    sp_stars(41, 360, t, 0, 0, 1.0f, SP_H);
+    for (i = 0; i < 7; i++)
+    {
+        const float period = 1.4f + fx_rand(i + 7100) * 1.8f, ph = t / period + fx_rand(i + 7200) * 5, cyc = floorf(ph), u = ph - cyc;
+        const int seed = (int)cyc * 13 + i * 977, big = fx_rand(seed + 1) < 0.12f;
+        const float life = big ? 0.9f : 0.55f;
+        float x, y, a, d, len;
+        if (u > life) continue;
+        d = u / life;
+        a = sinf(d * 3.14159f);
+        x = SP_W * (0.3f + fx_rand(seed + 2) * 0.8f) - 0.8f * d * SP_W * (big ? 0.5f : 0.8f);
+        y = SP_H * (-0.05f + fx_rand(seed + 3) * 0.3f) + 0.55f * d * SP_W * (big ? 0.5f : 0.8f);
+        len = (big ? 0.32f : 0.16f) * SP_W;
+        sp_fade_line(x, y, x + 0.8f * len, y - 0.55f * len, (big ? 4.0f : 1.8f) * SP_K, 255, big ? 210 : 230, big ? 160 : 255, (int)(255 * a), 6);
+        if (big) { sp_glow(x, y, 50 * SP_K, fx_col((int)(200 * a), 255, 190, 120)); UiCircle(x, y, 3 * SP_K, fx_col((int)(255 * a), 255, 255, 240)); }
+    }
+    for (i = 0; i < 48; i++)
+    {
+        const float u0 = i / 48.0f, u1 = (i + 1) / 48.0f;
+        const float y0 = SP_H * (0.9f - 0.06f * sinf(u0 * 7) - 0.04f * sinf(u0 * 17 + 1)), y1 = SP_H * (0.9f - 0.06f * sinf(u1 * 7) - 0.04f * sinf(u1 * 17 + 1));
+        UiStrip(u0 * SP_W, y0, SP_H, u1 * SP_W + 1, y1, SP_H, fx_col(255, 2, 3, 8), fx_col(255, 2, 3, 8));
+    }
+}
+
+// 5. A black hole: its disk of gas turning (brighter on the side coming at us), the light of its far side bent over
+// and under it, the ring of light at its edge.
+static void sp_bh_disk(float t, float cx, float cy, float R, int front)
+{
+    int i;
+    for (i = 0; i < 2600; i++)
+    {
+        const float rr = 1.25f + powf(fx_rand(i + 80000), 1.6f) * 2.6f, a = fx_rand(i + 81000) * SP_TAU + t * 1.6f / powf(rr, 1.5f), y0 = sinf(a);
+        float dop, heat, s;
+        if ((y0 > 0) != (front != 0)) continue;
+        dop = 0.55f + 0.45f * cosf(a + 0.4f);
+        heat = 1 - (rr - 1.25f) / 2.6f;
+        s = (0.8f + fx_rand(i + 82000) * 1.4f) * SP_K;
+        UiRect(cx + cosf(a) * rr * R, cy + y0 * rr * R * 0.22f, s, s,
+               fx_col((int)(255 * (0.3f + fx_rand(i + 83000) * 0.7f) * dop), 255, (int)(140 + 110 * heat * dop), (int)(60 + 190 * heat * dop * dop)));
+    }
+}
+static void fx_black_hole(float t)
+{
+    const float cx = SP_W * 0.5f, cy = SP_H * 0.5f, R = SP_H * 0.13f;
+    int i;
+    sp_vgrad(0, SP_H, fx_col(255, 1, 1, 4), fx_col(255, 4, 3, 10));
+    sp_stars(52, 280, t, 0, 0, 0.8f, SP_H);
+    sp_glow(cx, cy, R * 4, fx_col(40, 255, 150, 80));
+    sp_bh_disk(t, cx, cy, R, 0);
+    for (i = 0; i < 16; i++)
+    {
+        const float rr = R * (1.12f + i * 0.055f), a = 0.4f * (1 - i / 16.0f);
+        sp_arc(cx, cy, rr, rr * 0.95f, 0, 3.14159f * 1.05f, 3.14159f * 1.95f, R * 0.06f, fx_col((int)(255 * a), 255, 190 - i * 4, 120 - i * 3));
+        sp_arc(cx, cy, rr * 0.92f, rr * 0.75f, 0, 3.14159f * 0.15f, 3.14159f * 0.85f, R * 0.06f, fx_col((int)(200 * a), 255, 190 - i * 4, 120 - i * 3));
+    }
+    sp_ellipse(cx, cy, R, R, 0, fx_col(255, 0, 0, 0));
+    sp_arc(cx, cy, R * 1.04f, R * 1.04f, 0, 0, SP_TAU, R * 0.04f, fx_col((int)(210 + 25 * sinf(t * 3)), 255, 235, 200));
+    sp_bh_disk(t, cx, cy, R, 1);
+}
+
+// 6. An asteroid field: rocks of rough shapes turning in layers, lit by a far sun, dust drifting past.
+static void fx_asteroids(float t)
+{
+    int i, k;
+    sp_vgrad(0, SP_H, fx_col(255, 4, 5, 11), fx_col(255, 10, 11, 20));
+    sp_stars(62, 300, t, t * 3, 0, 1.0f, SP_H);
+    sp_glow(SP_W * 0.12f, SP_H * 0.15f, SP_H * 0.9f, fx_col(70, 255, 200, 140));
+    sp_glow(SP_W * 0.12f, SP_H * 0.15f, SP_H * 0.1f, fx_col(255, 255, 245, 220));
+    for (i = 0; i < 60; i++)
+    {
+        const float z = 0.2f + (i / 60.0f) * 0.8f, sz = (8 + 70 * z * z) * SP_K, tone = 70 + fx_rand(i + 90100) * 60, c = tone * (0.35f + 0.65f * z);
+        const float x = fmodf(fx_rand(i + 90200) * SP_W - t * 25 * z * SP_K, SP_W + 200), y = fx_rand(i + 90300) * SP_H + sinf(t * 0.3f + i) * 6;
+        const float px = x < -100 ? x + SP_W + 200 : x - 100, rot = fx_rand(i + 90400) * SP_TAU + t * (fx_rand(i + 90500) - 0.5f) * 0.6f;
+        const int n = 9 + (int)(fx_rand(i + 90600) * 6);
+        float xy[15 * 2], lit[15 * 2];
+        for (k = 0; k < n; k++)
+        {
+            const float a = rot + k * SP_TAU / n, rr = sz * (0.65f + fx_rand(i * 20 + k + 90700) * 0.45f);
+            xy[k * 2] = px + cosf(a) * rr; xy[k * 2 + 1] = y + sinf(a) * rr;
+            lit[k * 2] = px - sz * 0.12f + cosf(a) * rr * 0.72f; lit[k * 2 + 1] = y - sz * 0.12f + sinf(a) * rr * 0.72f;
+        }
+        sp_fill(xy, n, fx_col(255, (int)(c * 0.3f), (int)(c * 0.27f), (int)(c * 0.28f)));
+        sp_fill(lit, n, fx_col(255, (int)(c + 40), (int)(c + 28), (int)(c + 16)));
+        for (k = 0; k < 3; k++) UiCircle(px + cosf(rot + k * 2.1f) * sz * 0.35f, y + sinf(rot + k * 2.1f) * sz * 0.3f, sz * 0.11f, fx_col(70, 0, 0, 0));
+    }
+    sp_stars(63, 200, t, -t * 60, 0, 0.35f, SP_H);
+}
+
+// 7. A total eclipse of the sun: the corona in rays round the moon, the diamond ring flashing every 9 s.
+static void fx_eclipse(float t)
+{
+    const float cx = SP_W * 0.5f, cy = SP_H * 0.48f, R = SP_H * 0.17f, k = fmodf(t, 9.0f) / 9.0f, d = sp_clamp01(1 - fabsf(k - 0.85f) * 12);
+    int i;
+    sp_vgrad(0, SP_H, fx_col(255, 3, 5, 18), fx_col(255, 11, 18, 40));
+    sp_stars(72, 180, t, 0, 0, 0.6f, SP_H);
+    sp_glow(cx, cy, R * 4.5f, fx_col(80, 170, 190, 255));
+    for (i = 0; i < 220; i++)
+    {
+        const float a = fx_rand(i + 70100) * SP_TAU + t * 0.01f, l = R * (1 + (0.3f + powf(fx_rand(i + 70200), 2.5f) * 2.2f) * (0.85f + 0.15f * sinf(t * 0.7f + i)));
+        sp_fade_line(cx + cosf(a) * R, cy + sinf(a) * R, cx + cosf(a) * l, cy + sinf(a) * l, (0.6f + fx_rand(i + 70300) * 2) * SP_K, 225, 232, 255, 150, 4);
+    }
+    sp_glow(cx, cy, R * 1.6f, fx_col(230, 255, 255, 255));
+    sp_ellipse(cx, cy, R, R, 0, fx_col(255, 0, 0, 0));
+    if (d > 0)
+    {
+        const float x = cx + cosf(-0.7f) * R, y = cy + sinf(-0.7f) * R;
+        sp_glow(x, y, R * 1.8f * d, fx_col((int)(255 * d), 255, 255, 255));
+        UiLine(x - R * 2 * d, y, x + R * 2 * d, y, 2, fx_col((int)(180 * d), 255, 255, 255));
+        UiLine(x, y - R * 2 * d, x, y + R * 2 * d, 2, fx_col((int)(180 * d), 255, 255, 255));
+    }
+}
+
+// 8. The solar system: the sun and its planets on tilted orbits, the asteroid belt, Saturn with its rings.
+static void fx_solar_system(float t)
+{
+    static const float pl[7][6] = { { 0.13f, 0.010f, 180, 170, 160, 4.1f }, { 0.19f, 0.016f, 230, 190, 120, 1.6f }, { 0.27f, 0.017f, 70, 140, 240, 1.0f },
+                                    { 0.36f, 0.013f, 220, 100, 70, 0.53f }, { 0.62f, 0.042f, 220, 180, 140, 0.084f }, { 0.80f, 0.036f, 230, 210, 160, 0.034f },
+                                    { 0.95f, 0.026f, 140, 220, 230, 0.012f } };
+    const float cx = SP_W * 0.5f, cy = SP_H * 0.5f, R = SP_W * 0.5f, tilt = 0.33f;
+    float px[7], py[7], pz[7];
+    int i, order[7], j;
+    sp_vgrad(0, SP_H, fx_col(255, 2, 3, 9), fx_col(255, 5, 7, 15));
+    sp_stars(82, 300, t, 0, 0, 0.7f, SP_H);
+    for (i = 0; i < 7; i++) sp_arc(cx, cy, pl[i][0] * R, pl[i][0] * R * tilt, 0, 0, SP_TAU, 1.0f, fx_col(46, 120, 150, 220));
+    for (i = 0; i < 600; i++)
+    {
+        const float rr = 0.47f + fx_rand(i + 85000) * 0.07f, a = fx_rand(i + 85100) * SP_TAU + t * 0.05f, s = 0.8f + fx_rand(i + 85200);
+        UiRect(cx + cosf(a) * rr * R, cy + sinf(a) * rr * R * tilt, s, s, fx_col(130, 200, 190, 170));
+    }
+    sp_glow(cx, cy, SP_H * 0.45f, fx_col(150, 255, 170, 60));
+    sp_glow(cx, cy, SP_H * 0.09f * (1 + 0.04f * sinf(t * 2)), fx_col(255, 255, 240, 200));
+    for (i = 0; i < 7; i++)
+    {
+        const float a = t * pl[i][5] * 0.25f + i * 1.3f;
+        px[i] = cx + cosf(a) * pl[i][0] * R; py[i] = cy + sinf(a) * pl[i][0] * R * tilt; pz[i] = sinf(a);
+        order[i] = i;
+    }
+    for (i = 1; i < 7; i++) for (j = i; j > 0 && pz[order[j - 1]] > pz[order[j]]; j--) { const int k = order[j]; order[j] = order[j - 1]; order[j - 1] = k; }
+    for (j = 0; j < 7; j++)
+    {
+        const int k = order[j];
+        const float s = pl[k][1] * R * (0.85f + 0.15f * pz[k]), dx = px[k] - cx, dy = (py[k] - cy) / tilt;
+        if (pz[k] < 0 && sqrtf(dx * dx + dy * dy) < SP_H * 0.07f) continue;   // behind the sun
+        if (k == 5) sp_arc(px[k], py[k], s * 2, s * 0.6f, -0.2f, 0, SP_TAU, s * 0.25f, fx_col(150, 230, 210, 170));
+        sp_ellipse(px[k], py[k], s, s, 0, fx_col(255, (int)(pl[k][2] * 0.3f), (int)(pl[k][3] * 0.3f), (int)(pl[k][4] * 0.35f)));
+        sp_ellipse(px[k] - (dx > 0 ? s * 0.25f : -s * 0.25f), py[k] - s * 0.15f, s * 0.72f, s * 0.72f, 0, fx_col(255, (int)pl[k][2], (int)pl[k][3], (int)pl[k][4]));
+    }
+}
+
+// 9. A pulsar: a neutron star turning, its two beams sweeping space (flashing as they face us), its magnetic field
+// lines, a nebula round it.
+static IDirect3DTexture9 *s_spPulsarNeb;
+static void fx_pulsar(float t)
+{
+    static const SpNoise neb = { 91, 5.0f, 2.8f, 0.35f, 900, 1, 120, 150, 255, 0, SPM_ROUND, 5 };
+    const float cx = SP_W * 0.5f, cy = SP_H * 0.5f, spin = t * 2.4f, tiltA = 0.5f + 0.25f * sinf(t * 0.3f), dir = cosf(spin), L = SP_W * 1.2f;
+    const float k = 0.35f + 0.65f * powf(fabsf(dir), 6), flash = powf(fabsf(dir), 30);
+    IDirect3DTexture9 *tex = sp_noise_tex(&s_spPulsarNeb, 256, 144, &neb);
+    int i, s, q;
+    sp_vgrad(0, SP_H, fx_col(255, 2, 2, 10), fx_col(255, 6, 7, 22));
+    sp_stars(92, 280, t, 0, 0, 0.75f, SP_H);
+    if (tex) UiImagePart(tex, 0, 0, SP_W, SP_H, 0, 0, 1, 1, fx_col(200, 255, 255, 255));
+    for (s = -1; s <= 1; s += 2)
+    {
+        const float a = -1.5708f + tiltA * sinf(spin) * s + (s < 0 ? 3.14159f : 0);
+        for (q = 0; q < 4; q++)   // the beam: a cone, brighter near the star
+        {
+            const float l = L * (0.25f + q * 0.25f), sp = 0.12f;
+            float xy[6];
+            xy[0] = cx; xy[1] = cy; xy[2] = cx + cosf(a - sp) * l; xy[3] = cy + sinf(a - sp) * l; xy[4] = cx + cosf(a + sp) * l; xy[5] = cy + sinf(a + sp) * l;
+            sp_fill(xy, 3, fx_col((int)(70 * k), 200, 220, 255));
+        }
+    }
+    for (i = 1; i <= 6; i++)
+    {
+        const float r = SP_H * 0.05f * i, rot = sinf(spin) * 0.25f, cr = cosf(rot), sr = sinf(rot);
+        float xy[61 * 2];
+        for (s = -1; s <= 1; s += 2)
+        {
+            for (q = 0; q <= 60; q++)
+            {
+                const float th = q / 60.0f * 3.14159f, rr = r * sinf(th) * sinf(th), x = s * rr * sinf(th), y = -rr * cosf(th);
+                xy[q * 2] = cx + x * cr - y * sr; xy[q * 2 + 1] = cy + x * sr + y * cr;
+            }
+            UiPolyline(xy, 61, 1.2f, 1.0f, fx_col(64, 150, 190, 255));
+        }
+    }
+    sp_glow(cx, cy, SP_H * (0.08f + 0.3f * flash), fx_col(230, 210, 230, 255));
+    sp_glow(cx, cy, SP_H * 0.025f, fx_col(255, 255, 255, 255));
+}
+
+// 10. A comet crossing the sky: its head glowing and breathing, a straight blue tail of ions streaming away from the
+// sun with knots of light running down it, a curved tail of golden dust shed behind it, sparks falling off; it comes
+// in and goes out softly every 20 s.
+#define COMET_P 24.0f
+static void sp_comet_at(float tt, float *x, float *y)
+{
+    // a long gentle curve across the sky, slowing a little in the middle (nearest the sun)
+    const float k = fmodf(tt, COMET_P) / COMET_P, e = k + 0.06f * sinf(k * SP_TAU);
+    *x = SP_W * (1.18f - 1.36f * e);
+    *y = SP_H * (0.14f + 0.36f * e + 0.10f * sinf(e * 3.14159f));
+}
+static void fx_comet(float t)
+{
+    const float k = fmodf(t, COMET_P) / COMET_P, vis = sp_ease(0.0f, 0.08f, k) * (1 - sp_ease(0.92f, 1.0f, k)), L = SP_W * 0.55f;
+    const float breath = 0.9f + 0.1f * sinf(t * 2.1f) + 0.04f * sinf(t * 5.3f);
+    float x, y, x2, y2, ux, uy, al, px, py, mx, my;
+    int i;
+    sp_vgrad(0, SP_H, fx_col(255, 2, 4, 16), fx_col(255, 7, 11, 29));
+    sp_stars(101, 340, t, t * 1.2f, 0, 1.0f, SP_H);
+    sp_glow(SP_W * 0.02f, SP_H * 0.98f, SP_H * 0.55f, fx_col(36, 255, 200, 140));   // the sun, off the corner
+    sp_comet_at(t, &x, &y);
+    sp_comet_at(t - 0.4f, &x2, &y2);
+    mx = x - x2; my = y - y2; al = sqrtf(mx * mx + my * my) + 1e-3f; mx /= al; my /= al;   // where it goes
+    ux = x - SP_W * 0.02f; uy = y - SP_H * 0.98f; al = sqrtf(ux * ux + uy * uy); ux /= al; uy /= al; px = -uy; py = ux;   // away from the sun
+    // the dust tail: grains shed where it was, drifting off and out; soft lights growing and fading (a curved haze)
+    for (i = 0; i < 90; i++)
+    {
+        const float age = i * 0.06f, f = 1 - age / 5.4f;
+        float ex, ey, gx, gy;
+        if (fmodf(t, COMET_P) < age || f <= 0) break;
+        sp_comet_at(t - age, &ex, &ey);
+        gx = ex + ux * 30 * age * SP_K + px * sinf(t * 0.7f + i * 0.3f) * 3 * age;
+        gy = ey + uy * 30 * age * SP_K + py * sinf(t * 0.7f + i * 0.3f) * 3 * age + 4 * age * age * SP_K;
+        sp_glow(gx, gy, (10 + age * 16) * SP_K, fx_col((int)(34 * f * f * vis), 255, (int)(205 - age * 12), (int)(130 - age * 10)));
+    }
+    // the ion tail: straight away from the sun, a stack of soft lights widening and fading to nothing at its end,
+    // swaying gently, with brighter knots running down it
+    for (i = 0; i < 70; i++)
+    {
+        const float f = i / 70.0f, d = L * f, sway = sinf(t * 1.3f - f * 6) * 10 * f * SP_K, w = (6 + 70 * f) * SP_K;
+        const float a = (1 - f) * (1 - f) * (0.6f + 0.4f * sinf(t * 3 - f * 20));
+        sp_glow(x + ux * d + px * sway, y + uy * d + py * sway, w * breath, fx_col((int)(30 * a * vis), 110, 180, 255));
+    }
+    for (i = 0; i < 6; i++)
+    {
+        const float f = fmodf(t * 0.22f + i / 6.0f, 1.0f), d = L * f, sway = sinf(t * 1.3f - f * 6) * 10 * f * SP_K;
+        sp_glow(x + ux * d + px * sway, y + uy * d + py * sway, (8 + 30 * f) * SP_K, fx_col((int)(70 * (1 - f) * (1 - f) * vis), 170, 215, 255));
+    }
+    // sparks streaming back off the head
+    for (i = 0; i < 30; i++)
+    {
+        const float f = fmodf(t * 0.6f + fx_rand(i + 340), 1.0f), a = (fx_rand(i + 341) - 0.5f) * 1.6f;
+        const float dx = (ux * cosf(a) - uy * sinf(a)) * f * 90 * SP_K - mx * f * 20 * SP_K, dy = (uy * cosf(a) + ux * sinf(a)) * f * 90 * SP_K - my * f * 20 * SP_K;
+        UiCircle(x + dx, y + dy, (1.4f - f) * SP_K, fx_col((int)(170 * (1 - f) * vis), 230, 245, 255));
+    }
+    // the head: a halo breathing, the coma (a little ahead of the tail), the nucleus
+    sp_glow(x, y, SP_H * 0.22f * breath, fx_col((int)(50 * vis), 120, 200, 255));
+    sp_glow(x + mx * 4 * SP_K, y + my * 4 * SP_K, SP_H * 0.09f * breath, fx_col((int)(170 * vis), 180, 230, 255));
+    sp_glow(x, y, SP_H * 0.035f, fx_col((int)(255 * vis), 255, 255, 255));
+    UiCircle(x, y, 2.6f * SP_K, fx_col((int)(255 * vis), 255, 255, 255));
+}
+
+// 11. The Milky Way: its band across the sky, clouds of stars along it and lanes of dark dust.
+static IDirect3DTexture9 *s_spMilky;
+static void sp_milky(float u, float v, unsigned char *o)
+{
+    const float d = v - 0.5f - (u - 0.5f) * 0.55f, core = expf(-d * d * 30), n = sp_fbm(111, u * 6, v * 3.4f, 5);
+    const float dust = (sp_fbm(112, u * 9, v * 5, 5) - 0.45f) * 3.2f * expf(-d * d * 60), warm = expf(-(u - 0.45f) * (u - 0.45f) * 9);
+    float a = core * (0.35f + n) - (dust > 0 ? dust : 0);
+    a = a < 0 ? 0 : a * 300;
+    o[0] = o[1] = o[2] = (unsigned char)(205 + 50 * warm); o[3] = (unsigned char)(a > 255 ? 255 : a);
+}
+static void fx_milky_way(float t)
+{
+    IDirect3DTexture9 *tex = sp_func_tex(&s_spMilky, 256, 144, sp_milky);
+    int i;
+    sp_vgrad(0, SP_H, fx_col(255, 2, 3, 10), fx_col(255, 6, 10, 24));
+    if (tex) { const float s = 1.12f, o = sinf(t * 0.02f) * 20; UiImagePart(tex, (SP_W - SP_W * s) * 0.5f + o, (SP_H - SP_H * s) * 0.5f, SP_W * s, SP_H * s, 0, 0, 1, 1, fx_col(255, 250, 215, 175)); }
+    sp_stars(114, 260, t, 0, 0, 0.8f, SP_H);
+    for (i = 0; i < 1300; i++)
+    {
+        const float u = fx_rand(i + 113000), x = u * SP_W, y = (0.5f + (u - 0.5f) * 0.55f + sp_gauss(i + 114000) * 0.12f) * SP_H;
+        const float b = (0.3f + fx_rand(i + 115000) * 0.7f) * (0.7f + 0.3f * sinf(t * (1 + fx_rand(i + 116000) * 2) + i)), s = (0.4f + fx_rand(i + 117000) * 0.8f) * SP_K;
+        UiCircle(x, y, s < 0.6f ? 0.6f : s, fx_col((int)(230 * b), 255, 255, 255));
+    }
+}
+
+// 12. A supernova: the star swells and bursts - a flash, the shock wave, filaments in colours, its remains; again.
+static void fx_supernova(float t)
+{
+    const float P = 10, k = fmodf(t, P) / P, cx = SP_W * 0.5f, cy = SP_H * 0.5f, R = SP_H * 0.55f;
+    int i;
+    sp_vgrad(0, SP_H, fx_col(255, 2, 2, 10), fx_col(255, 7, 5, 26));
+    sp_stars(122, 280, t, 0, 0, 0.75f, SP_H);
+    if (k < 0.15f)
+    {
+        const float b = 0.3f + k / 0.15f * 0.7f;
+        sp_glow(cx, cy, SP_H * 0.08f * (1 + sinf(t * 20) * 0.1f * b), fx_col((int)(255 * b), 255, 240, 200));
+        return;
+    }
+    {
+        const float e = (k - 0.15f) / 0.85f, flash = sp_clamp01(1 - e * 8), rr = R * (1 - powf(1 - e, 2.2f)), fade = 1 - e * 0.75f;
+        static const int cols[3][3] = { { 255, 120, 80 }, { 90, 200, 255 }, { 255, 220, 120 } };
+        sp_glow(cx, cy, rr * 1.1f, fx_col((int)(90 * fade), 200, 80, 160));
+        for (i = 0; i < 360; i++)
+        {
+            const float a = fx_rand(i + 120100) * SP_TAU, r0 = rr * (0.6f + fx_rand(i + 120200) * 0.6f), r1 = r0 * (1 - (0.05f + fx_rand(i + 120300) * 0.15f));
+            const int *c = cols[(int)(fx_rand(i + 120400) * 2.99f)];
+            UiLine(cx + cosf(a) * r1, cy + sinf(a) * r1 * 0.9f, cx + cosf(a) * r0, cy + sinf(a) * r0 * 0.9f, 1.4f * SP_K, fx_col((int)(140 * fade), c[0], c[1], c[2]));
+        }
+        for (i = 0; i < 3; i++) sp_arc(cx, cy, rr * (1.05f + i * 0.07f), rr * (1.05f + i * 0.07f) * 0.9f, 0, 0, SP_TAU, 3 * SP_K, fx_col((int)(76 * fade / (i + 1)), 200, 220, 255));
+        sp_glow(cx, cy, SP_H * 0.05f, fx_col(230, 220, 240, 255));
+        if (flash > 0) UiRect(0, 0, SP_W, SP_H, fx_col((int)(200 * flash), 255, 250, 235));
+    }
+}
+
+// 13. The Earth from orbit: its edge with clouds turning, city lights on the night side, the sun rising at the limb.
+static IDirect3DTexture9 *s_spEarth, *s_spEarthLand, *s_spEarthCloud, *s_spNight;
+// The sea and the land in greys (tinted as they are drawn: colours that can be chosen); the land's alpha its shape.
+static void sp_earth(float u, float v, unsigned char *o)
+{
+    const float n = sp_fbm_tile(132, u, v, 18, 9, 3);
+    o[0] = o[1] = o[2] = (unsigned char)(255 * (0.62f + 0.3f * n)); o[3] = 255;
+}
+static void sp_earth_land(float u, float v, unsigned char *o)
+{
+    const float m = sp_fbm_tile(131, u, v, 6, 3, 5), n = sp_fbm_tile(135, u, v, 24, 12, 3);
+    o[0] = o[1] = o[2] = (unsigned char)(255 * (0.6f + 0.4f * n)); o[3] = (unsigned char)(255 * sp_ease(0.505f, 0.535f, m));
+}
+// The night across the screen: dark on the left, a soft terminator, none on the sunny right.
+static void sp_night(float u, float v, unsigned char *o)
+{
+    o[0] = o[1] = 0; o[2] = 6; o[3] = (unsigned char)(225 * (1 - sp_ease(0.28f, 0.56f, u)));
+}
+// The globe's top in bands of a picture (tex: u across the screen when `screenU`, else the surface turning by `off`).
+static void sp_earth_layer(IDirect3DTexture9 *tex, float cx, float cy, float R, float top, float off, int screenU, D3DCOLOR c)
+{
+    float y;
+    if (!tex) return;
+    UiQuadsBegin(tex);
+    for (y = top; y < SP_H; y += 8)
+    {
+        const float y1 = y + 8, d0 = y - cy, d1 = y1 - cy, h0 = sqrtf(R * R - d0 * d0), h1 = sqrtf(R * R - d1 * d1);
+        const float xl0 = cx - h0 > 0 ? cx - h0 : 0, xr0 = cx + h0 < SP_W ? cx + h0 : SP_W, xl1 = cx - h1 > 0 ? cx - h1 : 0, xr1 = cx + h1 < SP_W ? cx + h1 : SP_W;
+        const float v0 = sp_clamp01((y - top) / (SP_H * 0.6f)), v1 = sp_clamp01((y1 - top) / (SP_H * 0.6f));
+        if (xr0 <= xl0) continue;
+        if (screenU)
+        {
+            // the same screen x the same u above and below (a few pixels past the globe's edge at its top: space, dark)
+            float xy[8];
+            const float xl = xl0 < xl1 ? xl0 : xl1, xr = xr0 > xr1 ? xr0 : xr1;
+            xy[0] = xl; xy[1] = y; xy[2] = xr; xy[3] = y; xy[4] = xl; xy[5] = y1; xy[6] = xr; xy[7] = y1;
+            UiQuadsAdd(xy, xl / SP_W, 0.5f, xr / SP_W, 0.5f, c);
+        }
+        else sp_band_quad(y, xl0, xr0, y1, xl1, xr1, xl0 / SP_W + off, (xr0 - xl0) / SP_W, v0, v1, c);
+    }
+    UiQuadsEnd();
+}
+static void fx_earth_orbit(float t)
+{
+    static const SpNoise cloud = { 133, 9.0f, 4.5f, 0.5f, 330, 1.4f, 255, 255, 255, 1, SPM_NONE, 5 };
+    const float R = SP_W * 1.1f, cx = SP_W * 0.5f, cy = SP_H * 0.62f + R, top = cy - R, sunx = SP_W * 0.66f, s = 0.75f + 0.25f * sinf(t * 0.4f);
+    IDirect3DTexture9 *sea = sp_func_tex(&s_spEarth, 256, 128, sp_earth), *land = sp_func_tex(&s_spEarthLand, 512, 256, sp_earth_land);
+    IDirect3DTexture9 *cl = sp_noise_tex(&s_spEarthCloud, 512, 256, &cloud), *night = sp_func_tex(&s_spNight, 256, 4, sp_night);
+    int i;
+    sp_vgrad(0, SP_H, fx_col(255, 1, 2, 8), fx_col(255, 3, 5, 12));
+    sp_stars(134, 260, t, 0, 0, 0.85f, SP_H * 0.62f);
+    sp_earth_layer(sea, cx, cy, R, top, t * 0.01f, 0, fx_col(255, 35, 95, 180));
+    sp_earth_layer(land, cx, cy, R, top, t * 0.01f, 0, fx_col(255, 80, 140, 70));
+    sp_earth_layer(cl, cx, cy, R, top, t * 0.016f, 0, fx_col(225, 255, 255, 255));
+    sp_earth_layer(night, cx, cy, R, top, 0, 1, fx_col(255, 255, 255, 255));
+    for (i = 0; i < 420; i++)
+    {
+        // the cities' lights on the night side, fading into the terminator
+        const float u = fmodf(fx_rand(i + 130100) + t * 0.01f, 1.0f), x = u * SP_W * 1.4f - SP_W * 0.2f, v = fx_rand(i + 130200), y = top + 6 + v * (SP_H - top) * 0.9f;
+        const float dy = y - cy, hw = sqrtf(R * R - dy * dy), dark = 1 - sp_ease(0.3f, 0.5f, x / SP_W);
+        if (dark <= 0 || x < cx - hw) continue;
+        UiRect(x, y, 1.8f, 1.8f, fx_col((int)((110 + 120 * fx_rand(i + 130300)) * dark), 255, (int)(190 + 50 * fx_rand(i + 130300)), 120));
+    }
+    // the air: a thin glowing edge, brightest towards the sun, soft outwards
+    for (i = 0; i < 14; i++)
+        sp_arc(cx, cy, R + i * 2.2f, R + i * 2.2f, 0, 3.14159f * 1.27f, 3.14159f * 1.73f, 3.0f + i * 2, fx_col((int)(44 - i * 3), 80, 160, 255));
+    for (i = 0; i < 6; i++)
+        sp_arc(cx, cy, R + i * 2.0f, R + i * 2.0f, 0, 3.14159f * 1.45f, 3.14159f * 1.62f, 3.0f + i * 3, fx_col((int)(40 - i * 6), 255, 210, 160));
+    sp_glow(sunx, top + 4, SP_H * 0.7f, fx_col((int)(105 * s), 255, 200, 140));
+    sp_glow(sunx, top + 4, SP_H * 0.08f, fx_col(255, 255, 250, 230));
+    UiLine(sunx - SP_W * 0.3f, top + 4, sunx + SP_W * 0.3f, top + 4, 2, fx_col((int)(80 * s), 255, 230, 190));
+}
+
+// 14. Constellations: the stars join into figures that draw themselves - Laika, a rocket, a controller - in turn.
+static void fx_constellations(float t)
+{
+    static const float pts[3][11][2] = {
+        { { .40f, .30f }, { .46f, .22f }, { .50f, .30f }, { .56f, .24f }, { .58f, .36f }, { .66f, .42f }, { .60f, .50f }, { .52f, .52f }, { .46f, .62f }, { .40f, .54f }, { .42f, .42f } },
+        { { .50f, .18f }, { .55f, .30f }, { .55f, .52f }, { .60f, .62f }, { .53f, .60f }, { .50f, .70f }, { .47f, .60f }, { .40f, .62f }, { .45f, .52f }, { .45f, .30f }, { .50f, .40f } },
+        { { .34f, .40f }, { .50f, .36f }, { .66f, .40f }, { .70f, .52f }, { .62f, .60f }, { .56f, .52f }, { .50f, .66f }, { .44f, .52f }, { .38f, .60f }, { .30f, .52f }, { .50f, .46f } } };
+    static const unsigned char edges[3][12][2] = {
+        { { 0, 1 }, { 1, 2 }, { 2, 3 }, { 3, 4 }, { 4, 5 }, { 5, 6 }, { 6, 7 }, { 7, 8 }, { 8, 9 }, { 9, 10 }, { 10, 0 }, { 2, 10 } },
+        { { 0, 1 }, { 1, 2 }, { 2, 3 }, { 3, 4 }, { 4, 5 }, { 5, 6 }, { 6, 7 }, { 7, 8 }, { 8, 9 }, { 9, 0 }, { 2, 8 }, { 9, 1 } },
+        { { 0, 1 }, { 1, 2 }, { 2, 3 }, { 3, 4 }, { 4, 5 }, { 5, 6 }, { 6, 7 }, { 7, 8 }, { 8, 9 }, { 9, 0 }, { 1, 10 }, { 10, 6 } } };
+    static const char *names[3] = { "LAIKA", "COHETE", "CONTROL" };
+    const float P = 7, k = fmodf(t, P) / P, drawn = sp_clamp01(k / 0.55f) * 12, fade = k < 0.85f ? 1 : 1 - (k - 0.85f) / 0.15f;
+    const int f = (int)floorf(t / P) % 3;
+    int n;
+    sp_vgrad(0, SP_H, fx_col(255, 2, 4, 20), fx_col(255, 10, 15, 42));
+    sp_stars(141, 360, t, t * 2, 0, 0.85f, SP_H);
+    for (n = 0; n < 12; n++)
+    {
+        const float part = sp_clamp01(drawn - n), *a = pts[f][edges[f][n][0]], *b = pts[f][edges[f][n][1]];
+        const float x0 = a[0] * SP_W, y0 = a[1] * SP_H, x1 = x0 + (b[0] * SP_W - x0) * part, y1 = y0 + (b[1] * SP_H - y0) * part;
+        if (part <= 0) continue;
+        UiLine(x0, y0, x1, y1, 6, fx_col((int)(64 * fade), 120, 180, 255));
+        UiLine(x0, y0, x1, y1, 1.6f, fx_col((int)(205 * fade), 190, 220, 255));
+    }
+    for (n = 0; n < 11; n++)
+    {
+        const int on = n <= drawn + 1;
+        sp_glow(pts[f][n][0] * SP_W, pts[f][n][1] * SP_H, (on ? 20.0f : 10.0f) * SP_K, fx_col((int)((on ? 230 : 100) * fade), 200, 225, 255));
+        UiCircle(pts[f][n][0] * SP_W, pts[f][n][1] * SP_H, 2.0f * SP_K, fx_col((int)(255 * fade), 240, 245, 255));
+    }
+    UiText(UI_BOLD, 22, SP_W * 0.5f, SP_H * 0.85f, fx_col((int)(180 * fade * sp_clamp01(k / 0.6f)), 190, 215, 255), names[f], UI_CENTER);
+}
+
+// 15. A deep field: hundreds of far galaxies of every shape, the view slowly travelling in among them.
+static void fx_deep_field(float t)
+{
+    const float cx = SP_W * 0.5f, cy = SP_H * 0.5f, F = SP_W * 0.32f;
+    int i, k;
+    sp_vgrad(0, SP_H, fx_col(255, 1, 1, 5), fx_col(255, 3, 3, 11));
+    sp_stars(152, 160, t, 0, 0, 0.6f, SP_H);
+    for (i = 0; i < 240; i++)
+    {
+        const float z = fmodf(fx_rand(i + 150100) * 3.2f - t * 0.12f, 3.2f), zz = (z < 0 ? z + 3.2f : z) + 0.25f;
+        const float x = cx + (fx_rand(i + 150200) - 0.5f) * 2.4f / zz * F, y = cy + (fx_rand(i + 150300) - 0.5f) * 1.4f / zz * F;
+        const float s = (0.6f + fx_rand(i + 150400) * 1.6f) * 14 / zz * SP_K, a = sp_clamp01((3.5f - zz) / 1.2f) * 0.85f, el = 0.25f + fx_rand(i + 150500) * 0.75f;
+        const float rot = fx_rand(i + 150600) * SP_TAU + t * 0.02f, type = fx_rand(i + 150700), tint = fx_rand(i + 150800);
+        const int r = tint < 0.4f ? 255 : tint < 0.6f ? 180 : 255, g = tint < 0.4f ? 220 : tint < 0.6f ? 200 : 190, b = tint < 0.4f ? 170 : tint < 0.6f ? 255 : 230;
+        if (x < -s * 3 || x > SP_W + s * 3 || y < -s * 3 || y > SP_H + s * 3) continue;
+        sp_ellipse(x, y, s, s * el, rot, fx_col((int)(60 * a), r, g, b));
+        sp_ellipse(x, y, s * 0.45f, s * 0.45f * el, rot, fx_col((int)(110 * a), r, g, b));
+        UiCircle(x, y, s * 0.15f + 0.8f, fx_col((int)(230 * a), 255, 250, 235));
+        if (type < 0.45f && s > 8)
+            for (k = 0; k < 2; k++)
+            {
+                float xy[20 * 2];
+                int q;
+                for (q = 0; q < 20; q++)
+                {
+                    const float th = q / 20.0f * 4 + k * 3.14159f, rr = s * 0.12f * expf(th * 0.42f), ex = cosf(th) * rr, ey = sinf(th) * rr * el;
+                    xy[q * 2] = x + ex * cosf(rot) - ey * sinf(rot); xy[q * 2 + 1] = y + ex * sinf(rot) + ey * cosf(rot);
+                }
+                UiPolyline(xy, 20, s * 0.08f > 0.8f ? s * 0.08f : 0.8f, 1.0f, fx_col((int)(120 * a), r, g, b));
+            }
+    }
+}
+
+// A colour of a hue (0..360), saturation and lightness (0..1), through fx_col.
+static D3DCOLOR sp_hsl(float h, float s, float l, int a)
+{
+    float c = (1 - fabsf(2 * l - 1)) * s, hp = fmodf(h, 360.0f) / 60.0f, x = c * (1 - fabsf(fmodf(hp, 2.0f) - 1)), m = l - c / 2, r = 0, g = 0, b = 0;
+    if (hp < 0) hp += 6;
+    if (hp < 1) { r = c; g = x; } else if (hp < 2) { r = x; g = c; } else if (hp < 3) { g = c; b = x; }
+    else if (hp < 4) { g = x; b = c; } else if (hp < 5) { r = x; b = c; } else { r = c; b = x; }
+    return fx_col(a, (int)((r + m) * 255), (int)((g + m) * 255), (int)((b + m) * 255));
+}
+// A filled band from a line of heights (ys[n+1] across the screen) down to the bottom, top colour to bottom colour.
+static void sp_band(const float *ys, int n, D3DCOLOR top, D3DCOLOR bottom)
+{
+    int i;
+    for (i = 0; i < n; i++) UiStrip(SP_W * i / n, ys[i], SP_H, SP_W * (i + 1) / n + 0.5f, ys[i + 1], SP_H, top, bottom);
+}
+
+// 16. A cyberpunk city in the rain: towers in three layers, windows and neon signs flickering, the wet street.
+static void fx_cyber_city(float t)
+{
+    static const int neon[5][3] = { { 255, 40, 160 }, { 40, 230, 255 }, { 255, 200, 40 }, { 160, 80, 255 }, { 60, 255, 140 } };
+    const float ground = SP_H * 0.82f;
+    int L, i, j, k;
+    sp_vgrad(0, SP_H, fx_col(255, 18, 5, 31), fx_col(255, 42, 10, 51));
+    sp_glow(SP_W * 0.5f, SP_H * 0.75f, SP_W * 0.8f, fx_col(60, 255, 60, 140));
+    for (L = 0; L < 3; L++)
+    {
+        const float sp = (4 + L * 7) * SP_K, shade = (float)(38 - L * 13), off = fmodf(t * sp, SP_W * 2);
+        float x = 0;
+        for (i = 0; x < 2.0f; i++)
+        {
+            const int id = L * 1000 + i;
+            const float bw = (0.04f + fx_rand(id + 160100) * 0.07f) * SP_W, bh = (0.25f + fx_rand(id + 160200) * 0.45f) * (0.7f + L * 0.2f) * SP_H;
+            float bx = x * SP_W - off;
+            if (bx < -bw) bx += SP_W * 2;
+            x += bw / SP_W + fx_rand(id + 160300) * 0.01f;
+            if (bx > SP_W) continue;
+            UiRect(bx, ground - bh, bw, bh, fx_col(255, (int)shade, (int)(shade * 0.6f), (int)shade + 14));
+            {
+                const int cols = (int)(bw / (10 * SP_K)) > 2 ? (int)(bw / (10 * SP_K)) : 2, rows = (int)(bh / (14 * SP_K));
+                for (j = 0; j < rows; j++)
+                    for (k = 0; k < cols; k++)
+                    {
+                        const float on = fx_rand(id * 977 + j * 31 + k + 161000), fl = fx_rand(id * 977 + j * 31 + k + 162000);
+                        if (on > 0.3f) continue;
+                        UiRect(bx + 3 + k * (bw - 6) / cols, ground - bh + 6 + j * 14 * SP_K, (bw - 6) / cols * 0.55f, 5 * SP_K,
+                               fl < 0.5f ? fx_col((int)((90 + 120 * fl) * (L == 2 ? 1 : 0.6f)), 255, 210, 140) : fx_col((int)((90 + 120 * fl) * (L == 2 ? 1 : 0.6f)), 140, 200, 255));
+                    }
+            }
+            if (L > 0 && fx_rand(id + 160400) < 0.5f)
+            {
+                const int *c = neon[(int)(fx_rand(id + 160500) * 4.99f)];
+                const float f = fx_rand(id + 160600), sx = bx + bw * 0.15f, sy = ground - bh + bh * (0.2f + f * 0.5f), sw = bw * 0.7f, sh = 24 * SP_K;
+                if (sinf(t * 9 + f * 40) > -0.85f || sinf(t * 1.3f + f * 9) > 0)
+                {
+                    sp_glow(sx + sw / 2, sy + sh / 2, sw * 1.2f, fx_col(90, c[0], c[1], c[2]));
+                    UiRoundRing(sx, sy, sw, sh, 3, 2 * SP_K, fx_col(255, c[0], c[1], c[2]));
+                    for (k = 0; k < 3; k++) UiRect(sx + sw * (0.15f + k * 0.27f), sy + sh * 0.3f, sw * 0.15f, sh * 0.4f, fx_col(205, c[0], c[1], c[2]));
+                    for (k = 0; k < 6; k++) UiRect(sx + sw * 0.2f + sinf(t * 4 + k) * 3, ground + k * (SP_H - ground) / 6, sw * 0.6f, (SP_H - ground) / 10, fx_col(70 - k * 10, c[0], c[1], c[2]));
+                }
+            }
+        }
+    }
+    UiRect(0, ground, SP_W, SP_H - ground, fx_col(150, 10, 4, 16));
+    for (i = 0; i < 300; i++)
+    {
+        const float y = fmodf(fx_rand(i + 163000) + t * (0.9f + fx_rand(i + 163100) * 0.8f), 1.1f) * SP_H, x = fmodf(fx_rand(i + 163200) * SP_W + y * 0.15f, SP_W), l = (0.02f + fx_rand(i + 163300) * 0.04f) * SP_H;
+        UiLine(x, y, x - l * 0.15f, y - l, 1.0f, fx_col(90, 170, 190, 255));
+    }
+}
+
+// 17. The ocean under the moon: waves to the horizon, the moon's path on the water glittering and breaking up.
+static void fx_moon_ocean(float t)
+{
+    const float hz = SP_H * 0.55f, mx = SP_W * 0.62f, my = SP_H * 0.22f, mr = SP_H * 0.07f;
+    int row, i;
+    sp_vgrad(0, hz, fx_col(255, 3, 6, 20), fx_col(255, 20, 36, 74));
+    sp_stars(171, 240, t, 0, 0, 0.85f, hz);
+    sp_glow(mx, my, mr * 9, fx_col(80, 160, 190, 255));
+    sp_ellipse(mx, my, mr, mr, 0, fx_col(255, 205, 210, 225));
+    sp_ellipse(mx - mr * 0.12f, my - mr * 0.12f, mr * 0.82f, mr * 0.82f, 0, fx_col(255, 250, 248, 238));
+    UiCircle(mx + mr * 0.3f, my - mr * 0.2f, mr * 0.22f, fx_col(90, 150, 160, 185));
+    UiCircle(mx - mr * 0.35f, my + mr * 0.25f, mr * 0.16f, fx_col(90, 150, 160, 185));
+    sp_vgrad(hz, SP_H, fx_col(255, 14, 28, 60), fx_col(255, 2, 5, 14));
+    for (row = 0; row < 40; row++)
+    {
+        const float v = row / 40.0f, y = hz + powf(v, 1.8f) * (SP_H - hz), amp = 1 + v * 9;
+        float xy[61 * 2];
+        for (i = 0; i <= 60; i++) { const float x = i / 60.0f * SP_W; xy[i * 2] = x; xy[i * 2 + 1] = y + sinf(x * 0.015f / (0.3f + v) + t * (1 + v) + row) * amp; }
+        UiPolyline(xy, 61, 1 + v * 2, 1.0f, fx_col((int)(20 + v * 31), 90, 130, 200));
+    }
+    for (i = 0; i < 420; i++)
+    {
+        const float v = powf(fx_rand(i + 170100), 1.6f), y = hz + v * (SP_H - hz), spread = (0.01f + v * 0.09f) * SP_W, x = mx + sp_gauss(i + 170200) * spread;
+        const float a = sinf(t * (1 + fx_rand(i + 170300) * 3) + fx_rand(i + 170400) * SP_TAU);
+        if (a <= 0) continue;
+        UiRect(x, y, (4 + v * 22) * SP_K * a, 1.5f + v * 2, fx_col((int)(255 * a * (0.9f - v * 0.5f)), 230, 235, 255));
+    }
+}
+
+// 18. A forest of fireflies: pines in layers in the mist, hundreds of fireflies wandering and glowing.
+static IDirect3DTexture9 *s_spFog;
+static void fx_firefly_forest(float t)
+{
+    static const SpNoise fog = { 182, 5.0f, 2.0f, 0.35f, 500, 1, 150, 190, 200, 1, SPM_SIN, 5 };
+    IDirect3DTexture9 *tex = sp_noise_tex(&s_spFog, 256, 80, &fog);
+    int L, i, k;
+    sp_vgrad(0, SP_H, fx_col(255, 6, 18, 28), fx_col(255, 13, 42, 44));
+    sp_stars(183, 160, t, 0, 0, 0.6f, SP_H * 0.5f);
+    sp_glow(SP_W * 0.75f, SP_H * 0.18f, SP_H * 0.6f, fx_col(46, 180, 230, 210));
+    for (L = 0; L < 4; L++)
+    {
+        const float c = (float)(42 - L * 12), base = SP_H * (0.72f + L * 0.09f);
+        const D3DCOLOR col = fx_col(255, (int)(c * 0.6f), (int)c, (int)(c * 0.9f));
+        float x = -0.05f;
+        for (i = 0; x < 1.1f; i++)
+        {
+            const int id = L * 500 + i;
+            const float th = (0.25f + fx_rand(id + 180100) * 0.3f) * (0.6f + L * 0.25f) * SP_H, tw = (0.04f + fx_rand(id + 180200) * 0.04f) * SP_W, px = x * SP_W + sinf(t * 0.2f + x * 9) * 1.5f;
+            for (k = 0; k < 4; k++)
+            {
+                const float y0 = base - th * (k / 4.0f) * 0.85f, ww = tw * (1 - k * 0.2f);
+                float xy[6];
+                xy[0] = px - ww; xy[1] = y0; xy[2] = px; xy[3] = y0 - th * 0.4f; xy[4] = px + ww; xy[5] = y0;
+                sp_fill(xy, 3, col);
+            }
+            x += 0.025f + fx_rand(id + 180300) * 0.05f;
+        }
+        UiRect(0, base, SP_W, SP_H - base, col);
+        if (L < 3) sp_scroll(tex, t * (6 + L * 4) * SP_K, base - SP_H * 0.25f, SP_H * 0.3f, 128);
+    }
+    for (i = 0; i < 140; i++)
+    {
+        const float sp = 0.5f + fx_rand(i + 181000), ph = fx_rand(i + 181100) * SP_TAU;
+        const float x = fmodf(fx_rand(i + 181200) + sinf(t * 0.13f * sp + ph) * 0.05f + t * 0.004f + 1, 1.0f) * SP_W, y = (0.35f + fx_rand(i + 181300) * 0.6f + sinf(t * 0.21f * sp + ph * 2) * 0.04f) * SP_H;
+        const float a = powf(sp_clamp01(sinf(t * 1.6f * sp + ph)), 3);
+        if (a < 0.02f) continue;
+        sp_glow(x, y, (10 + fx_rand(i + 181400) * 12) * SP_K, fx_col((int)(200 * a), 210, 255, 120));
+        UiRect(x - 1, y - 1, 2, 2, fx_col((int)(255 * a), 255, 255, 210));
+    }
+}
+
+// 19. Dunes at sunset: layers of dunes in the low light, the sun big on the horizon, sand blowing, birds far off.
+static void fx_dunes(float t)
+{
+    static const int lay[4][6] = { { 217, 138, 90, 166, 84, 56 }, { 192, 106, 68, 125, 58, 42 }, { 164, 82, 54, 90, 38, 24 }, { 138, 62, 40, 58, 22, 14 } };
+    const float sx = SP_W * 0.38f, sy = SP_H * 0.6f;
+    int i, k;
+    sp_vgrad(0, SP_H * 0.4f, fx_col(255, 43, 20, 66), fx_col(255, 194, 72, 106));
+    sp_vgrad(SP_H * 0.4f, SP_H * 0.62f, fx_col(255, 194, 72, 106), fx_col(255, 255, 179, 92));
+    sp_vgrad(SP_H * 0.62f, SP_H, fx_col(255, 255, 179, 92), fx_col(255, 255, 217, 154));
+    sp_glow(sx, sy, SP_H * 1.0f, fx_col(120, 255, 170, 90));
+    sp_ellipse(sx, sy, SP_H * 0.11f, SP_H * 0.11f, 0, fx_col(255, 255, 241, 200));
+    for (i = 0; i < 7; i++)
+    {
+        const float s = 0.6f + fx_rand(i + 190100) * 0.6f, ph = fx_rand(i + 190200) * SP_TAU, x = fmodf(fx_rand(i + 190300) + t * 0.012f * s, 1.1f) * SP_W;
+        const float y = (0.15f + fx_rand(i + 190400) * 0.2f) * SP_H + sinf(t * 0.8f + ph) * 6, f = sinf(t * 6 * s + ph) * 5 * s, w = 8 * s * SP_K;
+        UiLine(x - w, y - f, x, y, 2 * SP_K, fx_col(200, 40, 15, 40));
+        UiLine(x, y, x + w, y - f, 2 * SP_K, fx_col(200, 40, 15, 40));
+    }
+    for (k = 0; k < 4; k++)
+    {
+        const float base = SP_H * (0.6f + k * 0.1f), amp = SP_H * 0.06f * (0.6f + k * 0.4f), ph = t * 0.01f * (k + 1);
+        float ys[81], xy[81 * 2];
+        for (i = 0; i <= 80; i++)
+        {
+            const float u = i / 80.0f;
+            ys[i] = base - amp * (sinf(u * 4.1f + k * 1.7f + ph) + 0.5f * sinf(u * 9.3f + k + ph * 2));
+            xy[i * 2] = u * SP_W; xy[i * 2 + 1] = ys[i];
+        }
+        sp_band(ys, 80, fx_col(255, lay[k][0], lay[k][1], lay[k][2]), fx_col(255, lay[k][3], lay[k][4], lay[k][5]));
+        UiPolyline(xy, 81, 1.5f, 1.0f, fx_col(115, 255, 220, 170));
+    }
+    for (i = 0; i < 360; i++)
+    {
+        const float x = fmodf(fx_rand(i + 191000) + t * (0.05f + fx_rand(i + 191100) * 0.15f), 1.0f) * SP_W, y = (0.55f + fx_rand(i + 191200) * 0.45f) * SP_H + sinf(t * 2 + i) * 4;
+        UiRect(x, y, 1 + fx_rand(i + 191300) * 2, 1, fx_col(128, 255, 225, 180));
+    }
+}
+
+// 20. Jellyfish: glowing jellyfish pulsing and rising in the deep sea, beams of light, marine snow.
+static void fx_jellyfish(float t)
+{
+    static const float hues[5] = { 190, 300, 320, 170, 260 };
+    int i, k, q;
+    sp_vgrad(0, SP_H, fx_col(255, 6, 40, 74), fx_col(255, 1, 6, 18));
+    for (i = 0; i < 6; i++)
+    {
+        const float x = SP_W * (0.1f + i * 0.17f) + sinf(t * 0.2f + i) * 30;
+        float xy[8];
+        xy[0] = x - 20; xy[1] = 0; xy[2] = x + 20; xy[3] = 0; xy[4] = x + 140; xy[5] = SP_H; xy[6] = x - 60; xy[7] = SP_H;
+        sp_fill(xy, 4, fx_col(20, 120, 200, 255));
+    }
+    sp_stars(202, 200, t, sinf(t * 0.3f) * 10, t * 6, 0.5f, SP_H);
+    for (i = 0; i < 9; i++)
+    {
+        const float s = 0.5f + fx_rand(i + 200100) * 0.9f, ph = fx_rand(i + 200200) * SP_TAU, hue = hues[i % 5], pulse = sinf(t * 1.8f + ph), size = s * 75 * SP_K;
+        const float x = fx_rand(i + 200300) * SP_W + sinf(t * 0.25f + ph) * 30, yy = fmodf(fx_rand(i + 200400) - t * 0.018f * s + 5, 1.25f), y = yy * SP_H * 1.2f - SP_H * 0.1f;
+        const float bw = size * (1 + 0.12f * pulse), bh = size * (0.75f - 0.1f * pulse);
+        float xy[25 * 2];
+        sp_glow(x, y, size * 3.4f, sp_hsl(hue, 0.9f, 0.6f, 70));
+        for (k = 0; k < 7; k++)
+        {
+            float tl[17 * 2];
+            for (q = 0; q <= 16; q++) { const float v = q / 16.0f; tl[q * 2] = x + (k - 3) * bw * 0.22f + sinf(t * 2 + q * 0.6f + k + ph) * 8 * v; tl[q * 2 + 1] = y + v * size * 3.2f; }
+            UiPolyline(tl, 17, 2.0f * SP_K, 1.0f, sp_hsl(hue, 0.9f, 0.72f, 180));
+        }
+        for (q = 0; q < 24; q++) { const float a = 3.14159f + q / 23.0f * 3.14159f; xy[q * 2] = x + cosf(a) * bw; xy[q * 2 + 1] = y + sinf(a) * bh; }
+        xy[48] = x; xy[49] = y;
+        sp_fill(xy, 25, sp_hsl(hue, 0.85f, 0.55f, 200));
+        sp_glow(x, y - bh * 0.35f, bw * 1.2f, sp_hsl(hue, 1.0f, 0.85f, 230));
+        UiCircle(x, y - bh * 0.35f, bw * 0.18f, sp_hsl(hue, 1.0f, 0.95f, 230));
+        UiPolyline(xy, 24, 2.5f * SP_K, 1.0f, sp_hsl(hue, 1.0f, 0.85f, 255));
+    }
+}
+
+// 21. Digital rain: columns of green symbols falling at their own speeds, the head of each stream bright.
+static void fx_digital_rain(float t)
+{
+    static const char glyphs[] = "0123456789ABCDEFGHJKLMNPQRSTUVWXYZ<>+=*#$%&";
+    const int cols = 52, ng = (int)sizeof(glyphs) - 1;
+    const float cw = SP_W / cols;
+    int i, k;
+    UiRect(0, 0, SP_W, SP_H, fx_col(255, 1, 6, 3));
+    sp_glow(SP_W * 0.5f, SP_H * 0.5f, SP_W * 0.8f, fx_col(60, 0, 90, 40));
+    for (i = 0; i < cols; i++)
+    {
+        const float depth = fx_rand(i + 210100), size = cw * (0.6f + depth * 0.5f) * 1.1f, sp = 0.12f + fx_rand(i + 210200) * 0.35f;
+        const int len = 8 + (int)(fx_rand(i + 210300) * 22);
+        const float head = fmodf(t * sp + fx_rand(i + 210400) * 3, 1.6f) * (SP_H + len * size) - len * size * 0.2f;
+        for (k = 0; k < len; k++)
+        {
+            const float y = head - k * size;
+            char g[2];
+            int idx;
+            if (y < -size || y > SP_H + size) continue;
+            idx = (i * 31 + (int)floorf(y / size) * 17 + (int)floorf(t * (k == 0 ? 12 : 3) + k)) % ng;
+            g[0] = glyphs[idx < 0 ? -idx : idx]; g[1] = 0;
+            UiText(UI_BOLD, size, i * cw + cw / 2, y, k == 0 ? fx_col(245, 220, 255, 230) : fx_col((int)(255 * (1 - (float)k / len) * (0.35f + depth * 0.65f)), 40, (int)(200 + depth * 55), 90), g, UI_CENTER);
+        }
+        if (head > 0 && head < SP_H) sp_glow(i * cw + cw / 2, head, size * 1.6f, fx_col(90, 120, 255, 160));
+    }
+}
+
+// 22. A printed circuit: a board with copper tracks, chips, pulses of light running along the tracks.
+#define PCB_PATHS 64
+#define PCB_PTS 17
+static float s_pcbX[PCB_PATHS][PCB_PTS], s_pcbY[PCB_PATHS][PCB_PTS], s_pcbLen[PCB_PATHS];
+static int s_pcbN[PCB_PATHS], s_pcbMade;
+static void sp_pcb_make(void)
+{
+    static const int dirs[8][2] = { { 1, 0 }, { 1, 1 }, { 0, 1 }, { -1, 1 }, { -1, 0 }, { -1, -1 }, { 0, -1 }, { 1, -1 } };
+    const float G = 24 * SP_K;
+    int p, s;
+    for (p = 0; p < PCB_PATHS; p++)
+    {
+        float x = floorf(fx_rand(p + 220100) * SP_W / G) * G, y = floorf(fx_rand(p + 220200) * SP_H / G) * G;
+        int d = (int)(fx_rand(p + 220300) * 8), n = 6 + (int)(fx_rand(p + 220400) * 10);
+        s_pcbX[p][0] = x; s_pcbY[p][0] = y; s_pcbLen[p] = 0;
+        for (s = 1; s <= n && s < PCB_PTS; s++)
+        {
+            const int step = 1 + (int)(fx_rand(p * 50 + s + 220500) * 4);
+            if (fx_rand(p * 50 + s + 221000) < 0.4f) d = (d + (fx_rand(p * 50 + s + 221500) < 0.5f ? 1 : 7)) % 8;
+            x += dirs[d][0] * G * step; y += dirs[d][1] * G * step;
+            s_pcbX[p][s] = x; s_pcbY[p][s] = y;
+            s_pcbLen[p] += G * step * (dirs[d][0] && dirs[d][1] ? 1.414f : 1.0f);
+        }
+        s_pcbN[p] = s;
+    }
+    s_pcbMade = 1;
+}
+static void fx_circuit(float t)
+{
+    const float G = 24 * SP_K;
+    int p, i, k;
+    if (!s_pcbMade) sp_pcb_make();
+    sp_vgrad(0, SP_H, fx_col(255, 4, 38, 28), fx_col(255, 2, 22, 16));
+    for (i = 0; i * G < SP_W; i++) UiRect(i * G, 0, 1, SP_H, fx_col(30, 60, 140, 100));
+    for (i = 0; i * G < SP_H; i++) UiRect(0, i * G, SP_W, 1, fx_col(30, 60, 140, 100));
+    for (p = 0; p < PCB_PATHS; p++)
+    {
+        float xy[PCB_PTS * 2];
+        for (i = 0; i < s_pcbN[p]; i++) { xy[i * 2] = s_pcbX[p][i]; xy[i * 2 + 1] = s_pcbY[p][i]; }
+        UiPolyline(xy, s_pcbN[p], 2.6f * SP_K, 1.0f, fx_col(255, 176, 122, 58));
+        for (k = 0; k < 2; k++)
+        {
+            const int e = k ? s_pcbN[p] - 1 : 0;
+            UiCircle(s_pcbX[p][e], s_pcbY[p][e], 5 * SP_K, fx_col(255, 216, 168, 96));
+            UiCircle(s_pcbX[p][e], s_pcbY[p][e], 2 * SP_K, fx_col(255, 4, 38, 28));
+        }
+    }
+    for (i = 0; i < 9; i++)
+    {
+        const float cw = (60 + fx_rand(i + 222100) * 90) * SP_K, ch = (40 + fx_rand(i + 222200) * 60) * SP_K, x = fx_rand(i + 222300) * (SP_W - cw), y = fx_rand(i + 222400) * (SP_H - ch);
+        for (k = 0; k * 9 * SP_K < cw - 6; k++) UiRect(x + 4 + k * 9 * SP_K, y - 6 * SP_K, 3 * SP_K, ch + 12 * SP_K, fx_col(255, 190, 194, 200));
+        UiRoundRect(x, y, cw, ch, 3, fx_col(255, 30, 32, 38), fx_col(255, 16, 18, 22));
+    }
+    for (p = 0; p < PCB_PATHS; p++)
+    {
+        const float sp = (80 + fx_rand(p + 223100) * 160) * SP_K, d0 = fmodf((t + fx_rand(p + 223200) * 10) * sp, s_pcbLen[p] + 200) - 100;
+        const int gold = fx_rand(p + 223300) > 0.7f;
+        for (k = 0; k < 8; k++)
+        {
+            float d = d0 - k * 7 * SP_K;
+            if (d < 0 || d > s_pcbLen[p]) continue;
+            for (i = 1; i < s_pcbN[p]; i++)
+            {
+                const float ax = s_pcbX[p][i - 1], ay = s_pcbY[p][i - 1], bx = s_pcbX[p][i], by = s_pcbY[p][i], sl = sqrtf((bx - ax) * (bx - ax) + (by - ay) * (by - ay));
+                if (d <= sl)
+                {
+                    const float f = d / sl, x = ax + (bx - ax) * f, y = ay + (by - ay) * f;
+                    if (!k) sp_glow(x, y, 18 * SP_K, gold ? fx_col(200, 255, 200, 80) : fx_col(200, 80, 255, 180));
+                    UiCircle(x, y, (3 - k * 0.3f) * SP_K, gold ? fx_col(205 - k * 25, 255, 200, 80) : fx_col(205 - k * 25, 80, 255, 180));
+                    break;
+                }
+                d -= sl;
+            }
+        }
+    }
+}
+
+// 23. Synthwave: the striped sun going down, wireframe mountains, a grid road running on for ever.
+static void fx_synthwave(float t)
+{
+    const float hz = SP_H * 0.6f, sx = SP_W * 0.5f, sy = hz - SP_H * 0.02f, sr = SP_H * 0.24f;
+    int i, side;
+    sp_vgrad(0, hz * 0.6f, fx_col(255, 11, 4, 37), fx_col(255, 71, 17, 94));
+    sp_vgrad(hz * 0.6f, hz, fx_col(255, 71, 17, 94), fx_col(255, 209, 48, 111));
+    sp_stars(231, 160, t, 0, 0, 0.7f, hz * 0.6f);
+    sp_glow(sx, sy, sr * 2.6f, fx_col(90, 255, 80, 160));
+    UiRoundRect(sx - sr, sy - sr, sr * 2, sr * 2, sr, fx_col(255, 255, 228, 107), fx_col(255, 196, 31, 142));
+    for (i = 0; i < 8; i++)
+    {
+        const float k = fmodf(i * 0.11f + t * 0.03f, 0.9f), y = sy - sr * 0.1f + k * sr, th = k * sr * 0.12f + 1, f = sp_clamp01((y - hz * 0.6f) / (hz * 0.4f));
+        const float hw = sqrtf(sp_clamp01(1 - ((y - sy) / sr) * ((y - sy) / sr))) * sr;
+        UiRect(sx - hw - 1, y, hw * 2 + 2, th, fx_col(255, (int)(71 + (209 - 71) * f), (int)(17 + (48 - 17) * f), (int)(94 + (111 - 94) * f)));
+    }
+    for (side = -1; side <= 1; side += 2)
+    {
+        float xy[23 * 2];
+        int n = 0;
+        xy[n * 2] = sx + side * SP_W * 0.05f; xy[n * 2 + 1] = hz; n++;
+        for (i = 0; i <= 20; i++) { const float u = i / 20.0f; xy[n * 2] = sx + side * (SP_W * 0.05f + u * SP_W * 0.5f); xy[n * 2 + 1] = hz - fx_rand(i + (side > 0 ? 230100 : 230200)) * SP_H * 0.16f * sinf(u * 3.14159f); n++; }
+        xy[n * 2] = sx + side * SP_W * 0.55f; xy[n * 2 + 1] = hz; n++;
+        for (i = 0; i < n - 1; i++) UiStrip(xy[i * 2], xy[i * 2 + 1], hz, xy[i * 2 + 2], xy[i * 2 + 3], hz, fx_col(255, 20, 6, 42), fx_col(255, 20, 6, 42));
+        UiPolyline(xy, n, 1.6f, 1.0f, fx_col(255, 255, 63, 180));
+    }
+    UiRect(0, hz, SP_W, SP_H - hz, fx_col(255, 8, 2, 26));
+    for (i = -20; i <= 20; i++) UiLine(sx + i * SP_W * 0.02f, hz, sx + i * SP_W * 0.25f, SP_H, 1.6f, fx_col(205, 255, 60, 200));
+    for (i = 0; i < 18; i++)
+    {
+        const float z = (i + fmodf(t * 1.5f, 1.0f)) / 18, y = hz + powf(z, 2.4f) * (SP_H - hz);
+        UiLine(0, y, SP_W, y, 1.6f, fx_col((int)(205 * sp_clamp01(z * 3)), 255, 60, 200));
+    }
+    UiRoundRect(0, hz - 6, SP_W, 36, 0, fx_col(150, 255, 90, 200), fx_col(0, 255, 90, 200));
+}
+
+// 24. A thunderstorm: heavy clouds moving, lightning branching and lighting the sky, rain over the hills.
+static IDirect3DTexture9 *s_spStorm[2];
+#define STORM_SEGS 200
+static float s_boltSeg[STORM_SEGS][5];
+static int s_boltN, s_boltCycle = -1;
+static void sp_bolt(float x, float y, float a, float len, int depth, int *seed)
+{
+    float px = x, py = y;
+    int i;
+    for (i = 0; i < 12 && s_boltN < STORM_SEGS; i++)
+    {
+        const float nx = px + sinf(a) * len / 12 + (fx_rand((*seed)++) - 0.5f) * len * 0.12f, ny = py + cosf(a) * len / 12;
+        s_boltSeg[s_boltN][0] = px; s_boltSeg[s_boltN][1] = py; s_boltSeg[s_boltN][2] = nx; s_boltSeg[s_boltN][3] = ny; s_boltSeg[s_boltN][4] = (float)depth;
+        s_boltN++;
+        if (depth < 2 && fx_rand((*seed)++) < 0.18f) sp_bolt(nx, ny, a + (fx_rand((*seed)++) - 0.5f) * 1.4f, len * 0.5f, depth + 1, seed);
+        px = nx; py = ny;
+    }
+}
+static void fx_storm(float t)
+{
+    static const SpNoise c1 = { 241, 4.0f, 2.0f, 0.22f, 950, 1, 78, 82, 104, 1, SPM_DOWN, 5 }, c2 = { 242, 6.0f, 3.0f, 0.28f, 950, 1, 36, 38, 52, 1, SPM_DOWN, 5 };
+    const float P = 3.5f, ph = t / P, u = ph - floorf(ph), age = u * P;
+    const int cyc = (int)floorf(ph);
+    float flash;
+    int i;
+    IDirect3DTexture9 *a = sp_noise_tex(&s_spStorm[0], 256, 96, &c1), *b = sp_noise_tex(&s_spStorm[1], 256, 96, &c2);
+    if (cyc != s_boltCycle)
+    {
+        int seed = cyc * 7919 + 240000;
+        s_boltN = 0;
+        sp_bolt(SP_W * (0.2f + fx_rand(seed++) * 0.6f), SP_H * 0.12f, (fx_rand(seed++) - 0.5f) * 0.4f, SP_H * 0.75f, 0, &seed);
+        s_boltCycle = cyc;
+    }
+    flash = age < 0.6f ? sp_clamp01(1 - age / 0.6f) * (age < 0.08f || (age > 0.15f && age < 0.22f) ? 1.0f : 0.4f) : 0;
+    sp_vgrad(0, SP_H, fx_col(255, (int)(18 + flash * 120), (int)(20 + flash * 125), (int)(32 + flash * 150)), fx_col(255, 11, 13, 20));
+    sp_scroll(a, t * 12 * SP_K, 0, SP_H * 0.7f, 255);
+    sp_scroll(b, t * 22 * SP_K, 0, SP_H * 0.7f, 255);
+    if (flash > 0)
+        for (i = 0; i < s_boltN; i++)
+        {
+            const float *s = s_boltSeg[i];
+            UiLine(s[0], s[1], s[2], s[3], (8 - s[4] * 2.5f) * SP_K, fx_col((int)(76 * flash), 190, 200, 255));
+            UiLine(s[0], s[1], s[2], s[3], (2.4f - s[4] * 0.7f) * SP_K, fx_col((int)(255 * flash), 255, 255, 255));
+        }
+    for (i = 0; i < 360; i++)
+    {
+        const float y = fmodf(fx_rand(i + 243000) + t * (1.4f + fx_rand(i + 243100)), 1.0f) * SP_H, x = fmodf(fx_rand(i + 243200) * SP_W - y * 0.2f + SP_W, SP_W);
+        UiLine(x, y, x + 4, y - 18 * SP_K, 1.0f, fx_col(76, 160, 170, 200));
+    }
+    {
+        float ys[61];
+        for (i = 0; i <= 60; i++) { const float uu = i / 60.0f; ys[i] = SP_H * (0.82f - 0.06f * sinf(uu * 5 + 1) - 0.03f * sinf(uu * 13)); }
+        sp_band(ys, 60, fx_col(255, (int)(6 + flash * 30), (int)(7 + flash * 30), (int)(10 + flash * 40)), fx_col(255, 4, 5, 8));
+    }
+}
+
+// 25. A kaleidoscope: shapes of light reflected in 12 mirrors, turning and changing colour.
+static void fx_kaleidoscope(float t)
+{
+    const float cx = SP_W * 0.5f, cy = SP_H * 0.5f, R = SP_H * 0.75f, seg = SP_TAU / 12;
+    int s, k, q;
+    UiRect(0, 0, SP_W, SP_H, fx_col(255, 5, 3, 10));
+    for (s = 0; s < 26; s++)
+    {
+        const float rr = (fx_rand(s + 250100) * 0.9f + 0.1f * sinf(t * 0.4f + fx_rand(s + 250200) * 9)) * R * 0.75f;
+        const float a0 = (fx_rand(s + 250200) + sinf(t * (fx_rand(s + 250300) - 0.5f) * 0.6f + fx_rand(s + 250100) * 5) * 0.5f) * seg;
+        const float sz = (8 + fx_rand(s + 250400) * 34) * SP_K, spin = (fx_rand(s + 250300) - 0.5f) * 1.2f, hue = fmodf(fx_rand(s + 250500) * 360 + t * 20, 360.0f);
+        const int kind = (int)(fx_rand(s + 250600) * 2.99f);
+        for (k = 0; k < 12; k++)
+        {
+            // each mirror: the shape at its angle, every other one mirrored
+            const float a = (k & 1 ? seg - a0 : a0) + k * seg + t * 0.05f, x = cx + cosf(a) * rr, y = cy + sinf(a) * rr;
+            if (kind == 0) { sp_ellipse(x, y, sz, sz, 0, sp_hsl(hue, 0.9f, 0.6f, 90)); sp_arc(x, y, sz, sz, 0, 0, SP_TAU, 1.4f, sp_hsl(hue, 1.0f, 0.75f, 180)); }
+            else
+            {
+                const int m = kind == 1 ? 3 : 6;
+                float xy[7 * 2];
+                for (q = 0; q < m; q++) { const float qa = q * SP_TAU / m + t * spin * (k & 1 ? -1 : 1); xy[q * 2] = x + cosf(qa) * sz; xy[q * 2 + 1] = y + sinf(qa) * sz; }
+                sp_fill(xy, m, sp_hsl(hue, 0.9f, 0.6f, 90));
+                xy[m * 2] = xy[0]; xy[m * 2 + 1] = xy[1];
+                UiPolyline(xy, m + 1, 1.4f, 1.0f, sp_hsl(hue, 1.0f, 0.75f, 180));
+            }
+        }
+    }
+    sp_glow(cx, cy, SP_H * 0.2f, fx_col(64, 255, 255, 255));
+}
+
+// 26. A pixel landscape: a 16-bit picture in layers moving - clouds, mountains, a forest and a lake reflecting it.
+static void fx_pixel_land(float t)
+{
+    static const int bands[7][3] = { { 43, 45, 110 }, { 62, 63, 140 }, { 90, 79, 163 }, { 138, 90, 168 }, { 198, 106, 156 }, { 240, 140, 122 }, { 255, 184, 112 } };
+    static const int mc[3][3] = { { 75, 63, 122 }, { 53, 48, 94 }, { 35, 34, 64 } };
+    const float P = SP_W / 320.0f;   // one pixel of the picture
+    int i, L, px;
+    for (i = 0; i < 7; i++) UiRect(0, i * 14 * P, SP_W, 15 * P, fx_col(255, bands[i][0], bands[i][1], bands[i][2]));
+    UiRect(214 * P, 70 * P, 18 * P, 18 * P, fx_col(255, 255, 242, 176)); UiRect(211 * P, 73 * P, 24 * P, 12 * P, fx_col(255, 255, 242, 176)); UiRect(217 * P, 67 * P, 12 * P, 24 * P, fx_col(255, 255, 242, 176));
+    for (i = 0; i < 9; i++)
+    {
+        const float w = 20 + fx_rand(i + 260100) * 40, y = 10 + fx_rand(i + 260200) * 50, x = fmodf(fx_rand(i + 260300) * 400 - t * (2 + fx_rand(i + 260400) * 5) + 4000, 400) - 60;
+        const float xx = floorf(x), yy = floorf(y);
+        UiRect(xx * P, yy * P, floorf(w) * P, 5 * P, fx_col(255, 255, 208, 200));
+        UiRect((xx + 6) * P, (yy - 4) * P, floorf(w * 0.5f) * P, 5 * P, fx_col(255, 255, 208, 200));
+        UiRect((xx + 2) * P, (yy + 5) * P, floorf(w - 4) * P, 2 * P, fx_col(255, 232, 160, 176));
+    }
+    for (L = 0; L < 3; L++)
+    {
+        const float off = t * (2 + L * 4), base = 100.0f + L * 14;
+        for (px = 0; px < 320; px += 2)
+        {
+            const float u = (px + off) / (24 - L * 4), f = u - floorf(u);
+            const int k = ((int)floorf(u)) & 63;
+            const float hgt = floorf((fx_rand(L * 64 + k + 261000) * (1 - f) + fx_rand(L * 64 + ((k + 1) & 63) + 261000) * f) * (30 - L * 6));
+            UiRect(px * P, (base - hgt) * P, 2 * P, (144 - base + hgt) * P, fx_col(255, mc[L][0], mc[L][1], mc[L][2]));
+            if (L == 2) UiRect(px * P, 144 * P, 2 * P, hgt * 0.6f * P, fx_col(110, mc[L][0], mc[L][1], mc[L][2] + 30));   // its reflection
+        }
+    }
+    UiRect(0, 134 * P, SP_W, 10 * P, fx_col(255, 22, 48, 30));
+    for (i = 0; i < 60; i++)
+    {
+        const float x = floorf(fmodf(fx_rand(i + 262000) * 640 - t * 14 + 6400, 640) - 20), s = floorf(6 + fx_rand(i + 262100) * 8);
+        int k;
+        for (k = 0; k < (int)s; k++) UiRect((x - k / 2) * P, (134 - s + k) * P, (k + 1) * P, P, fx_col(255, 29, 74, 42));
+        UiRect(x * P, 134 * P, P, 2 * P, fx_col(255, 58, 38, 24));
+    }
+    UiRect(0, 144 * P, SP_W, SP_H - 144 * P, fx_col(150, 40, 60, 140));
+    for (i = 0; i < 14; i++) UiRect(floorf(fmodf(i * 37 + t * 10, 320.0f)) * P, (146 + (i * 13) % 32) * P, 3 * P, P, fx_col(150, 255, 240, 200));
+}
+
+// 27. Currents of particles: thousands of grains following unseen currents, leaving trails of colour.
+#define FLOW_N 700
+#define FLOW_TRAIL 8
+static float s_flowX[FLOW_N][FLOW_TRAIL], s_flowY[FLOW_N][FLOW_TRAIL], s_flowLast = -1;
+static int s_flowLife[FLOW_N], s_flowMade;
+static void fx_flow_field(float t)
+{
+    const float step = 2.2f * SP_K;
+    int i, k, moves = 1;
+    UiRect(0, 0, SP_W, SP_H, fx_col(255, 4, 3, 10));
+    if (!s_flowMade)
+    {
+        for (i = 0; i < FLOW_N; i++) { for (k = 0; k < FLOW_TRAIL; k++) { s_flowX[i][k] = fx_rand(i + 270100) * SP_W; s_flowY[i][k] = fx_rand(i + 270200) * SP_H; } s_flowLife[i] = (int)(fx_rand(i + 270300) * 200); }
+        s_flowMade = 1;
+    }
+    if (s_flowLast >= 0 && t - s_flowLast < 0.02f) moves = 0;   // (about once a 60th of a second)
+    if (moves) s_flowLast = t;
+    for (i = 0; i < FLOW_N; i++)
+    {
+        float a, xy[FLOW_TRAIL * 2];
+        if (moves)
+        {
+            for (k = FLOW_TRAIL - 1; k > 0; k--) { s_flowX[i][k] = s_flowX[i][k - 1]; s_flowY[i][k] = s_flowY[i][k - 1]; }
+            a = sp_fbm(271, s_flowX[i][0] / SP_W * 2.4f + t * 0.03f, s_flowY[i][0] / SP_W * 2.4f - t * 0.02f, 3) * SP_TAU * 2.2f;
+            s_flowX[i][0] += cosf(a) * step; s_flowY[i][0] += sinf(a) * step;
+            if (--s_flowLife[i] < 0 || s_flowX[i][0] < 0 || s_flowX[i][0] > SP_W || s_flowY[i][0] < 0 || s_flowY[i][0] > SP_H)
+            {
+                const float nx = fx_rand(i * 13 + (int)(t * 60) + 272000) * SP_W, ny = fx_rand(i * 17 + (int)(t * 60) + 273000) * SP_H;
+                for (k = 0; k < FLOW_TRAIL; k++) { s_flowX[i][k] = nx; s_flowY[i][k] = ny; }
+                s_flowLife[i] = 100 + (int)(fx_rand(i + (int)(t * 60) + 274000) * 200);
+            }
+        }
+        a = sp_fbm(271, s_flowX[i][0] / SP_W * 2.4f + t * 0.03f, s_flowY[i][0] / SP_W * 2.4f - t * 0.02f, 2) * SP_TAU * 2.2f;
+        for (k = 0; k < FLOW_TRAIL; k++) { xy[k * 2] = s_flowX[i][k]; xy[k * 2 + 1] = s_flowY[i][k]; }
+        UiPolyline(xy, FLOW_TRAIL, 1.4f * SP_K, 1.0f, fx_pal(sp_clamp01(fmodf(a * 0.08f + t * 0.02f, 1.0f)), 150));
+    }
+}
+
+// 28. Cherry blossoms: branches under a huge moon, petals falling and turning in the wind, a pink mist.
+#define SAKURA_SEGS 260
+static float s_sakSeg[SAKURA_SEGS][5], s_sakFlower[SAKURA_SEGS * 2][4];
+static int s_sakN, s_sakF, s_sakMade;
+static void sp_sakura_branch(float x, float y, float a, float len, float wd, int d, int *seed)
+{
+    const float nx = x + cosf(a) * len, ny = y + sinf(a) * len;
+    int i;
+    if (s_sakN >= SAKURA_SEGS) return;
+    s_sakSeg[s_sakN][0] = x; s_sakSeg[s_sakN][1] = y; s_sakSeg[s_sakN][2] = nx; s_sakSeg[s_sakN][3] = ny; s_sakSeg[s_sakN][4] = wd; s_sakN++;
+    if (d > 0)
+    {
+        const int k = 2 + (fx_rand((*seed)++) < 0.3f);
+        for (i = 0; i < k; i++) sp_sakura_branch(nx, ny, a + (fx_rand((*seed)++) - 0.5f) * 1.1f, len * (0.62f + fx_rand((*seed)++) * 0.15f), wd * 0.66f, d - 1, seed);
+    }
+    else
+        for (i = 0; i < 4 && s_sakF < SAKURA_SEGS * 2; i++)
+        {
+            s_sakFlower[s_sakF][0] = nx + (fx_rand((*seed)++) - 0.5f) * 26 * SP_K; s_sakFlower[s_sakF][1] = ny + (fx_rand((*seed)++) - 0.5f) * 22 * SP_K;
+            s_sakFlower[s_sakF][2] = (2 + fx_rand((*seed)++) * 3.5f) * SP_K * 1.6f; s_sakFlower[s_sakF][3] = fx_rand((*seed)++);
+            s_sakF++;
+        }
+}
+static void fx_sakura(float t)
+{
+    const float mx = SP_W * 0.56f, my = SP_H * 0.42f, mr = SP_H * 0.26f, sway = sinf(t * 0.5f) * 2;
+    int i;
+    if (!s_sakMade)
+    {
+        int seed = 281000;
+        s_sakN = s_sakF = 0;
+        sp_sakura_branch(-10, SP_H * 0.15f, 0.25f, SP_W * 0.22f, 18 * SP_K, 6, &seed);
+        sp_sakura_branch(SP_W + 10, SP_H * 0.05f, 3.14159f - 0.35f, SP_W * 0.2f, 16 * SP_K, 6, &seed);
+        s_sakMade = 1;
+    }
+    sp_vgrad(0, SP_H, fx_col(255, 26, 16, 48), fx_col(255, 91, 54, 87));
+    sp_stars(282, 120, t, 0, 0, 0.5f, SP_H * 0.6f);
+    sp_glow(mx, my, mr * 3, fx_col(76, 255, 200, 220));
+    sp_ellipse(mx, my, mr, mr, 0, fx_col(255, 255, 238, 240));
+    UiCircle(mx + mr * 0.3f, my - mr * 0.2f, mr * 0.18f, fx_col(128, 230, 200, 210));
+    UiCircle(mx - mr * 0.35f, my + mr * 0.2f, mr * 0.12f, fx_col(128, 230, 200, 210));
+    UiCircle(mx + mr * 0.05f, my + mr * 0.38f, mr * 0.1f, fx_col(128, 230, 200, 210));
+    {
+        float ys[41];
+        for (i = 0; i <= 40; i++) ys[i] = SP_H * (0.86f - 0.05f * sinf(i / 40.0f * 4 + 2));
+        sp_band(ys, 40, fx_col(255, 36, 21, 42), fx_col(255, 36, 21, 42));
+    }
+    UiRoundRect(0, SP_H * 0.7f, SP_W, SP_H * 0.3f, 0, fx_col(0, 255, 200, 230), fx_col(46, 255, 200, 230));
+    for (i = 0; i < s_sakN; i++) UiLine(s_sakSeg[i][0], s_sakSeg[i][1] + sway, s_sakSeg[i][2], s_sakSeg[i][3] + sway, s_sakSeg[i][4], fx_col(255, 26, 12, 22));
+    for (i = 0; i < s_sakF; i++) UiCircle(s_sakFlower[i][0], s_sakFlower[i][1] + sway, s_sakFlower[i][2], sp_hsl(335 + s_sakFlower[i][3] * 15, 0.8f, 0.72f + s_sakFlower[i][3] * 0.15f, 220));
+    for (i = 0; i < 150; i++)
+    {
+        const float sp = 0.6f + fx_rand(i + 283000) * 0.8f, ph = fx_rand(i + 283100) * SP_TAU, s = (0.6f + fx_rand(i + 283200)) * 6 * SP_K;
+        const float y = fmodf(fx_rand(i + 283300) + t * 0.05f * sp, 1.1f) * SP_H - SP_H * 0.05f, x = fmodf(fx_rand(i + 283400) + sinf(t * 0.6f * sp + ph) * 0.04f + t * 0.03f + 1, 1.0f) * SP_W;
+        const float flip = cosf(t * 3 * sp + ph);
+        sp_ellipse(x, y, s, s * 0.6f * (fabsf(flip) * 0.8f + 0.2f), t * sp + ph, sp_hsl(340, 0.85f, 0.78f + flip * 0.08f, 230));
+    }
+}
+
+// 29. Clockwork: gears of metal meshing and turning together over an engineering drawing, glints on their edges.
+static void fx_gears(float t)
+{
+    static float gx[8], gy[8], gr[8], gdir[8], gratio[8], gph[8];
+    static int gn[8], made;
+    const float U = SP_H / 720.0f, G = 32 * SP_K;
+    int i, k;
+    if (!made)
+    {
+        static const float def[8][4] = { { 150, 24, -1, 0 }, { 90, 14, 0, -0.4f }, { 60, 10, 1, -1.2f }, { 110, 18, 0, 2.6f }, { 70, 12, 3, 1.9f }, { 130, 20, 1, 0.6f }, { 50, 8, 5, 1.3f }, { 95, 16, 0, 1.4f } };
+        for (i = 0; i < 8; i++)
+        {
+            const int prev = (int)def[i][2];
+            gr[i] = def[i][0] * U; gn[i] = (int)def[i][1];
+            if (prev < 0) { gx[i] = SP_W * 0.42f; gy[i] = SP_H * 0.5f; gdir[i] = 1; gratio[i] = 1; gph[i] = 0; }
+            else
+            {
+                gdir[i] = -gdir[prev]; gratio[i] = gratio[prev] * gn[prev] / gn[i];
+                gx[i] = gx[prev] + cosf(def[i][3]) * (gr[prev] + gr[i]) * 0.93f; gy[i] = gy[prev] + sinf(def[i][3]) * (gr[prev] + gr[i]) * 0.93f; gph[i] = 3.14159f / gn[i];
+            }
+        }
+        made = 1;
+    }
+    sp_vgrad(0, SP_H, fx_col(255, 12, 24, 48), fx_col(255, 6, 16, 31));
+    for (i = 0; i * G < SP_W; i++) UiRect(i * G, 0, 1, SP_H, fx_col(20, 120, 170, 255));
+    for (i = 0; i * G < SP_H; i++) UiRect(0, i * G, SP_W, 1, fx_col(20, 120, 170, 255));
+    sp_arc(SP_W * 0.8f, SP_H * 0.25f, SP_H * 0.15f, SP_H * 0.15f, 0, 0, SP_TAU, 1.0f, fx_col(46, 150, 190, 255));
+    UiLine(SP_W * 0.8f - SP_H * 0.2f, SP_H * 0.25f, SP_W * 0.8f + SP_H * 0.2f, SP_H * 0.25f, 1.0f, fx_col(46, 150, 190, 255));
+    for (i = 0; i < 8; i++)
+    {
+        const float rot = t * 0.4f * gdir[i] * gratio[i] + gph[i], ro = gr[i], ri = gr[i] * 0.84f, tw = SP_TAU / gn[i], tone = 150 * (0.6f + fx_rand(i + 290100) * 0.4f);
+        float xy[24 * 4 * 2], in[24 * 4 * 2];
+        int n = 0;
+        for (k = 0; k < gn[i]; k++)
+        {
+            const float a = rot + k * tw, pts[4][2] = { { a, ri }, { a + tw * 0.15f, ro }, { a + tw * 0.45f, ro }, { a + tw * 0.6f, ri } };
+            int q;
+            for (q = 0; q < 4; q++)
+            {
+                xy[n * 2] = gx[i] + cosf(pts[q][0]) * pts[q][1]; xy[n * 2 + 1] = gy[i] + sinf(pts[q][0]) * pts[q][1];
+                in[n * 2] = gx[i] - ro * 0.08f + cosf(pts[q][0]) * pts[q][1] * 0.8f; in[n * 2 + 1] = gy[i] - ro * 0.08f + sinf(pts[q][0]) * pts[q][1] * 0.8f;
+                n++;
+            }
+        }
+        sp_fill(xy, n, fx_col(255, (int)(tone * 0.4f), (int)(tone * 0.32f), (int)(tone * 0.18f)));
+        sp_fill(in, n, fx_col(255, (int)(tone + 60), (int)(tone + 44), (int)(tone + 12)));
+        xy[n * 2] = xy[0]; xy[n * 2 + 1] = xy[1];
+        UiPolyline(xy, n + 1, 1.5f, 1.0f, fx_col(90, 255, 230, 180));
+        for (k = 0; k < 5; k++) UiCircle(gx[i] + cosf(rot + k * SP_TAU / 5) * ro * 0.5f, gy[i] + sinf(rot + k * SP_TAU / 5) * ro * 0.5f, ro * 0.14f, fx_col(100, 0, 0, 0));
+        UiCircle(gx[i], gy[i], ro * 0.18f, fx_col(255, 42, 32, 24));
+        UiCircle(gx[i], gy[i], ro * 0.07f, fx_col(255, 216, 192, 144));
+        sp_glow(gx[i] + cosf(t * 0.7f + gx[i]) * ro * 0.95f, gy[i] + sinf(t * 0.7f + gx[i]) * ro * 0.95f, 14 * SP_K, fx_col(150, 255, 220, 150));
+    }
+}
+
+// 30. N64 cubes: a field of isometric cubes in the logo's colours rising and falling like a wave.
+static void fx_n64_cubes(float t)
+{
+    static const int cols[4][3] = { { 230, 50, 50 }, { 250, 200, 40 }, { 40, 200, 80 }, { 50, 110, 240 } };
+    const int N = 13;
+    const float s = SP_W / 34, cx = SP_W * 0.5f, cy = SP_H * 0.32f;
+    int sum, i;
+    sp_vgrad(0, SP_H, fx_col(255, 7, 10, 24), fx_col(255, 20, 26, 51));
+    if (!sp_begin()) return;
+    for (sum = 0; sum <= 2 * (N - 1); sum++)
+        for (i = 0; i < N; i++)
+        {
+            const int j = sum - i;
+            float di, dj, hgt, x, y, lift;
+            const int *c;
+            if (j < 0 || j >= N) continue;
+            di = i - N / 2.0f + 0.5f; dj = j - N / 2.0f + 0.5f;
+            hgt = (sinf(sqrtf(di * di + dj * dj) * 0.75f - t * 2) * 0.5f + 0.5f) * s * 2.2f + s * 0.3f;
+            x = cx + (i - j) * s; y = cy + (i + j) * s * 0.5f - hgt;
+            c = cols[(i < N / 2 ? 0 : 1) + (j < N / 2 ? 0 : 2)];
+            lift = 0.75f + hgt / (s * 2.5f) * 0.5f;
+            sp_tri(x, y - s * 0.5f, x + s, y, x, y + s * 0.5f, fx_col(255, (int)(c[0] * lift > 255 ? 255 : c[0] * lift), (int)(c[1] * lift > 255 ? 255 : c[1] * lift), (int)(c[2] * lift > 255 ? 255 : c[2] * lift)));
+            sp_tri(x, y - s * 0.5f, x, y + s * 0.5f, x - s, y, fx_col(255, (int)(c[0] * lift > 255 ? 255 : c[0] * lift), (int)(c[1] * lift > 255 ? 255 : c[1] * lift), (int)(c[2] * lift > 255 ? 255 : c[2] * lift)));
+            sp_tri(x - s, y, x, y + s * 0.5f, x, y + s * 0.5f + hgt, fx_col(255, (int)(c[0] * 0.55f), (int)(c[1] * 0.55f), (int)(c[2] * 0.55f)));
+            sp_tri(x - s, y, x, y + s * 0.5f + hgt, x - s, y + hgt, fx_col(255, (int)(c[0] * 0.55f), (int)(c[1] * 0.55f), (int)(c[2] * 0.55f)));
+            sp_tri(x + s, y, x, y + s * 0.5f, x, y + s * 0.5f + hgt, fx_col(255, (int)(c[0] * 0.35f), (int)(c[1] * 0.35f), (int)(c[2] * 0.35f)));
+            sp_tri(x + s, y, x, y + s * 0.5f + hgt, x + s, y + hgt, fx_col(255, (int)(c[0] * 0.35f), (int)(c[1] * 0.35f), (int)(c[2] * 0.35f)));
+        }
+    sp_end();
+    sp_glow(cx, cy + N * s * 0.5f, SP_W * 0.6f, fx_col(30, 80, 120, 255));
+}
+
+// A line of hills (n+1 heights from `seed`, base and amplitude in screen heights) filled to the bottom.
+static void sp_hills(int seed, int n, float base, float amp, float scroll, D3DCOLOR top, D3DCOLOR bottom)
+{
+    float ys[81];
+    int i;
+    for (i = 0; i <= 80; i++)
+    {
+        const float u = fmodf(i / 80.0f + scroll + 10, 1.0f) * n, f = u - floorf(u);
+        const int k = (int)floorf(u);
+        ys[i] = SP_H * (base - (fx_rand(seed + k) * (1 - f) + fx_rand(seed + (k + 1) % n) * f) * amp);
+    }
+    sp_band(ys, 80, top, bottom);
+}
+
+// 31. A volcano erupting: lava and sparks thrown up, glowing rivers down its sides, ash under a red sky.
+static IDirect3DTexture9 *s_spSmoke;
+static void fx_volcano(float t)
+{
+    static const SpNoise smoke = { 312, 4.0f, 3.0f, 0.3f, 600, 1, 60, 40, 40, 0, SPM_DOWN, 5 };
+    const float cx = SP_W * 0.5f, top = SP_H * 0.42f;
+    IDirect3DTexture9 *tex = sp_noise_tex(&s_spSmoke, 256, 144, &smoke);
+    float xy[12];
+    int i, k;
+    sp_vgrad(0, SP_H, fx_col(255, 26, 6, 6), fx_col(255, 92, 26, 10));
+    sp_glow(cx, top, SP_H * 1.1f, fx_col((int)(90 + 25 * sinf(t * 3)), 255, 90, 30));
+    if (tex) UiImagePart(tex, cx - SP_W * 0.5f + sinf(t * 0.2f) * 20, -SP_H * 0.25f - fmodf(t * 6, 40.0f), SP_W, SP_H * 0.75f, 0, 0, 1, 1, fx_col(230, 255, 255, 255));
+    xy[0] = 0; xy[1] = SP_H; xy[2] = SP_W * 0.12f; xy[3] = SP_H * 0.82f; xy[4] = cx - SP_W * 0.07f; xy[5] = top;
+    xy[6] = cx + SP_W * 0.07f; xy[7] = top; xy[8] = SP_W * 0.88f; xy[9] = SP_H * 0.8f; xy[10] = SP_W; xy[11] = SP_H;
+    sp_fill(xy, 6, fx_col(255, 23, 8, 7));
+    for (k = 0; k < 5; k++)
+    {
+        float rv[40 * 2], x = 0.5f + (fx_rand(k + 310100) - 0.5f) * 0.04f, y = 0.42f;
+        int n = 0;
+        while (y < 1.0f && n < 40) { rv[n * 2] = x * SP_W; rv[n * 2 + 1] = y * SP_H; n++; y += 0.03f; x += (fx_rand(k * 50 + n + 310200) - 0.5f) * 0.03f + (x - 0.5f) * 0.12f; }
+        UiPolyline(rv, n, 12 * SP_K, 4, fx_col(64, 255, 80, 20));
+        UiPolyline(rv, n, 3 * SP_K, 1, fx_col(215, 255, (int)(110 + 40 * sinf(t * 2)), 30));
+    }
+    sp_glow(cx, top, SP_W * 0.1f, fx_col(230, 255, 200, 90));
+    for (i = 0; i < 240; i++)
+    {
+        const float life = 3.0f, a = fmodf(t + fx_rand(i + 311000) * life, life), k2 = 1 - a / life;
+        const float vx = (fx_rand(i + 311100) - 0.5f) * 260, vy = -240 - fx_rand(i + 311200) * 320;
+        const float x = cx + (fx_rand(i + 311300) - 0.5f) * SP_W * 0.05f + vx * a * SP_K, y = top + (vy * a + 190 * a * a) * SP_K;
+        UiCircle(x, y, (1 + fx_rand(i + 311400) * 2.5f) * SP_K, fx_col((int)(255 * k2), 255, (int)(180 * k2 + 60), (int)(60 * k2)));
+    }
+    sp_stars(313, 220, t, t * 30, t * 12, 0.35f, SP_H);
+}
+
+// 32. Floating islands: islands of rock and grass hanging in the sky, waterfalls falling into nothing, clouds.
+static IDirect3DTexture9 *s_spCloud;
+static void fx_islands(float t)
+{
+    static const SpNoise cloud = { 322, 5.0f, 2.0f, 0.4f, 600, 1, 255, 255, 255, 1, SPM_SIN, 5 };
+    IDirect3DTexture9 *tex = sp_noise_tex(&s_spCloud, 256, 80, &cloud);
+    int i, q;
+    sp_vgrad(0, SP_H, fx_col(255, 61, 143, 216), fx_col(255, 191, 227, 255));
+    sp_glow(SP_W * 0.85f, SP_H * 0.15f, SP_H * 0.8f, fx_col(130, 255, 240, 200));
+    sp_scroll(tex, t * 8 * SP_K, SP_H * 0.6f, SP_H * 0.4f, 180);
+    for (i = 0; i < 6; i++)
+    {
+        const float z = (i + 0.5f) / 6, s = (40 + fx_rand(i + 320100) * 70) * SP_K * (0.6f + z * 0.6f), x = fx_rand(i + 320200) * SP_W;
+        const float y = (0.25f + fx_rand(i + 320300) * 0.5f) * SP_H + sinf(t * 0.6f + i * 1.7f) * 8, f = 0.55f + z * 0.45f;
+        float xy[10];
+        if (fx_rand(i + 320400) < 0.6f)
+        {
+            UiRoundRect(x + s * 0.3f, y + s * 0.05f, s * 0.12f, SP_H - y, 0, fx_col((int)(205 * f), 200, 235, 255), fx_col(0, 200, 235, 255));
+            for (q = 0; q < 6; q++) UiRect(x + s * 0.3f + (q % 3) * s * 0.04f, y + fmodf(t * 120 + q * 40, SP_H - y), s * 0.03f, s * 0.25f, fx_col((int)(128 * f), 255, 255, 255));
+        }
+        xy[0] = x - s; xy[1] = y; xy[2] = x + s; xy[3] = y; xy[4] = x + s * 0.5f; xy[5] = y + s * 0.6f; xy[6] = x + s * 0.1f; xy[7] = y + s * 1.3f; xy[8] = x - s * 0.3f; xy[9] = y + s * 0.7f;
+        sp_fill(xy, 5, fx_col(255, (int)(90 * f), (int)(70 * f), (int)(60 * f)));
+        sp_ellipse(x, y, s * 1.02f, s * 0.14f, 0, fx_col(255, (int)(70 * f), (int)(150 * f), (int)(70 * f)));
+        for (q = 0; q < 3; q++)
+        {
+            const float tx = x - s * 0.5f + q * s * 0.45f, th = s * (0.35f + q * 0.07f);
+            float tr[6];
+            tr[0] = tx - s * 0.12f; tr[1] = y; tr[2] = tx; tr[3] = y - th; tr[4] = tx + s * 0.12f; tr[5] = y;
+            sp_fill(tr, 3, fx_col(255, (int)(40 * f), (int)(110 * f), (int)(50 * f)));
+        }
+    }
+    sp_scroll(tex, t * 14 * SP_K, SP_H * 0.15f, SP_H * 0.3f, 128);
+}
+
+// 33. Fireworks over a lake: rockets rising and bursting into spheres of colour over a city, mirrored in the lake.
+static void sp_fireworks(float t, float hz, int mirror)
+{
+    int s, i;
+    for (s = 0; s < 6; s++)
+    {
+        const float P = 2.6f + fx_rand(s + 330100) * 1.2f, ph = t / P + fx_rand(s + 330200) * 7, u = (ph - floorf(ph)) * P;
+        const int seed = (int)floorf(ph) * 101 + s * 7;
+        const float x = SP_W * (0.15f + fx_rand(seed + 1) * 0.7f), topy = SP_H * (0.12f + fx_rand(seed + 2) * 0.3f), hue = fx_rand(seed + 3) * 360;
+        const int two = fx_rand(seed + 4) < 0.4f;
+        const float am = mirror ? 0.35f : 1.0f;
+        if (u < 1.1f)
+        {
+            const float a = u / 1.1f, y = hz - (hz - topy) * (1 - (1 - a) * (1 - a));
+            UiRect(x - 1, mirror ? 2 * hz - y - 6 : y, 2, 6, fx_col((int)(230 * am), 255, 230, 180));
+            continue;
+        }
+        {
+            const float a = u - 1.1f, k = 1 - a / 1.8f, sp = (90 + fx_rand(seed + 5) * 70) * SP_K;
+            if (k <= 0) continue;
+            if (a < 0.4f && !mirror) sp_glow(x, topy, SP_H * 0.6f, fx_col((int)(64 * (1 - a / 0.4f)), 255, 230, 200));
+            for (i = 0; i < 72; i++)
+            {
+                const float an = i / 72.0f * SP_TAU, v = sp * (0.85f + fx_rand(seed * 3 + i) * 0.3f), d = a * (1 - a * 0.25f);
+                float px = x + cosf(an) * v * d, py = topy + sinf(an) * v * d + 40 * a * a;
+                if (mirror) py = 2 * hz - py;
+                if (mirror && py < hz) continue;
+                UiCircle(px, py, (1.6f * k + 0.5f) * SP_K, sp_hsl(two && (i & 1) ? hue + 160 : hue, 1.0f, 0.6f + 0.2f * k, (int)(255 * k * am)));
+            }
+        }
+    }
+}
+static void fx_fireworks(float t)
+{
+    const float hz = SP_H * 0.72f;
+    int i;
+    sp_vgrad(0, hz, fx_col(255, 3, 4, 20), fx_col(255, 12, 16, 48));
+    sp_stars(332, 160, t, 0, 0, 0.5f, hz);
+    sp_fireworks(t, hz, 0);
+    for (i = 0; i < 50; i++)
+    {
+        const float b = fx_rand(i + 333000), hgt = b > 0.6f ? b * SP_H * 0.12f : b * SP_H * 0.04f;
+        UiRect(i / 50.0f * SP_W, hz - hgt, SP_W / 50 + 1, hgt, fx_col(255, 5, 6, 12));
+        if (b > 0.6f) { int k; for (k = 0; k < 4; k++) if (fx_rand(i * 9 + k + 333100) < 0.5f) UiRect(i / 50.0f * SP_W + 3 + k * 4, hz - hgt + 6 + k * 7, 2, 3, fx_col(170, 255, 210, 140)); }
+    }
+    sp_vgrad(hz, SP_H, fx_col(255, 11, 16, 48), fx_col(255, 2, 3, 10));
+    sp_fireworks(t, hz, 1);
+    for (i = 0; hz + 4 + i * 6 < SP_H; i++) UiRect(0, hz + 4 + i * 6 + sinf(t + i) * 2, SP_W, 1, fx_col(13, 255, 255, 255));
+}
+
+// 34. A coral reef: corals of every colour swaying, shoals of fish swimming together, sunlight rippling.
+static void sp_coral_branch(float x, float y, float a, float l, int d, float sway, D3DCOLOR c, int *seed)
+{
+    const float nx = x + cosf(a) * l + sway * (1 - d / 4.0f), ny = y + sinf(a) * l;
+    UiLine(x, y, nx, ny, (2 + d) * SP_K, c);
+    if (d > 0)
+    {
+        sp_coral_branch(nx, ny, a - 0.4f - fx_rand((*seed)++) * 0.3f, l * 0.7f, d - 1, sway, c, seed);
+        sp_coral_branch(nx, ny, a + 0.4f + fx_rand((*seed)++) * 0.3f, l * 0.7f, d - 1, sway, c, seed);
+    }
+}
+static void fx_coral_reef(float t)
+{
+    static const float hues[5] = { 340, 20, 280, 50, 170 }, fishHue[3] = { 30, 190, 50 };
+    int i, k, q;
+    sp_vgrad(0, SP_H, fx_col(255, 15, 127, 168), fx_col(255, 4, 33, 58));
+    for (i = 0; i < 26; i++)
+    {
+        const float x = (i / 26.0f) * SP_W * 1.3f - SP_W * 0.15f + sinf(t * 0.5f + i) * 20;
+        UiLine(x, 0, x + SP_W * 0.2f, SP_H, (6 + (i % 4) * 4) * SP_K, fx_col((int)(18 + 10 * sinf(t + i * 1.7f)), 200, 255, 255));
+    }
+    for (i = 0; i < 40; i++)
+        sp_arc(fmodf(i * 0.137f + sinf(t * 0.4f + i) * 0.02f + 1, 1.0f) * SP_W, (0.02f + (i % 5) * 0.02f) * SP_H, (30 + (i % 3) * 10) * SP_K, 4 * SP_K, 0, 0, SP_TAU, 2, fx_col(38, 220, 255, 255));
+    for (i = 0; i < 78; i++)
+    {
+        const int sh = i / 26;
+        const float lead = fmodf(t * (0.04f + sh * 0.015f) + sh * 0.3f, 1.4f) * SP_W * 1.1f - SP_W * 0.2f, ph = fx_rand(i + 340100) * SP_TAU, s = 7 * SP_K;
+        const float x = lead + sp_gauss(i + 340200) * 0.08f * SP_W + sinf(t * 2 + ph) * 4, y = (0.25f + sh * 0.18f + sp_gauss(i + 340300) * 0.05f + sinf(t * 0.7f + sh) * 0.05f) * SP_H, wag = sinf(t * 10 + ph) * s * 0.3f;
+        float tl[6];
+        sp_ellipse(x, y, s, s * 0.45f, 0, sp_hsl(fishHue[sh], 0.9f, 0.6f, 255));
+        tl[0] = x - s * 0.8f; tl[1] = y; tl[2] = x - s * 1.6f; tl[3] = y - s * 0.5f + wag; tl[4] = x - s * 1.6f; tl[5] = y + s * 0.5f + wag;
+        sp_fill(tl, 3, sp_hsl(fishHue[sh], 0.9f, 0.6f, 255));
+        UiRect(x + s * 0.4f, y - s * 0.15f, 1.5f, 1.5f, fx_col(255, 255, 255, 255));
+    }
+    {
+        float ys[41];
+        for (i = 0; i <= 40; i++) ys[i] = SP_H * (0.9f - 0.03f * sinf(i * 0.7f));
+        sp_band(ys, 40, fx_col(255, 201, 168, 116), fx_col(255, 160, 130, 90));
+    }
+    for (i = 0; i < 22; i++)
+    {
+        const float bx = fx_rand(i + 341000) * SP_W, by = SP_H * 0.9f, ch = (0.08f + fx_rand(i + 341100) * 0.16f) * SP_H, sway = sinf(t * 0.8f + bx * 0.01f) * 4;
+        const int kind = (int)(fx_rand(i + 341200) * 2.99f);
+        const D3DCOLOR c = sp_hsl(hues[i % 5], 0.7f, 0.55f, 255);
+        int seed = i * 100 + 342000;
+        if (kind == 0) sp_coral_branch(bx, by, -1.5708f, ch * 0.35f, 4, sway, c, &seed);
+        else if (kind == 1)
+            for (k = 0; k < 7; k++)
+            {
+                const float a = -1.5708f + (k - 3) * 0.22f, l = ch * (0.6f + fx_rand(seed++) * 0.4f);
+                float xy[9 * 2];
+                for (q = 0; q <= 8; q++) { const float f = q / 8.0f; xy[q * 2] = bx + cosf(a) * l * f + sway * 2 * f * f; xy[q * 2 + 1] = by + sinf(a) * l * f; }
+                UiPolyline(xy, 9, 5 * SP_K, 1.0f, c);
+            }
+        else
+        {
+            sp_ellipse(bx, by - ch * 0.25f, ch * 0.4f, ch * 0.3f, 0, c);
+            for (q = 0; q < 5; q++) sp_arc(bx, by - ch * 0.25f, ch * (0.08f + q * 0.06f), ch * (0.08f + q * 0.06f), 0, 3.14159f, SP_TAU, 1.0f, sp_hsl(hues[i % 5], 0.6f, 0.35f, 255));
+        }
+    }
+    sp_stars(342, 100, t, 0, -t * 40, 0.5f, SP_H);
+}
+
+// 35. A cabin in the snow: snowy mountains at night, a cabin with its window lit, smoke from the chimney, snow falling.
+static void fx_snow_cabin(float t)
+{
+    const float cx = SP_W * 0.62f, cy = SP_H * 0.82f, cw = SP_W * 0.13f, ch = SP_H * 0.12f, fl = 0.85f + 0.15f * sinf(t * 7) * sinf(t * 3.1f);
+    float xy[8];
+    int i, k;
+    sp_vgrad(0, SP_H, fx_col(255, 7, 16, 40), fx_col(255, 36, 54, 94));
+    sp_stars(352, 200, t, 0, 0, 0.8f, SP_H * 0.55f);
+    sp_glow(SP_W * 0.2f, SP_H * 0.18f, SP_H * 0.1f, fx_col(230, 255, 255, 240));
+    sp_hills(350100, 12, 0.55f, 0.3f, 0, fx_col(255, 109, 127, 166), fx_col(255, 109, 127, 166));
+    sp_hills(350200, 16, 0.68f, 0.22f, 0, fx_col(255, 143, 160, 196), fx_col(255, 143, 160, 196));
+    {
+        float ys[41];
+        for (i = 0; i <= 40; i++) ys[i] = SP_H * (0.8f - 0.02f * sinf(i * 0.5f));
+        sp_band(ys, 40, fx_col(255, 223, 231, 245), fx_col(255, 200, 210, 230));
+    }
+    for (i = 0; i < 18; i++)
+    {
+        const float x = fx_rand(i + 351000) * SP_W, s = (0.6f + fx_rand(i + 351100) * 0.8f) * 40 * SP_K, y = SP_H * 0.82f;
+        for (k = 0; k < 3; k++)
+        {
+            float tr[6];
+            tr[0] = x - s * (1 - k * 0.25f); tr[1] = y - k * s * 0.6f; tr[2] = x; tr[3] = y - s * 1.4f - k * s * 0.6f; tr[4] = x + s * (1 - k * 0.25f); tr[5] = y - k * s * 0.6f;
+            sp_fill(tr, 3, fx_col(255, 28, 48, 64));
+            tr[0] = x - s * 0.4f; tr[1] = y - s * 0.8f - k * s * 0.6f; tr[4] = x + s * 0.4f; tr[5] = y - s * 0.8f - k * s * 0.6f;
+            sp_fill(tr, 3, fx_col(215, 240, 245, 255));
+        }
+    }
+    UiRect(cx - cw / 2, cy - ch, cw, ch, fx_col(255, 58, 36, 24));
+    xy[0] = cx - cw * 0.62f; xy[1] = cy - ch; xy[2] = cx; xy[3] = cy - ch * 1.8f; xy[4] = cx + cw * 0.62f; xy[5] = cy - ch;
+    sp_fill(xy, 3, fx_col(255, 233, 238, 248));
+    UiRect(cx + cw * 0.2f, cy - ch * 1.75f, cw * 0.1f, ch * 0.5f, fx_col(255, 42, 26, 18));
+    UiRect(cx - cw * 0.3f, cy - ch * 0.7f, cw * 0.22f, ch * 0.32f, fx_col((int)(255 * fl), 255, 190, 90));
+    UiRect(cx + cw * 0.06f, cy - ch * 0.7f, cw * 0.22f, ch * 0.32f, fx_col((int)(255 * fl), 255, 190, 90));
+    sp_glow(cx, cy - ch * 0.5f, cw * 2.0f, fx_col((int)(76 * fl), 255, 170, 80));
+    for (i = 0; i < 16; i++)
+    {
+        const float a = fmodf(t + i * 0.25f, 4.0f), sx = cx + cw * 0.25f + a * 18 * SP_K + sinf(a * 2 + i) * 6, sy = cy - ch * 1.75f - a * 30 * SP_H / 540;
+        UiCircle(sx, sy, (4 + a * 9) * SP_K, fx_col((int)(64 * (1 - a / 4)), 200, 205, 220));
+    }
+    for (i = 0; i < 420; i++)
+    {
+        const float z = fx_rand(i + 352000), x = fmodf(fx_rand(i + 352100) * SP_W + sinf(t * 0.8f + i) * 20 + t * 10 * z + SP_W * 4, SP_W), y = fmodf(fx_rand(i + 352200) * SP_H + t * (20 + z * 50), SP_H);
+        UiCircle(x, y, (0.6f + z * 2.2f) * SP_K, fx_col((int)(102 + z * 153), 255, 255, 255));
+    }
+}
+
+// 36. An equalizer: bars of sound jumping to the beat, a circular wave throbbing in the middle, a flash at each beat.
+static void fx_equalizer(float t)
+{
+    const float beat = powf(sp_clamp01(sinf(t * 3.14159f * 2 * 1.05f)), 12), cx = SP_W * 0.5f, cy = SP_H * 0.46f, R = SP_H * (0.16f + beat * 0.03f), bw = SP_W / 64;
+    float vals[64], xy[129 * 2];
+    int i;
+    sp_vgrad(0, SP_H, fx_col(255, 7, 4, 26), fx_col(255, 18, 10, 46));
+    sp_glow(cx, cy, SP_H * (0.5f + beat * 0.2f), fx_col((int)(76 + beat * 76), 140, 60, 255));
+    for (i = 0; i < 64; i++)
+    {
+        float v = sp_fbm(361, i * 0.18f, t * 1.6f, 3) * 1.4f - 0.25f + beat * (1 - i / 64.0f) * 0.5f;
+        vals[i] = v < 0.05f ? 0.05f : v > 1 ? 1 : v;
+    }
+    for (i = 0; i < 64; i++)
+    {
+        const float bh = vals[i] * SP_H * 0.38f, hue = 200 + i / 64.0f * 140;
+        UiRoundRect(i * bw + 1, SP_H - bh, bw - 2, bh, 0, sp_hsl(hue, 1.0f, 0.7f, 230), sp_hsl(hue, 0.9f, 0.45f, 230));
+        UiRect(i * bw + 1, SP_H - bh - 6 - vals[i] * 10, bw - 2, 3, sp_hsl(hue, 1.0f, 0.85f, 230));
+    }
+    for (i = 0; i <= 128; i++) { const float a = i / 128.0f * SP_TAU, rr = R + vals[(i < 64 ? i : 128 - i) % 64] * SP_H * 0.12f; xy[i * 2] = cx + cosf(a) * rr; xy[i * 2 + 1] = cy + sinf(a) * rr; }
+    UiPolyline(xy, 129, 2.5f * SP_K, 1.0f, fx_col(230, 200, 170, 255));
+    for (i = 0; i <= 128; i++) { const float a = i / 128.0f * SP_TAU + t * 0.3f, rr = R * 0.82f - vals[(i * 3) % 64] * SP_H * 0.05f; xy[i * 2] = cx + cosf(a) * rr; xy[i * 2 + 1] = cy + sinf(a) * rr; }
+    UiPolyline(xy, 129, 2.5f * SP_K, 1.0f, fx_col(128, 120, 220, 255));
+    if (beat > 0.3f) sp_arc(cx, cy, R * (1.6f + (1 - beat) * 1.5f), R * (1.6f + (1 - beat) * 1.5f), 0, 0, SP_TAU, 2, fx_col((int)(beat * 100), 255, 255, 255));
+}
+
+// 37. Autumn leaves: trees in autumn in a park at sunset, orange and red leaves falling and whirling in the wind.
+static void sp_tree_branch(float x0, float y0, float a, float l, int d, float t, int *seed)
+{
+    const float x1 = x0 + cosf(a) * l + sinf(t * 0.7f + d) * d * 0.4f, y1 = y0 + sinf(a) * l;
+    UiLine(x0, y0, x1, y1, d * 2 * SP_K, fx_col(255, 46, 26, 16));
+    if (d > 1)
+    {
+        sp_tree_branch(x1, y1, a - 0.45f - fx_rand((*seed)++) * 0.2f, l * 0.72f, d - 1, t, seed);
+        sp_tree_branch(x1, y1, a + 0.45f + fx_rand((*seed)++) * 0.2f, l * 0.72f, d - 1, t, seed);
+    }
+}
+static void fx_autumn(float t)
+{
+    static const float hues[4] = { 15, 30, 5, 45 };
+    int i, k;
+    sp_vgrad(0, SP_H * 0.55f, fx_col(255, 90, 111, 168), fx_col(255, 242, 166, 107));
+    sp_vgrad(SP_H * 0.55f, SP_H, fx_col(255, 242, 166, 107), fx_col(255, 122, 74, 42));
+    sp_glow(SP_W * 0.5f, SP_H * 0.6f, SP_H * 0.9f, fx_col(90, 255, 190, 110));
+    UiRect(0, SP_H * 0.8f, SP_W, SP_H * 0.2f, fx_col(255, 90, 58, 34));
+    for (i = 0; i < 60; i++) sp_ellipse(fx_rand(i + 370100) * SP_W, SP_H * (0.81f + fx_rand(i + 370200) * 0.18f), 5 * SP_K, 2.5f * SP_K, fx_rand(i + 370300) * 3, fx_col(150, 181, 96, 42));
+    for (i = 0; i < 9; i++)
+    {
+        const float x = (i / 8.0f + (fx_rand(i + 371000) - 0.5f) * 0.06f) * SP_W, base = SP_H * 0.82f, th = SP_H * 0.32f * (0.7f + fx_rand(i + 371100) * 0.6f), hue = hues[i % 4];
+        int seed = i * 300 + 372000;
+        sp_tree_branch(x, base, -1.5708f, th * 0.4f, 5, t, &seed);
+        for (k = 0; k < 26; k++)
+        {
+            const float a = fx_rand(seed++) * SP_TAU, rr = fx_rand(seed++) * th * 0.42f;
+            UiCircle(x + cosf(a) * rr * 1.2f + sinf(t * 0.8f + k) * 2, base - th * 0.85f + sinf(a) * rr * 0.7f, th * (0.1f + fx_rand(seed++) * 0.08f), sp_hsl(hue + fx_rand(seed++) * 20, 0.8f, 0.45f + fx_rand(seed++) * 0.15f, 215));
+        }
+    }
+    for (i = 0; i < 160; i++)
+    {
+        const float sp = 0.5f + fx_rand(i + 373000), ph = fx_rand(i + 373100) * SP_TAU, gust = sinf(t * 0.3f) * 0.5f + 0.7f, s = (0.6f + fx_rand(i + 373200) * 0.8f) * 5 * SP_K;
+        const float x = fmodf(fx_rand(i + 373300) + t * 0.04f * sp * gust + sinf(t * sp + ph) * 0.02f + 1, 1.0f) * SP_W, y = fmodf(fx_rand(i + 373400) + t * 0.035f * sp, 1.0f) * SP_H;
+        const float flip = cosf(t * 2.5f * sp + ph);
+        sp_ellipse(x, y, s, s * 0.55f * (fabsf(flip) * 0.8f + 0.2f), t * sp + ph, sp_hsl(hues[i % 4], 0.85f, 0.5f + flip * 0.08f, 255));
+    }
+}
+
+// 38. Rain on the glass: drops running down a window, the city's lights out of focus behind it.
+static void fx_glass_rain(float t)
+{
+    static const int cols[5][3] = { { 255, 180, 80 }, { 255, 90, 90 }, { 120, 200, 255 }, { 255, 230, 160 }, { 200, 120, 255 } };
+    int i;
+    sp_vgrad(0, SP_H, fx_col(255, 10, 12, 24), fx_col(255, 26, 20, 36));
+    for (i = 0; i < 70; i++)
+    {
+        const int *c = cols[i % 5];
+        const float R = (0.02f + fx_rand(i + 380100) * 0.06f) * SP_W, x = fx_rand(i + 380200) * SP_W + sinf(t * 0.1f + i) * 6, y = (0.3f + fx_rand(i + 380300) * 0.7f) * SP_H, a = 0.18f + 0.08f * sinf(t * 0.7f + i);
+        UiShadow(x - R * 0.8f, y - R * 0.8f, R * 1.6f, R * 1.6f, R * 0.8f, R * 0.25f, fx_col((int)(255 * a), c[0], c[1], c[2]));
+        UiRoundRing(x - R * 0.8f, y - R * 0.8f, R * 1.6f, R * 1.6f, R * 0.8f, 2, fx_col((int)(255 * a * 1.3f), c[0], c[1], c[2]));
+    }
+    UiRect(0, 0, SP_W, SP_H, fx_col(20, 120, 130, 160));
+    for (i = 0; i < 220; i++)
+    {
+        const float sz = 0.4f + powf(fx_rand(i + 381000), 3) * 2.4f, s = sz * 4 * SP_K;
+        const int slides = fx_rand(i + 381100) < 0.12f;
+        const float yy = slides ? fmodf(fx_rand(i + 381200) + t * (0.05f + fx_rand(i + 381300) * 0.15f) * (1 + sz) * 0.2f, 1.1f) - 0.05f : fx_rand(i + 381200);
+        const float x = fx_rand(i + 381400) * SP_W + (slides ? sinf(t * 3 + yy * 40) * 2 : 0), y = yy * SP_H;
+        if (slides) UiRoundRect(x - s * 0.3f, y - s * 14, s * 0.6f, s * 14, s * 0.3f, fx_col(0, 200, 210, 240), fx_col(64, 200, 210, 240));
+        sp_ellipse(x, y, s * 0.85f, s, 0, fx_col(128, 20, 20, 40));
+        sp_ellipse(x - s * 0.1f, y - s * 0.15f, s * 0.6f, s * 0.7f, 0, fx_col(64, 150, 160, 200));
+        UiCircle(x - s * 0.3f, y - s * 0.4f, s * 0.22f + 0.5f, fx_col(190, 255, 255, 255));
+    }
+}
+
+// 39. Bokeh lights: circles of light out of focus in colours, floating and mixing softly in layers.
+static void fx_bokeh_lights(float t)
+{
+    int i, k;
+    sp_vgrad(0, SP_H, fx_col(255, 16, 12, 34), fx_col(255, 5, 4, 12));
+    sp_glow(SP_W * 0.5f, SP_H * 0.5f, SP_W * 0.6f, fx_col(70, 40, 30, 80));
+    for (i = 0; i < 90; i++)
+    {
+        const float z = i / 90.0f, R = (10 + z * 70) * SP_K, sp = 0.2f + fx_rand(i + 390100) * 0.6f, ph = fx_rand(i + 390200) * SP_TAU;
+        const float x = (fmodf(fx_rand(i + 390300) + t * 0.008f * sp * (0.3f + z), 1.2f) - 0.1f) * SP_W, y = (fx_rand(i + 390400) + sinf(t * 0.3f * sp + ph) * 0.04f) * SP_H;
+        const float a = (0.08f + (1 - z) * 0.18f) * (0.75f + 0.25f * sinf(t * sp + ph)), k2 = fx_rand(i + 390500);
+        if (fx_rand(i + 390600) < 0.4f)
+        {
+            float xy[7 * 2];
+            for (k = 0; k < 6; k++) { const float q = k / 6.0f * SP_TAU + 0.3f; xy[k * 2] = x + cosf(q) * R; xy[k * 2 + 1] = y + sinf(q) * R; }
+            sp_fill(xy, 6, fx_pal(k2, (int)(255 * a)));
+            xy[12] = xy[0]; xy[13] = xy[1];
+            UiPolyline(xy, 7, 1.5f, 1.0f, fx_palw(k2, 0.3f, (int)(400 * a > 255 ? 255 : 400 * a)));
+        }
+        else
+        {
+            sp_ellipse(x, y, R, R, 0, fx_pal(k2, (int)(255 * a)));
+            sp_arc(x, y, R, R, 0, 0, SP_TAU, 1.5f, fx_palw(k2, 0.3f, (int)(400 * a > 255 ? 255 : 400 * a)));
+        }
+    }
+}
+
+// 40. A city from the air at night: blocks with their windows, lit streets, cars moving, a river crossing it.
+static void fx_city_air(float t)
+{
+    const int cols = 18, rows = 11;
+    const float cw = SP_W / cols, ch = SP_H / rows;
+    float xy[31 * 2];
+    int i, j, k;
+    UiRect(0, 0, SP_W, SP_H, fx_col(255, 6, 8, 14));
+    for (i = 0; i < cols; i++)
+        for (j = 0; j < rows; j++)
+        {
+            const int id = i * rows + j;
+            const float x = i * cw + 4, y = j * ch + 4, bw = cw - 8, bh = ch - 8;
+            UiRect(x, y, bw, bh, fx_rand(id + 400100) < 0.12f ? fx_col(255, 12, 26, 16) : fx_col(255, 16, 18, 28));
+            for (k = 0; k < 12; k++)
+                UiRect(x + fx_rand(id * 20 + k + 400200) * bw, y + fx_rand(id * 20 + k + 401000) * bh, 2, 2, fx_rand(id * 20 + k + 402000) < 0.5f ? fx_col(140, 255, 210, 140) : fx_col(100, 150, 200, 255));
+        }
+    for (i = 0; i <= cols; i++) UiRect(i * cw - 1, 0, 2, SP_H, fx_col(64, 255, 180, 90));
+    for (j = 0; j <= rows; j++) UiRect(0, j * ch - 1, SP_W, 2, fx_col(64, 255, 180, 90));
+    for (i = 0; i <= 30; i++) { const float u = i / 30.0f; xy[i * 2] = u * SP_W; xy[i * 2 + 1] = SP_H * (0.55f + 0.18f * sinf(u * 5)); }
+    UiPolyline(xy, 31, ch * 0.9f, 2, fx_col(255, 7, 22, 40));
+    UiPolyline(xy, 31, 2, 1, fx_col(64, 80, 140, 220));
+    for (i = 0; i < 160; i++)
+    {
+        const int hz = fx_rand(i + 403000) < 0.5f, lane = (int)(fx_rand(i + 403100) * (hz ? rows : cols));
+        const float spd = (0.03f + fx_rand(i + 403200) * 0.05f) * (fx_rand(i + 403300) < 0.5f ? -1 : 1), p = fmodf(fx_rand(i + 403400) + t * spd + 10, 1.0f);
+        const int head = spd > 0;
+        const float x = hz ? p * SP_W : lane * cw + (head ? 3 : -3), y = hz ? lane * ch + (head ? 3 : -3) : p * SP_H, dx = hz ? (head ? 1.0f : -1.0f) : 0, dy = hz ? 0 : (head ? 1.0f : -1.0f);
+        const int r = 255, g = head ? 240 : 60, b = head ? 200 : 50;
+        UiLine(x, y, x - dx * 14, y - dy * 14, 2, fx_col(205, r, g, b));
+        sp_glow(x, y, 8, fx_col(128, r, g, b));
+    }
+}
+
+// 41. A DNA helix: a double helix turning in 3D, its base pairs in colours, particles of light rising round it.
+static void fx_dna(float t)
+{
+    static const int cols[4][3] = { { 230, 60, 80 }, { 60, 200, 120 }, { 250, 200, 60 }, { 70, 140, 255 } };
+    const int n = 46;
+    const float cy = SP_H * 0.5f, A = SP_H * 0.22f;
+    float xa[46], ya[46], yb[46], za[46], line[46 * 2];
+    int i, s;
+    sp_vgrad(0, SP_H, fx_col(255, 3, 10, 22), fx_col(255, 7, 26, 44));
+    sp_stars(411, 200, t, 0, -t * 8, 0.5f, SP_H);
+    for (i = 0; i < n; i++)
+    {
+        const float ph = i * 0.38f + t * 1.1f;
+        xa[i] = (i + 0.5f) / n * SP_W * 1.1f - SP_W * 0.05f; ya[i] = cy + sinf(ph) * A; yb[i] = cy - sinf(ph) * A; za[i] = cosf(ph);
+    }
+    for (i = 0; i < n; i++)
+    {
+        const int *c = cols[i % 4], *c2 = cols[(i + 2) % 4];
+        const float ym = (ya[i] + yb[i]) * 0.5f;
+        UiLine(xa[i], ya[i], xa[i], ym, 3 * SP_K, fx_col(140, c[0], c[1], c[2]));
+        UiLine(xa[i], ym, xa[i], yb[i], 3 * SP_K, fx_col(140, c2[0], c2[1], c2[2]));
+    }
+    for (s = 0; s < 2; s++)
+    {
+        for (i = 0; i < n; i++) { line[i * 2] = xa[i]; line[i * 2 + 1] = s ? yb[i] : ya[i]; }
+        UiPolyline(line, n, 4 * SP_K, 1.0f, s ? fx_col(180, 200, 140, 255) : fx_col(180, 120, 200, 255));
+    }
+    for (i = 0; i < n; i++)
+        for (s = 0; s < 2; s++)
+        {
+            const float z = s ? -za[i] : za[i], y = s ? yb[i] : ya[i], r = (4 + (z + 1) * 3) * SP_K;
+            sp_glow(xa[i], y, r * 3.5f, s ? fx_col((int)(64 + (z + 1) * 51), 220, 170, 255) : fx_col((int)(64 + (z + 1) * 51), 150, 220, 255));
+            UiCircle(xa[i], y, r * 0.6f, fx_col((int)(100 + (z + 1) * 76), 255, 255, 255));
+        }
+}
+
+// 42. A low-poly world: a land of triangles with mountains, water and snow, lit by the sun as we fly over it.
+static void fx_low_poly(float t)
+{
+    const int cols = 48, rows = 22;
+    const float hz = SP_H * 0.4f, camH = 2.0f, F = (SP_H - hz) * 1.08f, Z = rows * 0.8f + 2, fz = t * 1.2f - floorf(t * 1.2f);
+    const int base = (int)floorf(t * 1.2f);
+    static float px[23][49], py[23][49], ph[23][49], pz[23];
+    int i, j, q;
+    sp_vgrad(0, hz, fx_col(255, 111, 176, 234), fx_col(255, 255, 217, 176));
+    sp_glow(SP_W * 0.72f, SP_H * 0.22f, SP_H * 0.6f, fx_col(150, 255, 240, 200));
+    UiRoundRect(0, hz - 1, SP_W, SP_H - hz + 1, 0, fx_col(255, 232, 207, 174), fx_col(255, 127, 160, 112));
+    for (j = 0; j <= rows; j++)
+    {
+        pz[j] = (rows - j) * 0.8f + 2 - fz * 0.8f;
+        for (i = 0; i <= cols; i++)
+        {
+            const float x = (i - cols / 2.0f) * 0.9f, n = sp_fbm(421, i * 0.22f, (base + rows - j) * 0.22f, 4), y = n > 0.42f ? (n - 0.42f) * 4.2f : 0;
+            px[j][i] = SP_W * 0.5f + x / pz[j] * SP_W * 0.11f; py[j][i] = hz + (camH - y) / pz[j] * F; ph[j][i] = y;
+        }
+    }
+    if (!sp_begin()) return;
+    for (j = 0; j < rows; j++)
+        for (i = 0; i < cols; i++)
+            for (q = 0; q < 2; q++)
+            {
+                const int ax = q ? i + 1 : i, ay = j, bx = q ? i + 1 : i + 1, by = q ? j + 1 : j, cx2 = i, cy2 = j + 1;
+                const float hm = (ph[ay][ax] + ph[by][bx] + ph[cy2][cx2]) / 3, fog = powf(sp_clamp01(pz[j] / Z), 1.4f);
+                const float lit = 0.85f + (ph[by][bx] - ph[ay][ax]) * 0.35f - (ph[cy2][cx2] - ph[ay][ax]) * 0.35f;
+                float c[3], l = lit < 0.45f ? 0.45f : lit > 1.25f ? 1.25f : lit;
+                int k;
+                if (hm < 0.02f) { const float s2 = 0.85f + 0.15f * sinf(t * 2 + i + j); c[0] = 40 * s2; c[1] = 115 * s2; c[2] = 195 * s2; }
+                else if (hm < 0.5f) { c[0] = 86; c[1] = 165; c[2] = 82; }
+                else if (hm < 1.1f) { c[0] = 128; c[1] = 112; c[2] = 92; }
+                else { c[0] = 240; c[1] = 245; c[2] = 252; }
+                for (k = 0; k < 3; k++) { const float v = c[k] * l > 255 ? 255 : c[k] * l; c[k] = v * (1 - fog) + (k == 0 ? 255 : k == 1 ? 217 : 176) * fog; }
+                sp_tri(px[ay][ax], py[ay][ax], px[by][bx], py[by][bx], px[cy2][cx2], py[cy2][cx2], fx_col(255, (int)c[0], (int)c[1], (int)c[2]));
+            }
+    sp_end();
+}
+
+// 43. A night train: a train with its windows lit crossing the land under the moon, posts and wires flying past.
+static void fx_night_train(float t)
+{
+    const float ty = SP_H * 0.78f, carW = SP_W * 0.2f, carH = SP_H * 0.08f, x0 = (fmodf(t * 0.07f, 2.2f) - 1.2f) * SP_W, pp = fmodf(t * 260 * SP_K, SP_W * 0.3f);
+    int c, k;
+    float x;
+    sp_vgrad(0, SP_H, fx_col(255, 6, 11, 30), fx_col(255, 28, 42, 78));
+    sp_stars(432, 240, t, 0, 0, 0.8f, SP_H * 0.6f);
+    sp_glow(SP_W * 0.8f, SP_H * 0.2f, SP_H * 0.5f, fx_col(50, 150, 180, 255));
+    sp_glow(SP_W * 0.8f, SP_H * 0.2f, SP_H * 0.07f, fx_col(255, 255, 252, 235));
+    sp_hills(430100, 20, 0.6f, 0.25f, t * 0.005f, fx_col(255, 26, 36, 64), fx_col(255, 26, 36, 64));
+    sp_hills(430200, 30, 0.72f, 0.15f, t * 0.015f, fx_col(255, 18, 26, 46), fx_col(255, 18, 26, 46));
+    UiRect(0, ty, SP_W, SP_H - ty, fx_col(255, 8, 11, 20));
+    UiLine(0, ty + 2, SP_W, ty + 2, 2, fx_col(255, 42, 48, 64));
+    for (c = 0; c < 6; c++)
+    {
+        x = x0 + c * (carW + 6);
+        if (x > SP_W || x + carW < 0) continue;
+        UiRect(x, ty - carH, carW, carH, fx_col(255, 17, 20, 31));
+        UiRect(x, ty - carH, carW, carH * 0.12f, fx_col(255, 29, 34, 50));
+        for (k = 0; k < 6; k++) UiRect(x + carW * (0.06f + k * 0.155f), ty - carH * 0.75f, carW * 0.11f, carH * 0.35f, fx_col((int)(255 * (0.8f + 0.2f * sinf(t * 3 + k + c))), 255, 214, 140));
+        UiRoundRect(x, ty, carW, SP_H * 0.12f, 0, fx_col(64, 255, 200, 120), fx_col(0, 255, 200, 120));
+    }
+    x = x0 + 6 * (carW + 6);
+    if (x > -50 && x < SP_W + 300)
+    {
+        float xy[8];
+        xy[0] = x - carW * 0.05f; xy[1] = ty - carH * 0.6f; xy[2] = x + SP_W * 0.35f; xy[3] = ty - carH * 1.6f; xy[4] = x + SP_W * 0.35f; xy[5] = ty + carH * 0.6f; xy[6] = x - carW * 0.05f; xy[7] = ty - carH * 0.3f;
+        sp_fill(xy, 4, fx_col(50, 255, 240, 200));
+    }
+    for (x = -pp; x < SP_W; x += SP_W * 0.3f)
+    {
+        float wire[9 * 2];
+        int q;
+        UiRect(x + SP_W * 0.3f, SP_H * 0.5f, 5 * SP_K, SP_H * 0.5f, fx_col(255, 5, 7, 12));
+        UiRect(x + SP_W * 0.3f - 14, SP_H * 0.52f, 34 * SP_K, 3, fx_col(255, 5, 7, 12));
+        for (q = 0; q <= 8; q++) { const float f = q / 8.0f; wire[q * 2] = x + SP_W * 0.3f * f; wire[q * 2 + 1] = SP_H * 0.53f + sinf(f * 3.14159f) * SP_H * 0.04f; }
+        UiPolyline(wire, 9, 1.5f, 1.0f, fx_col(230, 5, 7, 12));
+    }
+}
+
+// 44. Hot-air balloons: balloons in stripes of colour rising slowly over a valley at dawn, mist between the hills.
+static void fx_balloons(float t)
+{
+    int i, k, q, h;
+    sp_vgrad(0, SP_H * 0.5f, fx_col(255, 106, 143, 208), fx_col(255, 247, 196, 154));
+    sp_vgrad(SP_H * 0.5f, SP_H, fx_col(255, 247, 196, 154), fx_col(255, 200, 168, 136));
+    sp_glow(SP_W * 0.3f, SP_H * 0.72f, SP_H * 0.8f, fx_col(130, 255, 220, 170));
+    for (h = 0; h < 3; h++)
+    {
+        static const int hc[3][3] = { { 150, 140, 170 }, { 110, 120, 130 }, { 70, 90, 80 } };
+        const float base = 0.72f + h * 0.08f;
+        sp_hills(440100 + h * 100, 10 + h * 4, base, 0.12f, 0, fx_col(255, hc[h][0], hc[h][1], hc[h][2]), fx_col(255, hc[h][0], hc[h][1], hc[h][2]));
+        UiRoundRect(0, SP_H * (base - 0.05f), SP_W, SP_H * 0.1f, 0, fx_col(0, 255, 235, 220), fx_col(90, 255, 235, 220));
+    }
+    for (i = 0; i < 14; i++)
+    {
+        const float z = (i + 0.5f) / 14, s = (12 + z * 40) * SP_K, ph = fx_rand(i + 441000) * SP_TAU, hue = fx_rand(i + 441100) * 360, f = 0.55f + z * 0.45f;
+        const float x = fmodf(fx_rand(i + 441200) + sinf(t * 0.1f + ph) * 0.02f + t * 0.003f * (z + 0.3f), 1.1f) * SP_W, y = fmodf(fx_rand(i + 441300) - t * 0.01f * (0.4f + z) + 12, 1.2f) * SP_H - SP_H * 0.1f;
+        const int stripes = 6 + (int)(fx_rand(i + 441400) * 4);
+        // the envelope in gores: each a strip between two meridians of its shape (round on top, narrow at the bottom)
+        for (k = 0; k < stripes; k++)
+        {
+            float xy[2 * 13 * 2];
+            int n = 0;
+            for (q = 0; q <= 12; q++)
+            {
+                const float v = -1 + q / 6.0f, r = v < 0.3f ? s * 1.15f * sqrtf(sp_clamp01(1 - v * v * 0.9f)) : s * (1.15f * sqrtf(sp_clamp01(1 - 0.09f * 0.9f)) - (v - 0.3f) / 0.7f * 0.85f);
+                xy[n * 2] = x + r * (-1 + 2.0f * k / stripes); xy[n * 2 + 1] = y + v * s * 1.2f; n++;
+            }
+            for (q = 12; q >= 0; q--)
+            {
+                const float v = -1 + q / 6.0f, r = v < 0.3f ? s * 1.15f * sqrtf(sp_clamp01(1 - v * v * 0.9f)) : s * (1.15f * sqrtf(sp_clamp01(1 - 0.09f * 0.9f)) - (v - 0.3f) / 0.7f * 0.85f);
+                xy[n * 2] = x + r * (-1 + 2.0f * (k + 1) / stripes); xy[n * 2 + 1] = y + v * s * 1.2f; n++;
+            }
+            sp_fill(xy, n, sp_hsl(hue + (k & 1) * 40, 0.75f, ((k & 1) ? 0.6f : 0.48f) * f + 0.1f - (k > stripes / 2 ? 0.08f : 0), 255));
+        }
+        UiLine(x - s * 0.3f, y + s * 1.15f, x - s * 0.2f, y + s * 1.55f, 1, fx_col((int)(255 * f), 60, 40, 30));
+        UiLine(x + s * 0.3f, y + s * 1.15f, x + s * 0.2f, y + s * 1.55f, 1, fx_col((int)(255 * f), 60, 40, 30));
+        UiRect(x - s * 0.22f, y + s * 1.55f, s * 0.44f, s * 0.3f, fx_col(255, (int)(110 * f), (int)(70 * f), (int)(40 * f)));
+        if (sinf(t * 2 + ph) > 0.8f) sp_glow(x, y + s * 1.25f, s * 0.6f, fx_col(200, 255, 170, 60));
+    }
+}
+
+// 45. A magic portal: a ring of runes turning, energy swirling inside it, sparks escaping into space.
+static void fx_portal(float t)
+{
+    static const char runes[] = "ABCDEFGHIJKLMNOPQRSTUVWX";
+    const float cx = SP_W * 0.5f, cy = SP_H * 0.5f, R = SP_H * 0.3f;
+    float xy[101 * 2];
+    int k, i;
+    sp_vgrad(0, SP_H, fx_col(255, 5, 3, 15), fx_col(255, 16, 8, 38));
+    sp_stars(452, 200, t, 0, 0, 0.6f, SP_H);
+    sp_glow(cx, cy, R * 2.6f, fx_pal(0.4f, 90));
+    for (k = 0; k < 6; k++)
+    {
+        for (i = 0; i <= 100; i++) { const float u = i / 100.0f, a = u * SP_TAU * 2.5f + t * (1.5f + k * 0.2f) + k, rr = R * 0.92f * u; xy[i * 2] = cx + cosf(a) * rr; xy[i * 2 + 1] = cy + sinf(a) * rr; }
+        UiPolyline(xy, 101, 3 * SP_K, 1.0f, fx_pal(k / 5.0f, 90));
+    }
+    sp_glow(cx, cy, R * 0.6f, fx_palw(0.5f, 0.6f, 150));
+    for (i = 0; i < 300; i++)
+    {
+        const float life = fmodf(t * (0.3f + fx_rand(i + 450100)) * 0.3f + fx_rand(i + 450200), 1.0f), rr = R * (0.95f + life * 0.9f * fx_rand(i + 450300)), a = fx_rand(i + 450400) * SP_TAU + t * 0.3f + life;
+        UiCircle(cx + cosf(a) * rr, cy + sinf(a) * rr, (1 + (1 - life) * 2) * SP_K, fx_palw(fx_rand(i + 450500), 0.4f, (int)(255 * (1 - life))));
+    }
+    sp_arc(cx, cy, R, R, 0, 0, SP_TAU, 5 * SP_K, fx_palw(0.5f, 0.5f, 230));
+    sp_arc(cx, cy, R * 1.12f, R * 1.12f, 0, 0, SP_TAU, 2 * SP_K, fx_palw(0.5f, 0.5f, 150));
+    sp_arc(cx, cy, R * 0.86f, R * 0.86f, 0, 0, SP_TAU, 2 * SP_K, fx_palw(0.5f, 0.5f, 128));
+    for (i = 0; i < 24; i++)
+    {
+        const float a = i / 24.0f * SP_TAU + t * 0.25f;
+        char g[2];
+        g[0] = runes[i]; g[1] = 0;
+        UiText(UI_BOLD, 20, cx + cosf(a) * R * 1.06f, cy + sinf(a) * R * 1.06f, fx_palw(0.6f, 0.6f, (int)(150 + 100 * sinf(t * 2 + i))), g, UI_CENTER);
+    }
+}
+
+// ---- More of space: five skies with the Milky Way, ten galaxies. Drawn in colours of their own (their defaults in
+// s_fxDefault; the chosen ones take their place through fx_remap).
+
+// A band of the Milky Way in a picture (greys, alpha its light less its dust): along the curve v = mid(u), `wide` its
+// half width, `seed` its clouds; `core`: how much brighter towards u = coreU.
+struct SpBand { float (*mid)(float); float wide, coreU, core; int seed; };
+static const SpBand *s_spBandNow;
+static void sp_band_px(float u, float v, unsigned char *o)
+{
+    const SpBand *b = s_spBandNow;
+    const float d = (v - b->mid(u)) / b->wide, n = sp_fbm(b->seed, u * 6, v * 3.4f, 5);
+    const float dust = (sp_fbm(b->seed + 1, u * 9, v * 5, 5) - 0.45f) * 3.2f * expf(-d * d * 2.2f), glow = expf(-d * d), hot = expf(-(u - b->coreU) * (u - b->coreU) * 8);
+    float a = glow * (0.35f + n) * (1 + b->core * hot) - (dust > 0 ? dust : 0);
+    a = a < 0 ? 0 : a * 260;
+    o[0] = o[1] = o[2] = (unsigned char)(200 + 55 * hot); o[3] = (unsigned char)(a > 255 ? 255 : a);
+}
+static IDirect3DTexture9 *sp_band_tex(IDirect3DTexture9 **slot, const SpBand *b)
+{
+    s_spBandNow = b;
+    return sp_func_tex(slot, 256, 144, sp_band_px);
+}
+static float sp_mid_steep(float u) { return 0.5f + (u - 0.5f) * 1.6f; }                       // nearly upright
+static float sp_mid_arch(float u) { return 0.86f - 2.4f * (0.25f - (u - 0.5f) * (u - 0.5f)); }  // an arch over the horizon
+static float sp_mid_flat(float u) { return 0.5f + (u - 0.5f) * 0.18f; }                          // across, through the middle
+static float sp_mid_low(float u) { return 0.36f + (u - 0.5f) * 0.5f; }
+
+// Silhouettes: flat-topped mesas, and a saguaro (its trunk and two arms) at x standing on y, h tall.
+static void sp_saguaro(float x, float y, float h, D3DCOLOR c)
+{
+    const float w = h * 0.12f;
+    UiRoundRect(x - w * 0.5f, y - h, w, h, w * 0.5f, c, c);
+    UiRoundRect(x - w * 2.0f, y - h * 0.62f, w * 0.8f, h * 0.32f, w * 0.4f, c, c);
+    UiRect(x - w * 2.0f + w * 0.4f, y - h * 0.36f, w * 1.6f, w * 0.7f, c);
+    UiRoundRect(x + w * 1.2f, y - h * 0.78f, w * 0.8f, h * 0.36f, w * 0.4f, c, c);
+    UiRect(x + w * 0.4f, y - h * 0.48f, w * 1.2f, w * 0.7f, c);
+}
+
+// 1. The Milky Way over the desert: upright over mesas, a cactus or two, the last light of the day at the horizon.
+static IDirect3DTexture9 *s_spMwDesert;
+static void fx_milky_desert(float t)
+{
+    static const SpBand band = { sp_mid_steep, 0.11f, 0.55f, 1.4f, 141 };
+    IDirect3DTexture9 *tex = sp_band_tex(&s_spMwDesert, &band);
+    float ys[81];
+    int i;
+    sp_vgrad(0, SP_H, fx_col(255, 4, 6, 22), fx_col(255, 30, 22, 52));
+    sp_glow(SP_W * 0.3f, SP_H * 0.86f, SP_H * 0.7f, fx_col(60, 255, 130, 70));
+    if (tex) UiImagePart(tex, sinf(t * 0.02f) * 14 - SP_W * 0.05f, -SP_H * 0.05f, SP_W * 1.1f, SP_H * 1.0f, 0, 0, 1, 1, fx_col(255, 255, 205, 160));
+    sp_stars(142, 300, t, 0, 0, 0.9f, SP_H * 0.85f);
+    for (i = 0; i <= 80; i++)
+    {
+        // mesas: steps of flat tops
+        const float u = i / 80.0f, m = sp_vnoise(143, u * 5, 0);
+        ys[i] = SP_H * (0.84f - (m > 0.55f ? 0.12f : m > 0.4f ? 0.05f : 0.0f) - 0.01f * sinf(u * 40));
+    }
+    sp_band(ys, 80, fx_col(255, 14, 10, 20), fx_col(255, 6, 4, 10));
+    sp_saguaro(SP_W * 0.22f, SP_H * 0.96f, SP_H * 0.26f, fx_col(255, 3, 3, 6));
+    sp_saguaro(SP_W * 0.86f, SP_H * 0.97f, SP_H * 0.17f, fx_col(255, 3, 3, 6));
+    UiRect(0, SP_H * 0.94f, SP_W, SP_H * 0.06f, fx_col(255, 3, 3, 6));
+}
+
+// 2. The Milky Way over a lake: mountains, the sky again in the still water, ripples crossing it.
+static IDirect3DTexture9 *s_spMwLake;
+static void fx_milky_lake(float t)
+{
+    static const SpBand band = { sp_mid_steep, 0.10f, 0.5f, 1.2f, 151 };
+    const float horizon = SP_H * 0.58f;
+    IDirect3DTexture9 *tex = sp_band_tex(&s_spMwLake, &band);
+    float ys[81];
+    int i;
+    sp_vgrad(0, horizon, fx_col(255, 3, 5, 20), fx_col(255, 12, 20, 46));
+    sp_vgrad(horizon, SP_H, fx_col(255, 8, 14, 34), fx_col(255, 2, 3, 12));
+    if (tex)
+    {
+        UiImagePart(tex, 0, -SP_H * 0.25f, SP_W, horizon + SP_H * 0.25f, 0, 0, 1, 1, fx_col(255, 210, 220, 255));
+        UiImagePart(tex, 0, horizon, SP_W, horizon + SP_H * 0.25f, 0, 1, 1, 0, fx_col(110, 210, 220, 255));   // in the water, upside down
+    }
+    sp_stars(152, 260, t, 0, 0, 0.9f, horizon);
+    for (i = 0; i < 160; i++)
+    {
+        // the stars in the water, shimmering
+        const float x = fx_rand(i + 153000) * SP_W, y = horizon + fx_rand(i + 153100) * (SP_H - horizon), b = 0.4f + 0.6f * sinf(t * 2 + i * 1.7f);
+        UiRect(x + sinf(t * 1.5f + y * 0.05f) * 3, y, 2.5f * SP_K, 1, fx_col((int)(90 * (b > 0 ? b : 0)), 220, 230, 255));
+    }
+    for (i = 0; i < 14; i++)
+    {
+        const float y = horizon + 8 + fmodf(i * 23.0f + t * 6, SP_H - horizon - 8), w = SP_W * (0.2f + fx_rand(i + 154000) * 0.4f), x = fx_rand(i + 154100) * SP_W;
+        UiRect(x - w * 0.5f, y, w, 1, fx_col(26, 200, 215, 255));
+    }
+    for (i = 0; i <= 80; i++) ys[i] = horizon - SP_H * (0.03f + 0.16f * sp_fbm(155, i / 80.0f * 4, 0, 4) * sp_fbm(156, i / 80.0f * 2, 1, 2) * 2);
+    sp_band(ys, 80, fx_col(255, 6, 8, 16), fx_col(255, 4, 5, 10));
+    for (i = 0; i <= 80; i++) ys[i] = horizon + (horizon - ys[i]) * 0.5f;   // their reflection, shorter and fainter
+    for (i = 0; i < 80; i++)
+        UiStrip(i * SP_W / 80, horizon, ys[i], (i + 1) * SP_W / 80 + 1, horizon, ys[i + 1], fx_col(200, 5, 7, 14), fx_col(60, 5, 7, 14));
+}
+
+// 3. An arch of the Milky Way over hills, a lone tree; the sky turning slowly.
+static IDirect3DTexture9 *s_spMwArch;
+static void sp_twig(float x, float y, float a, float l, int d, D3DCOLOR c)
+{
+    const float x1 = x + cosf(a) * l, y1 = y + sinf(a) * l;
+    UiLine(x, y, x1, y1, d * 1.3f * SP_K + 0.6f, c);
+    if (d <= 0) return;
+    sp_twig(x1, y1, a - 0.45f, l * 0.72f, d - 1, c);
+    sp_twig(x1, y1, a + 0.38f, l * 0.68f, d - 1, c);
+}
+static void fx_milky_arch(float t)
+{
+    static const SpBand band = { sp_mid_arch, 0.09f, 0.5f, 1.6f, 161 };
+    IDirect3DTexture9 *tex = sp_band_tex(&s_spMwArch, &band);
+    int i;
+    sp_vgrad(0, SP_H, fx_col(255, 3, 4, 18), fx_col(255, 16, 18, 44));
+    sp_glow(SP_W * 0.5f, SP_H * 0.95f, SP_H * 0.6f, fx_col(50, 120, 140, 255));
+    if (tex) UiImagePart(tex, -SP_W * 0.08f + sinf(t * 0.015f) * 20, -SP_H * 0.02f, SP_W * 1.16f, SP_H, 0, 0, 1, 1, fx_col(255, 215, 200, 255));
+    sp_stars(162, 320, t, t * 0.8f, 0, 0.9f, SP_H * 0.86f);
+    sp_hills(163, 7, 0.9f, 0.1f, t * 0.002f, fx_col(255, 8, 8, 18), fx_col(255, 3, 3, 8));
+    for (i = 0; i < 3; i++) sp_twig(SP_W * 0.74f, SP_H * 0.86f, -1.57f + (i - 1) * 0.05f, SP_H * 0.13f, 6, fx_col(255, 3, 3, 8));
+}
+
+// 4. The heart of the galaxy: its bright bulge, clouds of stars thick around it, lanes of dark dust drifting.
+static IDirect3DTexture9 *s_spMwCore, *s_spMwDust;
+static void fx_milky_core(float t)
+{
+    static const SpBand band = { sp_mid_flat, 0.16f, 0.5f, 3.0f, 171 };
+    static const SpNoise dust = { 172, 7.0f, 3.0f, 0.5f, 700, 1, 4, 3, 6, 0, SPM_SIN, 5 };
+    const float z = 1.08f + 0.04f * sinf(t * 0.05f), cx = SP_W * 0.5f, cy = SP_H * 0.5f;
+    IDirect3DTexture9 *tex = sp_band_tex(&s_spMwCore, &band), *dt = sp_noise_tex(&s_spMwDust, 256, 144, &dust);
+    int i;
+    sp_vgrad(0, SP_H, fx_col(255, 6, 5, 14), fx_col(255, 10, 8, 20));
+    sp_glow(cx, cy, SP_H * 0.9f, fx_col(70, 255, 170, 90));
+    if (tex) UiImagePart(tex, (SP_W - SP_W * z) * 0.5f, (SP_H - SP_H * z) * 0.5f, SP_W * z, SP_H * z, 0, 0, 1, 1, fx_col(255, 255, 210, 160));
+    for (i = 0; i < 2600; i++)
+    {
+        const float x = fx_rand(i + 171000) * SP_W, d = sp_gauss(i + 171100) * (0.14f + 0.2f * fx_rand(i + 171200)), y = cy + d * SP_H + (x - cx) * 0.09f;
+        const float hot = expf(-((x - cx) / SP_W) * ((x - cx) / SP_W) * 10), b = (0.3f + fx_rand(i + 171300) * 0.7f) * (0.8f + 0.2f * sinf(t * (1 + fx_rand(i + 171400) * 2) + i));
+        UiRect(cx + (x - cx) * z, cy + (y - cy) * z, 1.2f * SP_K, 1.2f * SP_K, fx_col((int)(200 * b), 255, (int)(215 + 40 * (1 - hot)), (int)(170 + 85 * (1 - hot))));
+    }
+    if (dt) UiImagePart(dt, (SP_W - SP_W * z) * 0.5f + sinf(t * 0.03f) * 30, (SP_H - SP_H * z) * 0.5f, SP_W * z, SP_H * z, 0, 0, 1, 1, fx_col(255, 255, 255, 255));
+    sp_glow(cx, cy, SP_H * 0.25f, fx_col(120, 255, 220, 170));
+    sp_stars(173, 120, t, 0, 0, 1.0f, SP_H);
+}
+
+// 5. Star trails: the sky turning round the pole for a long exposure (the arcs growing, then a new one), the Milky
+// Way faint behind, hills and a small observatory.
+static IDirect3DTexture9 *s_spMwTrails;
+static void fx_milky_trails(float t)
+{
+    static const SpBand band = { sp_mid_low, 0.1f, 0.4f, 1.0f, 181 };
+    const float P = 40, k = fmodf(t, P) / P, fade = sp_ease(0, 0.05f, k) * (1 - sp_ease(0.93f, 1.0f, k)), len = 0.06f + k * 1.1f;
+    const float px = SP_W * 0.66f, py = SP_H * 0.2f;
+    IDirect3DTexture9 *tex = sp_band_tex(&s_spMwTrails, &band);
+    int i;
+    sp_vgrad(0, SP_H, fx_col(255, 4, 6, 24), fx_col(255, 14, 20, 50));
+    if (tex) UiImagePart(tex, 0, 0, SP_W, SP_H, 0, 0, 1, 1, fx_col(120, 200, 210, 255));
+    for (i = 0; i < 260; i++)
+    {
+        const float r = (0.03f + powf(fx_rand(i + 181000), 0.8f) * 1.2f) * SP_W, a0 = fx_rand(i + 181100) * SP_TAU, tint = fx_rand(i + 181200);
+        const float b = (0.3f + fx_rand(i + 181300) * 0.7f) * fade;
+        sp_arc(px, py, r, r, 0, a0, a0 + len * (0.9f + 0.2f * fx_rand(i + 181400)), (0.8f + fx_rand(i + 181500)) * SP_K,
+               fx_col((int)(170 * b), tint < 0.2f ? 255 : tint < 0.45f ? 170 : 230, tint < 0.2f ? 200 : tint < 0.45f ? 200 : 235, 255));
+    }
+    sp_hills(183, 6, 0.92f, 0.09f, 0, fx_col(255, 7, 8, 16), fx_col(255, 3, 3, 8));
+    {
+        // the observatory: its dome, a slit of warm light
+        const float ox = SP_W * 0.28f, oy = SP_H * 0.86f, r = SP_H * 0.05f;
+        UiRect(ox - r, oy - r * 0.2f, r * 2, r * 1.2f, fx_col(255, 3, 3, 8));
+        sp_ellipse(ox, oy - r * 0.2f, r, r, 0, fx_col(255, 3, 3, 8));
+        UiRect(ox - r * 0.1f, oy - r * 1.1f, r * 0.2f, r * 0.8f, fx_col((int)(200 * (0.7f + 0.3f * sinf(t))), 255, 190, 110));
+    }
+}
+
+// A galaxy of stars (sp_galaxy_draw): `arms` spiral arms wound `wind` per radius (0 arms: an elliptical, `tilt` its
+// roundness), seen tilted (1: face on) and turned `rot`, spinning with `spin`; `bar`: a bar's half length (0: none).
+// Its core, arms and knots of new stars in their colours.
+struct SpGal { float cx, cy, R, tilt, rot, wind, spin, bar, bright; int arms, n, seed; int core[3], arm[3], knot[3]; };
+static void sp_galaxy_draw(const SpGal *g)
+{
+    const float cr = cosf(g->rot), sr = sinf(g->rot);
+    int i;
+    sp_glow(g->cx, g->cy, g->R * 1.15f, fx_col((int)(36 * g->bright), g->arm[0], g->arm[1], g->arm[2]));
+    for (i = 0; g->arms && i < g->arms * 26; i++)
+    {
+        // the arms' body: soft light along each (the stars over it), the bar's too
+        const int arm = i % g->arms;
+        const float rr = g->bar * 0.5f + (i / g->arms) / 26.0f * (1.0f - g->bar * 0.5f);
+        const float a = rr < g->bar ? arm * SP_TAU / g->arms : arm * SP_TAU / g->arms + (rr - g->bar) * g->wind;
+        const float x = cosf(a + g->spin * (1.3f - rr)) * rr * g->R, y = sinf(a + g->spin * (1.3f - rr)) * rr * g->R * g->tilt;
+        sp_glow(g->cx + x * cr - y * sr, g->cy + x * sr + y * cr, g->R * (0.16f - 0.08f * rr), fx_col((int)(30 * g->bright * (1.1f - rr)), g->arm[0], g->arm[1], g->arm[2]));
+    }
+    for (i = 0; i < g->n; i++)
+    {
+        const int k = g->seed * 100003 + i, bulge = !g->arms || fx_rand(k) < 0.24f;
+        float rr, ang, x, y, w, sz;
+        int c[3], q;
+        if (bulge)
+        {
+            rr = fabsf(sp_gauss(k + 1)) * (g->arms ? 0.24f : 0.75f);
+            ang = fx_rand(k + 2) * SP_TAU;
+        }
+        else
+        {
+            const int arm = i % g->arms;
+            rr = fabsf(powf(fx_rand(k + 3), 0.7f) + sp_gauss(k + 4) * 0.12f);
+            if (rr > 1.05f) rr = 1.05f;
+            if (rr < g->bar)
+            {
+                // the bar: a thick straight band of old stars through the core, each end an arm's start
+                const float base = arm * SP_TAU / g->arms, across = sp_gauss(k + 5) * 0.5f * g->bar * (1.2f - rr / g->bar * 0.5f);
+                const float px = rr * cosf(base) - across * sinf(base), py = rr * sinf(base) + across * cosf(base);
+                rr = sqrtf(px * px + py * py);
+                ang = atan2f(py, px);
+            }
+            else ang = arm * SP_TAU / g->arms + (rr - g->bar) * g->wind + sp_gauss(k + 5) * (0.95f - 0.45f * rr);
+        }
+        ang += g->spin * (1.3f - rr);
+        x = cosf(ang) * rr * g->R;
+        y = sinf(ang) * rr * g->R * g->tilt;
+        w = sp_clamp01(1 - rr * 2.2f);
+        for (q = 0; q < 3; q++) c[q] = (int)(g->arm[q] + (g->core[q] - g->arm[q]) * w);
+        sz = (fx_rand(k + 6) < 0.03f ? 2.2f : 0.9f + fx_rand(k + 7) * 1.1f) * SP_K;
+        UiRect(g->cx + x * cr - y * sr, g->cy + x * sr + y * cr, sz, sz, fx_col((int)((70 + 150 * fx_rand(k + 8)) * g->bright), c[0], c[1], c[2]));
+    }
+    for (i = 0; g->arms && i < 40 * g->arms; i++)
+    {
+        // knots of new stars along the arms
+        const int k = g->seed * 100003 + 90000 + i;
+        const float rr = g->bar + 0.15f + fx_rand(k) * (0.85f - g->bar), a = (i % g->arms) * SP_TAU / g->arms + (rr - g->bar) * g->wind + sp_gauss(k + 1) * 0.12f + g->spin * (1.3f - rr);
+        const float x = cosf(a) * rr * g->R, y = sinf(a) * rr * g->R * g->tilt;
+        sp_glow(g->cx + x * cr - y * sr, g->cy + x * sr + y * cr, (3 + fx_rand(k + 2) * 5) * SP_K * 2.2f, fx_col((int)(100 * g->bright), g->knot[0], g->knot[1], g->knot[2]));
+    }
+    sp_glow(g->cx, g->cy, g->R * (g->arms ? 0.42f : 0.6f), fx_col((int)(150 * g->bright), g->core[0], g->core[1], g->core[2]));
+    sp_glow(g->cx, g->cy, g->R * 0.1f, fx_col((int)(240 * g->bright), 255, 250, 235));
+}
+static void sp_space_bg(int seed, float t)
+{
+    sp_vgrad(0, SP_H, fx_col(255, 3, 3, 10), fx_col(255, 7, 6, 18));
+    sp_stars(seed, 240, t, 0, 0, 0.7f, SP_H);
+}
+
+// 6. Andromeda: a great disk seen nearly edge on across the sky - filled with stars, its arms wound so tight they
+// show as rings, lanes of dark dust along them, a big warm bulge; its two small companions (M32 close, M110 apart).
+static void fx_andromeda(float t)
+{
+    const float cx = SP_W * 0.5f, cy = SP_H * 0.5f, R = SP_W * 0.47f, tilt = 0.3f, rot = -0.42f, cr = cosf(rot), sr = sinf(rot), spin = t * 0.02f;
+    SpGal m32 = { cx + SP_W * 0.07f, cy - SP_H * 0.1f, SP_W * 0.025f, 0.85f, 0, 0, 0, 0, 1, 0, 450, 192, { 255, 225, 175 }, { 255, 215, 170 }, { 255, 215, 170 } };
+    SpGal m110 = { SP_W * 0.33f, SP_H * 0.75f, SP_W * 0.055f, 0.5f, -0.6f, 0, 0, 0, 0.8f, 0, 650, 193, { 255, 225, 175 }, { 255, 215, 170 }, { 255, 215, 170 } };
+    int i, k;
+    sp_space_bg(194, t);
+    sp_galaxy_draw(&m110);
+    for (k = 12; k >= 1; k--)
+    {
+        // the disk's own light: ovals growing fainter outwards
+        const float f = k / 12.0f;
+        sp_ellipse(cx, cy, R * f, R * f * tilt, rot, fx_col((int)(8 + 9 * (1 - f)), (int)(170 + 85 * (1 - f)), (int)(185 + 40 * (1 - f)), (int)(255 - 80 * (1 - f))));
+    }
+    for (i = 0; i < 9000; i++)
+    {
+        // stars: thicker towards the middle; drawn towards two arms wound tight (rings, seen so slanted)
+        float rr = -logf(fx_rand(i + 190000) * 0.98f + 0.02f) * 0.3f, ang = fx_rand(i + 190100) * SP_TAU, x, y, w;
+        if (rr > 1.08f) rr = 1.08f;
+        ang -= 0.32f * sinf(2 * (ang - rr * 13.0f));
+        ang += spin * (1.4f - rr);
+        x = cosf(ang) * rr * R;
+        y = sinf(ang) * rr * R * tilt + sp_gauss(i + 190200) * R * 0.012f;
+        w = sp_clamp01(1 - rr * 2.6f);
+        UiRect(cx + x * cr - y * sr, cy + x * sr + y * cr, 1.1f * SP_K, 1.1f * SP_K,
+               fx_col((int)(60 + 120 * fx_rand(i + 190300)), (int)(165 + 90 * w), (int)(185 + 40 * w), (int)(255 - 80 * w)));
+    }
+    for (k = 0; k < 4; k++)
+    {
+        // the dust: dark lanes along the rings, heavier on the near side
+        const float rr = R * (0.38f + k * 0.16f);
+        sp_arc(cx, cy, rr, rr * tilt, rot, 0.15f, 3.0f, (3.5f - k * 0.5f) * SP_K, fx_col(110 - k * 15, 10, 8, 12));
+        sp_arc(cx, cy, rr * 1.02f, rr * 1.02f * tilt, rot, 3.3f, 6.1f, (2.0f - k * 0.3f) * SP_K, fx_col(55 - k * 8, 10, 8, 12));
+    }
+    for (i = 0; i < 70; i++)
+    {
+        // knots of new stars along the rings
+        const float rr = 0.35f + fx_rand(i + 190400) * 0.65f, a = fx_rand(i + 190500) * SP_TAU + spin * (1.4f - rr), x = cosf(a) * rr * R, y = sinf(a) * rr * R * tilt;
+        sp_glow(cx + x * cr - y * sr, cy + x * sr + y * cr, (3 + fx_rand(i + 190600) * 4) * SP_K * 2, fx_col(80, 255, 120, 190));
+    }
+    for (i = 0; i < 1800; i++)
+    {
+        // the bulge's old stars
+        const float rr = fabsf(sp_gauss(i + 190700)) * 0.22f, a = fx_rand(i + 190800) * SP_TAU, x = cosf(a) * rr * R, y = sinf(a) * rr * R * 0.55f;
+        UiRect(cx + x * cr - y * sr, cy + x * sr + y * cr, 1.2f * SP_K, 1.2f * SP_K, fx_col((int)(80 + 120 * fx_rand(i + 190900)), 255, 225, 175));
+    }
+    sp_glow(cx, cy, R * 0.34f, fx_col(170, 255, 220, 165));
+    sp_glow(cx, cy, R * 0.07f, fx_col(250, 255, 250, 235));
+    sp_galaxy_draw(&m32);
+}
+
+// 7. The Whirlpool: a spiral face on, its companion at the end of an arm, a bridge of stars between them.
+static void fx_whirlpool(float t)
+{
+    SpGal g = { SP_W * 0.42f, SP_H * 0.5f, SP_H * 0.46f, 0.88f, 0.3f, 5.5f, t * 0.04f, 0, 1, 2, 6500, 201, { 255, 225, 175 }, { 150, 180, 255 }, { 255, 110, 180 } };
+    SpGal comp = { SP_W * 0.42f + SP_H * 0.5f, SP_H * 0.5f - SP_H * 0.3f, SP_H * 0.1f, 0.8f, 0, 0, 0, 0, 1, 0, 900, 202, { 255, 230, 180 }, { 255, 205, 150 }, { 255, 205, 150 } };
+    int i;
+    sp_space_bg(203, t);
+    for (i = 0; i < 30; i++)
+    {
+        const float f = i / 30.0f, x = g.cx + (comp.cx - g.cx) * f + sinf(f * 3.14159f) * SP_H * 0.08f, y = g.cy + (comp.cy - g.cy) * f - sinf(f * 3.14159f) * SP_H * 0.02f;
+        sp_glow(x, y, SP_H * 0.05f, fx_col(26, 170, 190, 255));
+    }
+    sp_galaxy_draw(&g);
+    sp_galaxy_draw(&comp);
+}
+
+// 8. The Sombrero: edge on - its bright round bulge, the thin disk, the dark lane of dust across its front.
+static void fx_sombrero(float t)
+{
+    const float cx = SP_W * 0.5f, cy = SP_H * 0.5f, rot = -0.08f;
+    SpGal bulge = { cx, cy, SP_H * 0.34f, 0.62f, rot, 0, 0, 0, 1, 0, 4500, 211, { 255, 235, 200 }, { 240, 215, 175 }, { 255, 255, 255 } };
+    SpGal disk = { cx, cy, SP_W * 0.4f, 0.12f, rot, 4.0f, t * 0.03f, 0, 0.9f, 2, 3500, 212, { 255, 230, 190 }, { 210, 200, 220 }, { 255, 200, 160 } };
+    sp_space_bg(213, t);
+    sp_galaxy_draw(&bulge);
+    sp_galaxy_draw(&disk);
+    sp_arc(cx, cy + SP_H * 0.012f, SP_W * 0.36f, SP_W * 0.36f * 0.1f, rot, 0.05f, 3.09f, SP_H * 0.035f, fx_col(200, 12, 8, 6));
+    sp_arc(cx, cy + SP_H * 0.012f, SP_W * 0.36f, SP_W * 0.36f * 0.1f, rot, 0.05f, 3.09f, SP_H * 0.06f, fx_col(70, 20, 12, 8));
+    sp_arc(cx, cy - SP_H * 0.01f, SP_W * 0.37f, SP_W * 0.37f * 0.1f, rot, 0.1f, 3.04f, SP_H * 0.008f, fx_col(90, 255, 225, 190));
+}
+
+// 9. A giant elliptical: a great soft glow of old stars, globular clusters swarming round it, faint galaxies afar.
+static void fx_elliptical(float t)
+{
+    SpGal g = { SP_W * 0.5f, SP_H * 0.5f, SP_H * 0.55f, 0.7f, 0.4f, 0, 0, 0, 1, 0, 7000, 221, { 255, 220, 170 }, { 245, 200, 150 }, { 255, 255, 255 } };
+    int i;
+    sp_space_bg(222, t);
+    for (i = 0; i < 18; i++)
+    {
+        const float x = fx_rand(i + 221000) * SP_W, y = fx_rand(i + 221100) * SP_H;
+        sp_ellipse(x, y, (4 + fx_rand(i + 221200) * 6) * SP_K, (2 + fx_rand(i + 221300) * 3) * SP_K, fx_rand(i + 221400) * 3, fx_col(60, 200, 190, 255));
+    }
+    sp_galaxy_draw(&g);
+    for (i = 0; i < 60; i++)
+    {
+        const float rr = (0.35f + fx_rand(i + 222000) * 0.9f) * SP_H * 0.6f, a = fx_rand(i + 222100) * SP_TAU + t * 0.05f / (rr / SP_H + 0.3f);
+        const float x = SP_W * 0.5f + cosf(a) * rr, y = SP_H * 0.5f + sinf(a) * rr * 0.75f;
+        sp_glow(x, y, 7 * SP_K, fx_col(120, 255, 235, 200));
+        UiCircle(x, y, 1.3f * SP_K, fx_col(230, 255, 245, 225));
+    }
+}
+
+// 10. A barred spiral: a bar of old stars through its core, two arms from its ends.
+static void fx_barred(float t)
+{
+    SpGal g = { SP_W * 0.5f, SP_H * 0.5f, SP_H * 0.64f, 0.7f, -0.3f, 3.4f, t * 0.04f, 0.3f, 1, 2, 8500, 231, { 255, 215, 160 }, { 140, 175, 255 }, { 255, 120, 200 } };
+    sp_space_bg(232, t);
+    sp_galaxy_draw(&g);
+}
+
+// 11. Galaxies colliding: two spirals passing through each other, long tails of stars thrown out, new stars where
+// they meet; drawn closer and apart again slowly.
+static void fx_collision(float t)
+{
+    const float k = 0.5f + 0.5f * sinf(t * 0.05f), d = SP_W * (0.1f + 0.06f * k);
+    SpGal a = { SP_W * 0.5f - d, SP_H * 0.5f - d * 0.25f, SP_H * 0.32f, 0.7f, 0.6f, 5.0f, t * 0.05f, 0, 1, 2, 4200, 241, { 255, 220, 170 }, { 150, 180, 255 }, { 255, 120, 190 } };
+    SpGal b = { SP_W * 0.5f + d, SP_H * 0.5f + d * 0.25f, SP_H * 0.28f, 0.5f, -1.0f, -5.0f, -t * 0.05f, 0, 1, 2, 3800, 242, { 255, 225, 180 }, { 170, 190, 255 }, { 255, 120, 190 } };
+    int i, side;
+    sp_space_bg(243, t);
+    for (side = 0; side < 2; side++)
+        for (i = 0; i < 900; i++)
+        {
+            // the tidal tails: two long curves of stars, thinning out
+            const float f = powf(fx_rand(i + 244000 + side * 1000), 0.8f), sg = side ? -1.0f : 1.0f;
+            const float x = SP_W * 0.5f + sg * (d + f * SP_W * 0.42f), y = SP_H * 0.5f + sg * (-SP_H * 0.05f - sinf(f * 2.4f) * SP_H * 0.32f) + sp_gauss(i + 245000) * SP_H * 0.03f * (1 + f);
+            UiRect(x, y, 1.2f * SP_K, 1.2f * SP_K, fx_col((int)(160 * (1 - f * 0.8f)), 170, 195, 255));
+        }
+    sp_galaxy_draw(&a);
+    sp_galaxy_draw(&b);
+    for (i = 0; i < 24; i++)
+    {
+        const float x = SP_W * 0.5f + sp_gauss(i + 246000) * d * 0.9f, y = SP_H * 0.5f + sp_gauss(i + 246100) * SP_H * 0.12f;
+        sp_glow(x, y, (6 + fx_rand(i + 246200) * 8) * SP_K * (0.8f + 0.2f * sinf(t + i)), fx_col(140, 255, 110, 190));
+    }
+}
+
+// 12. A ring galaxy: a ring of young blue stars round a small yellow core, faint spokes between.
+static void fx_ring_galaxy(float t)
+{
+    const float cx = SP_W * 0.5f, cy = SP_H * 0.5f, R = SP_H * 0.42f, tilt = 0.62f, rot = 0.25f, cr = cosf(rot), sr = sinf(rot), spin = t * 0.03f;
+    SpGal core = { cx, cy, SP_H * 0.12f, tilt, rot, 0, 0, 0, 1, 0, 1600, 251, { 255, 225, 160 }, { 255, 205, 140 }, { 255, 255, 255 } };
+    int i;
+    sp_space_bg(252, t);
+    for (i = 0; i < 3400; i++)
+    {
+        const float rr = 1 + sp_gauss(i + 251000) * 0.07f, a = fx_rand(i + 251100) * SP_TAU + spin, x = cosf(a) * rr * R, y = sinf(a) * rr * R * tilt;
+        UiRect(cx + x * cr - y * sr, cy + x * sr + y * cr, 1.3f * SP_K, 1.3f * SP_K, fx_col((int)(80 + 150 * fx_rand(i + 251200)), 150, 190, 255));
+    }
+    for (i = 0; i < 900; i++)
+    {
+        const float rr = 0.15f + fx_rand(i + 252000) * 0.8f, a = (i % 10) * SP_TAU / 10 + sp_gauss(i + 252100) * 0.06f + spin, x = cosf(a) * rr * R, y = sinf(a) * rr * R * tilt;
+        UiRect(cx + x * cr - y * sr, cy + x * sr + y * cr, 1.0f * SP_K, 1.0f * SP_K, fx_col(70, 200, 205, 240));
+    }
+    for (i = 0; i < 50; i++)
+    {
+        const float a = fx_rand(i + 253000) * SP_TAU + spin, x = cosf(a) * R, y = sinf(a) * R * tilt;
+        sp_glow(cx + x * cr - y * sr, cy + x * sr + y * cr, (5 + fx_rand(i + 253100) * 7) * SP_K, fx_col(120, 255, 120, 200));
+    }
+    sp_galaxy_draw(&core);
+}
+
+// 13. A cluster of galaxies: dozens of them of every kind, a giant elliptical in the middle; drifting closer.
+static void fx_gal_cluster(float t)
+{
+    const float z = 1 + 0.06f * sinf(t * 0.04f);
+    int i;
+    sp_space_bg(261, t);
+    for (i = 0; i < 26; i++)
+    {
+        const float x = SP_W * 0.5f + (fx_rand(i + 261000) - 0.5f) * SP_W * 1.05f * z, y = SP_H * 0.5f + (fx_rand(i + 261100) - 0.5f) * SP_H * 1.05f * z;
+        const int spiral = fx_rand(i + 261200) < 0.55f, warm = fx_rand(i + 261300) < 0.5f;
+        SpGal g = { x, y, (0.03f + fx_rand(i + 261400) * 0.06f) * SP_W * z, 0.25f + fx_rand(i + 261500) * 0.75f, fx_rand(i + 261600) * 3.14f, 5.0f,
+                    t * 0.04f * (fx_rand(i + 261700) - 0.5f), 0, 0.85f, spiral ? 2 : 0, spiral ? 240 : 160, 262 + i,
+                    { 255, 225, 175 }, { warm ? 250 : 160, warm ? 210 : 185, warm ? 160 : 255 }, { 255, 130, 190 } };
+        sp_galaxy_draw(&g);
+    }
+    {
+        SpGal giant = { SP_W * 0.5f, SP_H * 0.5f, SP_H * 0.2f * z, 0.75f, 0.3f, 0, 0, 0, 1, 0, 2200, 299, { 255, 225, 175 }, { 250, 210, 160 }, { 255, 255, 255 } };
+        sp_galaxy_draw(&giant);
+    }
+}
+
+// 14. A quasar: a galaxy's blinding core, its disk aglow, two jets shot out from its poles with knots running along them.
+static void fx_quasar(float t)
+{
+    const float cx = SP_W * 0.5f, cy = SP_H * 0.5f, ja = -1.05f, jx = cosf(ja), jy = sinf(ja);
+    SpGal host = { cx, cy, SP_H * 0.42f, 0.6f, 0.5f, 0, 0, 0, 0.7f, 0, 3500, 271, { 255, 220, 170 }, { 230, 190, 160 }, { 255, 255, 255 } };
+    int i, side;
+    sp_space_bg(272, t);
+    sp_galaxy_draw(&host);
+    for (side = -1; side <= 1; side += 2)
+        for (i = 0; i < 60; i++)
+        {
+            const float f = i / 60.0f, d = f * SP_H * 0.75f, w = (4 + 18 * f) * SP_K, a = (1 - f) * (0.6f + 0.4f * sinf(t * 4 - f * 18));
+            sp_glow(cx + side * jx * d, cy + side * jy * d, w, fx_col((int)(46 * a), 140, 170, 255));
+            if (i % 12 == (int)(t * 6) % 12) sp_glow(cx + side * jx * d, cy + side * jy * d, w * 1.8f, fx_col((int)(80 * (1 - f)), 190, 210, 255));
+        }
+    sp_ellipse(cx, cy, SP_H * 0.07f, SP_H * 0.07f * 0.25f, 0.5f, fx_col(120, 255, 170, 90));
+    sp_glow(cx, cy, SP_H * 0.2f * (0.9f + 0.1f * sinf(t * 7)), fx_col(170, 255, 200, 140));
+    sp_glow(cx, cy, SP_H * 0.04f, fx_col(255, 255, 255, 255));
+    UiLine(cx - SP_H * 0.16f, cy, cx + SP_H * 0.16f, cy, 1.5f, fx_col(150, 255, 255, 255));
+    UiLine(cx, cy - SP_H * 0.16f, cx, cy + SP_H * 0.16f, 1.5f, fx_col(150, 255, 255, 255));
+}
+
+// 15. The Magellanic Clouds: the two small irregular galaxies over a southern horizon, the Milky Way faint beside.
+static IDirect3DTexture9 *s_spMwSouth;
+static void sp_cloud_galaxy(float cx, float cy, float R, int seed, int n, float t)
+{
+    int i;
+    sp_glow(cx, cy, R * 1.3f, fx_col(40, 170, 190, 255));
+    for (i = 0; i < n; i++)
+    {
+        // clumps (a few lumps of stars round their own centres), a bar through the bigger one
+        const int lump = (int)(fx_rand(seed * 7919 + i) * 6);
+        const float lx = (fx_rand(seed * 31 + lump) - 0.5f) * R * 1.2f, ly = (fx_rand(seed * 37 + lump) - 0.5f) * R * 0.8f;
+        const float x = cx + lx + sp_gauss(seed * 100003 + i) * R * 0.35f, y = cy + ly + sp_gauss(seed * 100003 + i + 50000) * R * 0.25f;
+        UiRect(x, y, 1.1f * SP_K, 1.1f * SP_K, fx_col((int)(70 + 120 * fx_rand(seed * 100003 + i + 90000)), 200, 210, 255));
+    }
+    for (i = 0; i < 8; i++)
+        sp_glow(cx + (fx_rand(seed + i * 3) - 0.5f) * R, cy + (fx_rand(seed + i * 3 + 1) - 0.5f) * R * 0.6f, (5 + fx_rand(seed + i * 3 + 2) * 6) * SP_K * (0.85f + 0.15f * sinf(t + i)), fx_col(110, 255, 120, 180));
+}
+static void fx_magellanic(float t)
+{
+    static const SpBand band = { sp_mid_steep, 0.09f, 0.3f, 0.8f, 281 };
+    IDirect3DTexture9 *tex = sp_band_tex(&s_spMwSouth, &band);
+    sp_vgrad(0, SP_H, fx_col(255, 3, 5, 18), fx_col(255, 12, 18, 40));
+    if (tex) UiImagePart(tex, -SP_W * 0.35f, 0, SP_W, SP_H, 0, 0, 1, 1, fx_col(140, 220, 215, 255));
+    sp_stars(282, 300, t, t * 0.6f, 0, 0.9f, SP_H * 0.88f);
+    sp_cloud_galaxy(SP_W * 0.6f, SP_H * 0.36f, SP_H * 0.16f, 283, 2600, t);
+    sp_cloud_galaxy(SP_W * 0.8f, SP_H * 0.22f, SP_H * 0.07f, 284, 900, t);
+    sp_hills(285, 9, 0.93f, 0.07f, 0, fx_col(255, 6, 7, 14), fx_col(255, 2, 2, 6));
+}
+
+// 16. The Pillars of Creation: the three columns of dust in the Eagle Nebula, their shape and light from coarse maps
+// of them (xb_m16_data.h: the dust's density and light, the gas behind) - on them the detail made here: ragged
+// edges, lumps and streaks, the lit surfaces burning gold, the blue halo round them where the young stars' light
+// eats them; the glowing gas and its filaments behind, a field of stars, bright stars with their spikes. Their
+// pictures made once (sp_m16_make), in greys tinted as drawn (their colours ones that can be chosen).
+#include "xb_m16_data.h"
+static IDirect3DTexture9 *s_spM16Body, *s_spM16Lit, *s_spM16Halo, *s_spM16Gas, *s_spM16Fil;
+static int s_spM16Tried;
+// A map's value (0..1) at (u, v), read between its cells (16 levels, two to a byte).
+static float sp_m16_cell(const unsigned char *m, int w, int h, int x, int y)
+{
+    int k;
+    if (x < 0) x = 0; if (x >= w) x = w - 1; if (y < 0) y = 0; if (y >= h) y = h - 1;
+    k = y * w + x;
+    return ((k & 1) ? (m[k >> 1] & 15) : (m[k >> 1] >> 4)) / 15.0f;
+}
+static float sp_m16_map(const unsigned char *m, int w, int h, float u, float v)
+{
+    const float x = u * w - 0.5f, y = v * h - 0.5f, fx = x - floorf(x), fy = y - floorf(y);
+    const int x0 = (int)floorf(x), y0 = (int)floorf(y);
+    const float a = sp_m16_cell(m, w, h, x0, y0), b = sp_m16_cell(m, w, h, x0 + 1, y0), c = sp_m16_cell(m, w, h, x0, y0 + 1), d = sp_m16_cell(m, w, h, x0 + 1, y0 + 1);
+    return (a + (b - a) * fx) * (1 - fy) + (c + (d - c) * fx) * fy;
+}
+static void sp_m16_make(void)
+{
+    const int W = 512, H = 288, GW = 384, GH = 216;
+    unsigned char *body, *lit, *halo, *gas, *fil;
+    int i, j, a, b;
+    if (s_spM16Tried || !UiDevice()) return;
+    s_spM16Tried = 1;
+    body = (unsigned char *)malloc(W * H * 4); lit = (unsigned char *)malloc(W * H * 4); halo = (unsigned char *)malloc(W * H * 4);
+    gas = (unsigned char *)malloc(GW * GH * 4); fil = (unsigned char *)malloc(GW * GH * 4);
+    if (body && lit && halo && gas && fil)
+    {
+        for (j = 0; j < H; j++)
+            for (i = 0; i < W; i++)
+            {
+                const float u = (i + 0.5f) / W, v = (j + 0.5f) / H;
+                const float den = sp_m16_map(s_m16Dust, M16_DW, M16_DH, u, v), lig = sp_m16_map(s_m16Light, M16_DW, M16_DH, u, v);
+                const float n1 = sp_fbm(181, u * 40, v * 22, 4), n2 = sp_fbm(182, u * 120, v * 40, 3), detail = 0.6f + 0.8f * sp_fbm(183, u * 70, v * 50, 4);
+                const float dens = sp_ease(0.18f, 0.55f, den + (n1 - 0.5f) * 0.35f + (n2 - 0.5f) * 0.12f);   // ragged, sharper edges
+                float blur = 0;
+                unsigned char *o;
+                for (b = -2; b <= 2; b++)
+                    for (a = -2; a <= 2; a++) blur += sp_m16_map(s_m16Dust, M16_DW, M16_DH, u + a * 1.6f / M16_DW, v + b * 1.6f / M16_DH);
+                blur /= 25;
+                o = body + (j * W + i) * 4;
+                o[0] = o[1] = o[2] = (unsigned char)(255 * sp_clamp01(0.18f + 0.7f * lig * detail)); o[3] = (unsigned char)(255 * dens * 0.95f);
+                o = lit + (j * W + i) * 4;
+                o[0] = o[1] = o[2] = 255; o[3] = (unsigned char)(255 * sp_clamp01((lig * detail - 0.3f) * 2.0f) * dens);
+                o = halo + (j * W + i) * 4;
+                o[0] = o[1] = o[2] = 255; o[3] = (unsigned char)(255 * sp_clamp01(blur * 1.4f - den) * sp_clamp01(1.3f - v * 1.2f) * 0.8f);
+            }
+        for (j = 0; j < GH; j++)
+            for (i = 0; i < GW; i++)
+            {
+                const float u = (i + 0.5f) / GW, v = (j + 0.5f) / GH, g = sp_m16_map(s_m16Gas, M16_GW, M16_GH, u, v);
+                const float f = 1 - fabsf(2 * sp_fbm(168, u * 6, v * 3.5f, 4) - 1);
+                unsigned char *o = gas + (j * GW + i) * 4;
+                o[0] = o[1] = o[2] = 255; o[3] = (unsigned char)(255 * sp_clamp01(g * (0.9f + 0.2f * sp_fbm(184, u * 30, v * 17, 3))));
+                o = fil + (j * GW + i) * 4;
+                o[0] = o[1] = o[2] = 255; o[3] = (unsigned char)(255 * sp_clamp01(g * f * f * f * 1.2f));   // its filaments
+            }
+        s_spM16Body = UiImageCreate(UiDevice(), body, W, H);
+        s_spM16Lit = UiImageCreate(UiDevice(), lit, W, H);
+        s_spM16Halo = UiImageCreate(UiDevice(), halo, W, H);
+        s_spM16Gas = UiImageCreate(UiDevice(), gas, GW, GH);
+        s_spM16Fil = UiImageCreate(UiDevice(), fil, GW, GH);
+    }
+    free(body); free(lit); free(halo); free(gas); free(fil);
+}
+// A bright star: its glow, four long spikes fading out, two short ones, its core.
+static void sp_spiked_star(float x, float y, float s, int r, int g, int b, float a)
+{
+    sp_glow(x, y, s * 9, fx_col((int)(90 * a), r, g, b));
+    sp_fade_line(x, y, x - s * 22, y, 1.4f, r, g, b, (int)(170 * a), 5);
+    sp_fade_line(x, y, x + s * 22, y, 1.4f, r, g, b, (int)(170 * a), 5);
+    sp_fade_line(x, y, x, y - s * 22, 1.4f, r, g, b, (int)(170 * a), 5);
+    sp_fade_line(x, y, x, y + s * 22, 1.4f, r, g, b, (int)(170 * a), 5);
+    UiLine(x - s * 6, y - s * 6, x + s * 6, y + s * 6, 1.0f, fx_col((int)(60 * a), r, g, b));
+    UiLine(x - s * 6, y + s * 6, x + s * 6, y - s * 6, 1.0f, fx_col((int)(60 * a), r, g, b));
+    UiCircle(x, y, s * 1.4f, fx_col((int)(255 * a), 255, 255, 255));
+}
+static void fx_pillars(float t)
+{
+    const float z = 1.0f + 0.03f * (0.5f + 0.5f * sinf(t * 0.04f)), w = SP_W * z, h = SP_H * z, x = (SP_W - w) * 0.5f, y = (SP_H - h) * 0.5f;
+    const float gx = sinf(t * 0.05f) * 8, gy = cosf(t * 0.04f) * 5;   // the gas drifting a little behind them
+    int i;
+    sp_m16_make();
+    sp_vgrad(0, SP_H, fx_col(255, 3, 6, 10), fx_col(255, 6, 10, 14));
+    if (s_spM16Gas) UiImage(s_spM16Gas, x + gx - 10, y + gy - 6, w + 20, h + 12, 0, fx_col(255, 80, 150, 170));
+    if (s_spM16Fil) UiImage(s_spM16Fil, x - gx - 10, y - gy - 6, w + 20, h + 12, 0, fx_col((int)(150 + 40 * sinf(t * 0.3f)), 140, 200, 220));
+    sp_stars(169, 520, t, 0, 0, 0.85f, SP_H);
+    if (s_spM16Halo) UiImage(s_spM16Halo, x, y, w, h, 0, fx_col((int)(205 + 40 * sinf(t * 0.6f)), 150, 205, 255));
+    if (s_spM16Body) UiImage(s_spM16Body, x, y, w, h, 0, fx_col(255, 115, 48, 26));
+    if (s_spM16Lit) UiImage(s_spM16Lit, x, y, w, h, 0, fx_col((int)(170 + 40 * sinf(t * 0.8f + 1)), 240, 140, 70));
+    for (i = 0; i < 50; i++)
+    {
+        // young stars glimpsed through the dust, here and there
+        const float u = fx_rand(i + 169100), v = fx_rand(i + 169200), d = sp_m16_map(s_m16Dust, M16_DW, M16_DH, u, v);
+        if (d < 0.5f) continue;
+        UiCircle(x + u * w, y + v * h, 1.1f * SP_K, fx_col((int)(150 * (0.6f + 0.4f * sinf(t * 2 + i))), 255, 220, 180));
+    }
+    {
+        // the bright stars where they shine in the nebula: an orange group up left, a blue-white one between the
+        // pillars, others round them; soft discs of light out of focus
+        static const float st[12][4] = { { 0.03f, 0.21f, 1.2f, 0 }, { 0.155f, 0.25f, 1.0f, 0 }, { 0.162f, 0.3f, 1.1f, 0 }, { 0.18f, 0.43f, 0.7f, 0 },
+                                         { 0.515f, 0.32f, 1.8f, 1 }, { 0.725f, 0.34f, 0.7f, 1 }, { 0.79f, 0.07f, 0.8f, 1 }, { 0.91f, 0.13f, 1.0f, 1 },
+                                         { 0.98f, 0.88f, 1.0f, 0 }, { 0.49f, 0.86f, 0.7f, 0 }, { 0.12f, 0.75f, 0.6f, 1 }, { 0.62f, 0.07f, 0.6f, 0 } };
+        for (i = 0; i < 12; i++)
+        {
+            const float a = 0.8f + 0.2f * sinf(t * (1.3f + i * 0.2f) + i);
+            sp_spiked_star(st[i][0] * SP_W, st[i][1] * SP_H, st[i][2] * SP_K * 1.6f, st[i][3] ? 215 : 255, st[i][3] ? 228 : 195, st[i][3] ? 255 : 140, a);
+        }
+        for (i = 0; i < 16; i++)
+        {
+            const float bx = fx_rand(i + 169300) * SP_W, by = fx_rand(i + 169400) * SP_H, r = (5 + fx_rand(i + 169500) * 12) * SP_K;
+            sp_ellipse(bx + sinf(t * 0.1f + i) * 6, by, r, r, 0, fx_col(14, 255, 200, 150));
+        }
+    }
+}
+
+// 17-24. Nebulae from NASA's pictures (xb_nebula_data.h: Orion, the Crab, the Horsehead, the Helix, the Ring, Carina's
+// Cosmic Cliffs, the Butterfly, the Lagoon), alive: their gas flowing (the picture on a mesh bent by slow waves, a
+// second pass bent otherwise fading in and out over it), its brightest place glowing and breathing, its own stars
+// (taken out of the picture, xb_nebula_data.h's list) twinkling over it a little nearer (they move more as the view
+// drifts), the brightest with their spikes; the view moving slowly closer and across, and back. The picture decoded
+// once; made again in the chosen colours when they change (fx_remap on each pixel), as Color 1, 2 and 3 do elsewhere.
+#include "xb_nebula_data.h"
+static IDirect3DTexture9 *s_nebTex;
+static unsigned char *s_nebRgba;
+static int s_nebNow = -1, s_nebW, s_nebH;
+static u32 s_nebSig = 0xFFFFFFFFu;
+// The picture's part (cu, cv) +- (hu, hv) over the screen, on a mesh whose picture places are moved by slow waves
+// (amp: how far, phase: which waves) - the gas flowing.
+static void sp_neb_flow(float t, float phase, float amp, float cu, float cv, float hu, float hv, D3DCOLOR c)
+{
+    enum { GX = 32, GY = 18 };
+    float uv[GX + 1][GY + 1][2];
+    int i, j;
+    for (j = 0; j <= GY; j++)
+        for (i = 0; i <= GX; i++)
+        {
+            const float u = (float)i / GX, v = (float)j / GY;
+            const float du = amp * (sinf(v * 7 + t * 0.35f + phase) + 0.6f * sinf(u * 11 - t * 0.27f + v * 4 + phase * 2));
+            const float dv = amp * (cosf(u * 6 - t * 0.3f + phase) + 0.6f * sinf(v * 9 + t * 0.22f + u * 3 + phase));
+            uv[i][j][0] = cu - hu + u * 2 * hu + du;
+            uv[i][j][1] = cv - hv + v * 2 * hv + dv;
+        }
+    UiQuadsBegin(s_nebTex);
+    for (j = 0; j < GY; j++)
+        for (i = 0; i < GX; i++)
+        {
+            const float x0 = SP_W * i / GX, x1 = SP_W * (i + 1) / GX, y0 = SP_H * j / GY, y1 = SP_H * (j + 1) / GY;
+            float xy[6], t2[6];
+            xy[0] = x0; xy[1] = y0; xy[2] = x1; xy[3] = y0; xy[4] = x0; xy[5] = y1;
+            t2[0] = uv[i][j][0]; t2[1] = uv[i][j][1]; t2[2] = uv[i + 1][j][0]; t2[3] = uv[i + 1][j][1]; t2[4] = uv[i][j + 1][0]; t2[5] = uv[i][j + 1][1];
+            UiTrisAdd(xy, t2, c);
+            xy[0] = x1; xy[1] = y0; xy[2] = x1; xy[3] = y1; xy[4] = x0; xy[5] = y1;
+            t2[0] = uv[i + 1][j][0]; t2[1] = uv[i + 1][j][1]; t2[2] = uv[i + 1][j + 1][0]; t2[3] = uv[i + 1][j + 1][1]; t2[4] = uv[i][j + 1][0]; t2[5] = uv[i][j + 1][1];
+            UiTrisAdd(xy, t2, c);
+        }
+    UiQuadsEnd();
+}
+static void fx_nebula_photo(int k, float t)
+{
+    const u32 sig = s_fxRemap ? s_fxRemapSig : 0;
+    if (k != s_nebNow)
+    {
+        if (s_nebTex) { UiImageRelease(UiDevice(), s_nebTex); s_nebTex = NULL; }
+        free(s_nebRgba);
+        s_nebRgba = UiDecodeImage(s_nebJpg[k], s_nebJpgSize[k], 1024, 576, &s_nebW, &s_nebH);
+        s_nebNow = k;
+        s_nebSig = 0xFFFFFFFFu;
+    }
+    if (s_nebRgba && (sig != s_nebSig || !s_nebTex) && UiDevice())
+    {
+        unsigned char *px = s_nebRgba, *tmp = NULL;
+        if (s_fxRemap && (tmp = (unsigned char *)malloc((size_t)s_nebW * s_nebH * 4)) != NULL)
+        {
+            int i, r, g, b;
+            for (i = 0; i < s_nebW * s_nebH; i++)
+            {
+                r = s_nebRgba[i * 4]; g = s_nebRgba[i * 4 + 1]; b = s_nebRgba[i * 4 + 2];
+                fx_remap(&r, &g, &b);
+                tmp[i * 4] = (unsigned char)r; tmp[i * 4 + 1] = (unsigned char)g; tmp[i * 4 + 2] = (unsigned char)b; tmp[i * 4 + 3] = 255;
+            }
+            px = tmp;
+        }
+        if (s_nebTex) UiImageRelease(UiDevice(), s_nebTex);
+        s_nebTex = UiImageCreate(UiDevice(), px, s_nebW, s_nebH);
+        free(tmp);
+        s_nebSig = sig;
+    }
+    UiRect(0, 0, SP_W, SP_H, fx_col(255, 0, 0, 0));
+    {
+        // the view: closer and back over a minute and a half, drifting across meanwhile
+        const float z = 1.06f + 0.06f * (0.5f - 0.5f * cosf(t * 0.07f)), hu = 0.5f / z, hv = 0.5f / z;
+        const float cu = 0.5f + (0.5f - hu) * 0.75f * sinf(t * 0.043f), cv = 0.5f + (0.5f - hv) * 0.75f * sinf(t * 0.031f + 1.3f);
+        const float zs = z * 1.04f, hs = 0.5f / zs, su = 0.5f + (cu - 0.5f) * 1.25f, sv = 0.5f + (cv - 0.5f) * 1.25f;   // the stars: nearer
+        const NebStar *st = s_nebStars[k];
+        const float *core = s_nebCore[k];
+        int i;
+        if (s_nebTex)
+        {
+            sp_neb_flow(t, 0.0f, 0.0035f, cu, cv, hu, hv, fx_col(255, 255, 255, 255));
+            sp_neb_flow(t * 1.3f, 2.1f, 0.006f, cu, cv, hu, hv, fx_col((int)(70 + 50 * sinf(t * 0.21f)), 255, 255, 255));   // the flow over it
+        }
+        {
+            // its brightest place, breathing
+            const float gx = (core[0] - (cu - hu)) / (2 * hu) * SP_W, gy = (core[1] - (cv - hv)) / (2 * hv) * SP_H, b = 0.5f + 0.5f * sinf(t * 0.6f);
+            sp_glow(gx, gy, SP_H * (0.3f + 0.05f * b), fx_col((int)(30 + 35 * b), (int)core[2], (int)core[3], (int)core[4]));
+            sp_glow(gx, gy, SP_H * 0.08f, fx_col((int)(25 + 30 * b), 255, 250, 240));
+        }
+        for (i = 0; i < s_nebStarCount[k]; i++)
+        {
+            // its own stars, twinkling; the brightest with spikes
+            const float x = (st[i].x - (su - hs)) / (2 * hs) * SP_W, y = (st[i].y - (sv - hs)) / (2 * hs) * SP_H;
+            const float tw = 0.7f + 0.3f * sinf(t * (1.1f + fx_rand(i + 310000) * 2.5f) + i * 1.7f), sz = (st[i].size < 14 ? st[i].size : 14) * SP_K * 0.85f;
+            if (x < -30 || x > SP_W + 30 || y < -30 || y > SP_H + 30) continue;
+            if (i < 6) sp_spiked_star(x, y, sz * 0.22f < 2.4f * SP_K ? sz * 0.22f : 2.4f * SP_K, st[i].r, st[i].g, st[i].b, tw);
+            else
+            {
+                sp_glow(x, y, sz * 3.2f, fx_col((int)(70 * tw), st[i].r, st[i].g, st[i].b));
+                UiCircle(x, y, sz * 0.6f < 0.8f ? 0.8f : sz * 0.6f, fx_col((int)(240 * tw), (st[i].r + 255) / 2, (st[i].g + 255) / 2, (st[i].b + 255) / 2));
+            }
+        }
+    }
+    sp_stars(300 + k, 90, t, 0, 0, 0.45f, SP_H);
+}
+
 // Each effect's own three colours (the gradient fx_pal walks), by BGFX_*.
 static const unsigned char s_fxDefault[BGFX_COUNT][3][3] = {
     { { 110, 190, 255 }, { 110, 190, 255 }, { 110, 190, 255 } },   // off (unused)
@@ -20729,6 +24035,75 @@ static const unsigned char s_fxDefault[BGFX_COUNT][3][3] = {
     { { 40, 140, 200 }, { 120, 220, 255 }, { 220, 250, 255 } }, // burst
     { { 255, 60, 170 }, { 110, 80, 255 }, { 60, 220, 255 } },  // hyperspace
     { { 110, 160, 255 }, { 190, 220, 255 }, { 255, 255, 255 } }, // PSP (its default blue to white)
+    { { 255, 210, 140 }, { 200, 180, 255 }, { 255, 110, 190 } },   // spiral galaxy
+    { { 230, 60, 160 }, { 40, 200, 230 }, { 255, 140, 60 } },   // emission nebula
+    { { 255, 205, 140 }, { 225, 210, 180 }, { 150, 155, 170 } },   // ringed planet (its body, its rings, its moon)
+    { { 255, 255, 240 }, { 255, 190, 120 }, { 170, 200, 255 } },   // meteor shower
+    { { 255, 230, 200 }, { 255, 160, 80 }, { 255, 100, 40 } },   // black hole
+    { { 160, 140, 120 }, { 255, 200, 140 }, { 90, 80, 80 } },   // asteroid field
+    { { 235, 240, 255 }, { 170, 190, 255 }, { 255, 255, 255 } },   // solar eclipse
+    { { 255, 200, 90 }, { 70, 140, 240 }, { 220, 180, 140 } },   // solar system
+    { { 200, 220, 255 }, { 120, 150, 255 }, { 150, 190, 255 } },   // pulsar
+    { { 140, 200, 255 }, { 255, 200, 120 }, { 255, 255, 255 } },   // comet
+    { { 250, 210, 160 }, { 170, 160, 200 }, { 255, 255, 255 } },   // milky way
+    { { 255, 120, 80 }, { 90, 200, 255 }, { 255, 220, 120 } },   // supernova
+    { { 35, 95, 180 }, { 80, 140, 70 }, { 255, 200, 140 } },   // earth from orbit (the sea, the land, the sun)
+    { { 190, 220, 255 }, { 120, 180, 255 }, { 255, 255, 255 } },   // constellations
+    { { 255, 220, 170 }, { 180, 200, 255 }, { 255, 190, 230 } },   // deep field
+    { { 255, 40, 160 }, { 40, 230, 255 }, { 255, 200, 40 } },   // cyberpunk city
+    { { 230, 235, 255 }, { 90, 130, 200 }, { 20, 36, 74 } },   // moonlit ocean
+    { { 210, 255, 120 }, { 150, 190, 200 }, { 30, 60, 50 } },   // firefly forest
+    { { 255, 179, 92 }, { 194, 72, 106 }, { 217, 138, 90 } },   // dunes at sunset
+    { { 90, 220, 255 }, { 240, 90, 220 }, { 150, 120, 255 } },   // jellyfish
+    { { 40, 255, 90 }, { 220, 255, 230 }, { 0, 90, 40 } },   // digital rain
+    { { 80, 255, 180 }, { 255, 200, 80 }, { 176, 122, 58 } },   // printed circuit
+    { { 255, 60, 200 }, { 255, 228, 107 }, { 71, 17, 94 } },   // synthwave
+    { { 190, 200, 255 }, { 78, 82, 104 }, { 160, 170, 200 } },   // thunderstorm
+    { { 255, 90, 200 }, { 90, 220, 255 }, { 255, 220, 90 } },   // kaleidoscope
+    { { 255, 184, 112 }, { 198, 106, 156 }, { 29, 74, 42 } },   // pixel landscape
+    { { 90, 170, 255 }, { 230, 90, 255 }, { 255, 140, 90 } },   // particle currents
+    { { 255, 180, 210 }, { 255, 238, 240 }, { 91, 54, 87 } },   // cherry blossoms
+    { { 210, 190, 140 }, { 120, 170, 255 }, { 255, 220, 150 } },   // clockwork gears
+    { { 230, 50, 50 }, { 250, 200, 40 }, { 50, 110, 240 } },   // n64 cubes
+    { { 255, 90, 30 }, { 255, 200, 90 }, { 92, 26, 10 } },   // erupting volcano
+    { { 61, 143, 216 }, { 70, 150, 70 }, { 255, 255, 255 } },   // floating islands
+    { { 255, 90, 90 }, { 90, 200, 255 }, { 255, 220, 90 } },   // fireworks
+    { { 15, 127, 168 }, { 255, 120, 150 }, { 255, 200, 80 } },   // coral reef
+    { { 223, 231, 245 }, { 255, 190, 90 }, { 36, 54, 94 } },   // cabin in the snow
+    { { 70, 140, 255 }, { 200, 90, 255 }, { 255, 90, 200 } },   // equalizer
+    { { 230, 110, 40 }, { 200, 50, 30 }, { 240, 180, 60 } },   // autumn leaves
+    { { 255, 180, 80 }, { 120, 200, 255 }, { 200, 120, 255 } },   // rain on the glass
+    { { 90, 150, 255 }, { 200, 90, 255 }, { 255, 110, 170 } },   // bokeh lights
+    { { 255, 180, 90 }, { 150, 200, 255 }, { 255, 60, 50 } },   // city from the air
+    { { 150, 220, 255 }, { 220, 170, 255 }, { 60, 200, 120 } },   // dna helix
+    { { 86, 165, 82 }, { 40, 115, 195 }, { 240, 245, 252 } },   // low-poly world
+    { { 255, 214, 140 }, { 26, 36, 64 }, { 255, 252, 235 } },   // night train
+    { { 230, 80, 80 }, { 80, 180, 230 }, { 247, 196, 154 } },   // hot-air balloons
+    { { 140, 80, 255 }, { 200, 150, 255 }, { 90, 200, 255 } },   // magic portal
+    { { 255, 205, 160 }, { 255, 130, 70 }, { 160, 140, 255 } },   // milky way over the desert (its light, the dusk, the sky)
+    { { 210, 220, 255 }, { 120, 150, 255 }, { 200, 215, 255 } },   // milky way over a lake
+    { { 215, 200, 255 }, { 120, 140, 255 }, { 255, 200, 160 } },   // milky way arch
+    { { 255, 210, 160 }, { 255, 170, 90 }, { 255, 235, 200 } },   // heart of the galaxy
+    { { 230, 235, 255 }, { 255, 190, 110 }, { 170, 200, 255 } },   // star trails
+    { { 255, 225, 175 }, { 165, 185, 255 }, { 255, 120, 190 } },   // andromeda (core, arms, new stars)
+    { { 255, 225, 175 }, { 150, 180, 255 }, { 255, 110, 180 } },   // whirlpool
+    { { 255, 235, 200 }, { 210, 200, 220 }, { 255, 200, 160 } },   // sombrero
+    { { 255, 220, 170 }, { 245, 200, 150 }, { 200, 190, 255 } },   // giant elliptical
+    { { 255, 215, 160 }, { 140, 175, 255 }, { 255, 120, 200 } },   // barred spiral
+    { { 255, 220, 170 }, { 150, 180, 255 }, { 255, 120, 190 } },   // colliding galaxies
+    { { 255, 225, 160 }, { 150, 190, 255 }, { 255, 120, 200 } },   // ring galaxy
+    { { 255, 225, 175 }, { 160, 185, 255 }, { 255, 130, 190 } },   // galaxy cluster
+    { { 255, 200, 140 }, { 140, 170, 255 }, { 230, 190, 160 } },   // quasar
+    { { 200, 210, 255 }, { 255, 120, 180 }, { 170, 190, 255 } },   // magellanic clouds
+    { { 115, 48, 26 }, { 80, 150, 170 }, { 240, 140, 70 } },   // pillars of creation (the dust, the gas, the lit edges)
+    { { 118, 85, 70 }, { 131, 83, 116 }, { 91, 77, 113 } },   // orion nebula (each picture's own most common hues)
+    { { 127, 108, 68 }, { 119, 167, 188 }, { 102, 128, 89 } },   // crab nebula
+    { { 74, 44, 52 }, { 243, 213, 162 }, { 200, 200, 200 } },   // horsehead nebula
+    { { 127, 70, 56 }, { 107, 123, 155 }, { 110, 73, 95 } },   // helix nebula
+    { { 188, 142, 51 }, { 38, 89, 112 }, { 143, 187, 122 } },   // ring nebula
+    { { 137, 83, 62 }, { 42, 72, 127 }, { 88, 65, 99 } },   // cosmic cliffs (carina)
+    { { 120, 72, 47 }, { 170, 120, 150 }, { 63, 69, 45 } },   // butterfly nebula
+    { { 103, 65, 46 }, { 52, 93, 105 }, { 71, 66, 98 } },   // lagoon nebula
 };
 
 // The effect chosen (s_bgEffect: BGFX_*), right after UiBackdrop.
@@ -20750,6 +24125,29 @@ static void browser_effect(void)
             s_fxRgb[n][2] = s_fxPalette[s_fxColor[i]][2];
             n++;
         }
+    s_fxRemap = 0;
+    if (n && s_bgEffect >= BGFX_GALAXY && s_bgEffect != BGFX_FLOW_FIELD && s_bgEffect != BGFX_BOKEH_LIGHTS && s_bgEffect != BGFX_PORTAL)
+    {
+        // drawn in colours of its own: those go to the chosen ones (fx_remap); its own n-th to the chosen n-th (round again
+        // when fewer were chosen)
+        u32 sig = (u32)s_bgEffect;
+        int k;
+        s_fxFromN = 0;
+        for (k = 0; k < 3; k++)
+        {
+            const unsigned char *d = s_fxDefault[s_bgEffect][k];
+            float h, sat, l;
+            fx_to_hsl(d[0], d[1], d[2], &h, &sat, &l);
+            if (sat < 0.12f) continue;
+            s_fxFrom[s_fxFromN][0] = d[0]; s_fxFrom[s_fxFromN][1] = d[1]; s_fxFrom[s_fxFromN][2] = d[2];
+            s_fxFromH[s_fxFromN] = h; s_fxFromS[s_fxFromN] = sat;
+            fx_to_hsl(s_fxRgb[k % n][0], s_fxRgb[k % n][1], s_fxRgb[k % n][2], &s_fxToH[s_fxFromN], &s_fxToS[s_fxFromN], &l);
+            sig = sig * 31 + (u32)(s_fxRgb[k % n][0] << 16 | s_fxRgb[k % n][1] << 8 | s_fxRgb[k % n][2]);
+            s_fxFromN++;
+        }
+        if (sig != s_fxRemapSig) { memset(s_fxRemapKey, 0, sizeof(s_fxRemapKey)); s_fxRemapSig = sig; }
+        s_fxRemap = s_fxFromN > 0;
+    }
     if (!n)
         for (n = 0; n < 3; n++)
             for (i = 0; i < 3; i++) s_fxRgb[n][i] = s_fxDefault[s_bgEffect][n][i];
@@ -20786,7 +24184,77 @@ static void browser_effect(void)
     case BGFX_BURST: fx_burst(t); break;
     case BGFX_WARP: fx_warp(t); break;
     case BGFX_PSP: fx_psp(t); break;
+    case BGFX_GALAXY: fx_galaxy(t); break;
+    case BGFX_COSMIC_NEBULA: fx_cosmic_nebula(t); break;
+    case BGFX_PLANET: fx_ringed_planet(t); break;
+    case BGFX_METEORS: fx_meteors(t); break;
+    case BGFX_BLACK_HOLE: fx_black_hole(t); break;
+    case BGFX_ASTEROIDS: fx_asteroids(t); break;
+    case BGFX_ECLIPSE: fx_eclipse(t); break;
+    case BGFX_SOLAR: fx_solar_system(t); break;
+    case BGFX_PULSAR: fx_pulsar(t); break;
+    case BGFX_COMET: fx_comet(t); break;
+    case BGFX_MILKY: fx_milky_way(t); break;
+    case BGFX_SUPERNOVA: fx_supernova(t); break;
+    case BGFX_EARTH: fx_earth_orbit(t); break;
+    case BGFX_CONSTELLATIONS: fx_constellations(t); break;
+    case BGFX_DEEP_FIELD: fx_deep_field(t); break;
+    case BGFX_CYBER_CITY: fx_cyber_city(t); break;
+    case BGFX_MOON_OCEAN: fx_moon_ocean(t); break;
+    case BGFX_FIREFLIES: fx_firefly_forest(t); break;
+    case BGFX_DUNES: fx_dunes(t); break;
+    case BGFX_JELLYFISH: fx_jellyfish(t); break;
+    case BGFX_DIGITAL_RAIN: fx_digital_rain(t); break;
+    case BGFX_CIRCUIT: fx_circuit(t); break;
+    case BGFX_SYNTHWAVE: fx_synthwave(t); break;
+    case BGFX_STORM: fx_storm(t); break;
+    case BGFX_KALEIDOSCOPE: fx_kaleidoscope(t); break;
+    case BGFX_PIXEL_LAND: fx_pixel_land(t); break;
+    case BGFX_FLOW_FIELD: fx_flow_field(t); break;
+    case BGFX_SAKURA: fx_sakura(t); break;
+    case BGFX_GEARS: fx_gears(t); break;
+    case BGFX_N64_CUBES: fx_n64_cubes(t); break;
+    case BGFX_VOLCANO: fx_volcano(t); break;
+    case BGFX_ISLANDS: fx_islands(t); break;
+    case BGFX_FIREWORKS: fx_fireworks(t); break;
+    case BGFX_CORAL_REEF: fx_coral_reef(t); break;
+    case BGFX_SNOW_CABIN: fx_snow_cabin(t); break;
+    case BGFX_EQUALIZER: fx_equalizer(t); break;
+    case BGFX_AUTUMN: fx_autumn(t); break;
+    case BGFX_GLASS_RAIN: fx_glass_rain(t); break;
+    case BGFX_BOKEH_LIGHTS: fx_bokeh_lights(t); break;
+    case BGFX_CITY_AIR: fx_city_air(t); break;
+    case BGFX_DNA: fx_dna(t); break;
+    case BGFX_LOW_POLY: fx_low_poly(t); break;
+    case BGFX_NIGHT_TRAIN: fx_night_train(t); break;
+    case BGFX_BALLOONS: fx_balloons(t); break;
+    case BGFX_PORTAL: fx_portal(t); break;
+    case BGFX_MILKY_DESERT: fx_milky_desert(t); break;
+    case BGFX_MILKY_LAKE: fx_milky_lake(t); break;
+    case BGFX_MILKY_ARCH: fx_milky_arch(t); break;
+    case BGFX_MILKY_CORE: fx_milky_core(t); break;
+    case BGFX_MILKY_TRAILS: fx_milky_trails(t); break;
+    case BGFX_ANDROMEDA: fx_andromeda(t); break;
+    case BGFX_WHIRLPOOL: fx_whirlpool(t); break;
+    case BGFX_SOMBRERO: fx_sombrero(t); break;
+    case BGFX_ELLIPTICAL: fx_elliptical(t); break;
+    case BGFX_BARRED: fx_barred(t); break;
+    case BGFX_COLLISION: fx_collision(t); break;
+    case BGFX_RING_GALAXY: fx_ring_galaxy(t); break;
+    case BGFX_GAL_CLUSTER: fx_gal_cluster(t); break;
+    case BGFX_QUASAR: fx_quasar(t); break;
+    case BGFX_MAGELLANIC: fx_magellanic(t); break;
+    case BGFX_PILLARS: fx_pillars(t); break;
+    case BGFX_ORION: fx_nebula_photo(0, t); break;
+    case BGFX_CRAB: fx_nebula_photo(1, t); break;
+    case BGFX_HORSEHEAD: fx_nebula_photo(2, t); break;
+    case BGFX_HELIX: fx_nebula_photo(3, t); break;
+    case BGFX_RING_NEB: fx_nebula_photo(4, t); break;
+    case BGFX_CARINA: fx_nebula_photo(5, t); break;
+    case BGFX_BUTTERFLY: fx_nebula_photo(6, t); break;
+    case BGFX_LAGOON: fx_nebula_photo(7, t); break;
     }
+    s_fxRemap = 0;
 }
 
 // ---- Screen saver (Interface > Screen saver): after Config::saverTime
@@ -20942,8 +24410,7 @@ static void browser_draw_covers(const std::vector<RomEntry> &roms, int sel, int 
         ry = anim_step_rate(&ringY, grid_row_y(g, sr) + (page - pp) * GRID_SLIDE, restart, 14.0f, 0.25f);
         if (selFade > 0.01f)
         {
-            selection_glow(rx - 4, ry - 4, g->tileW + 8, g->imgH + 8, 14, a * selFade);
-            UiRoundRing(rx - 4, ry - 4, g->tileW + 8, g->imgH + 8, 14, 3.0f, SEL_RING(a * selFade));
+            view_sel_glow(n ? view_find(roms[sel].file.c_str()) : NULL, rx, ry, g->tileW, g->imgH, 4, 14, a * selFade);
         }
         for (pg = (int)floorf(pp); pg <= (int)ceilf(pp); pg++)
         {
@@ -20956,7 +24423,8 @@ static void browser_draw_covers(const std::vector<RomEntry> &roms, int sel, int 
                 float cx = grid_col_x(g, col), cy = grid_row_y(g, row) + dy;
                 const ArtView *v = view_find(roms[idx].file.c_str());
                 char fit[96];
-                UiRoundRect(cx, cy, g->tileW, g->imgH, 12, UiAlpha(D3DCOLOR_ARGB(255, 22, 23, 31), fade), UiAlpha(D3DCOLOR_ARGB(255, 16, 17, 23), fade));
+                if (!view_is_3d(v))
+                    UiRoundRect(cx, cy, g->tileW, g->imgH, 12, UiAlpha(D3DCOLOR_ARGB(255, 22, 23, 31), fade), UiAlpha(D3DCOLOR_ARGB(255, 16, 17, 23), fade));
                 if (v && v->cover) view_cover(v, cx, cy, g->tileW, g->imgH, 12, D3DCOLOR_ARGB((int)(255 * fade), 255, 255, 255));
                 else stage_placeholder(cx, cy, g->tileW, g->imgH, roms[idx].shown.c_str(), fade);
                 if (fav_is(roms[idx].file))
@@ -21049,15 +24517,12 @@ static void browser_draw_carousel(const std::vector<RomEntry> &roms, int sel)
         int tint = (int)(255 * (1.0f - 0.45f * near1));
         const ArtView *v = view_find(roms[idx].file.c_str());
         if (alpha <= 0.02f || x > UI_WIDTH || x + w < 0) continue;
-        if (ad < 0.5f && !(s_cover3d && v && v->cover && v->shownKind == ART_KIND_BOX))
+        if (ad < 0.5f)
         {
-            // The middle cover: the selection's glow and ring, fading as it slides away (not round a 3D box:
-            // a glowing frame round a box seen at an angle looked wrong).
-            float ga = a * (1.0f - 2.0f * ad);
-            selection_glow(x - 5, y - 5, w + 10, h + 10, 16, ga);
-            UiRoundRing(x - 5, y - 5, w + 10, h + 10, 16, 3.0f, SEL_RING(ga));
+            // The middle cover: the selection's glow, fading as it slides away (round a 3D box its own outline)
+            view_sel_glow(v, x, y, w, h, 5, 16, a * (1.0f - 2.0f * ad));
         }
-        if (!(s_cover3d && v && v->cover && v->shownKind == ART_KIND_BOX))
+        if (!view_is_3d(v))
             UiRoundRect(x, y, w, h, 12, UiAlpha(D3DCOLOR_ARGB(255, 22, 23, 31), alpha), UiAlpha(D3DCOLOR_ARGB(255, 16, 17, 23), alpha));
         if (v && v->cover)
         {
@@ -21108,8 +24573,9 @@ static void browser_draw_spotlight(const std::vector<RomEntry> &roms, int sel)
     if (sel != lastSel) { lastSel = sel; changedAt = UiTime(); }
     fade = smooth01((UiTime() - changedAt) / 0.25f);   // the big part fades in as the selection changes
     // The big cover, glowing.
-    selection_glow(cx - 6, cy - 6, cw + 12, ch + 12, 18, a * fade);
-    UiRoundRect(cx, cy, cw, ch, 16, D3DCOLOR_ARGB(255, 22, 23, 31), D3DCOLOR_ARGB(255, 16, 17, 23));
+    if (view_is_3d(v)) view_sel_glow(v, cx, cy, cw, ch, 6, 18, a * fade);
+    else selection_glow(cx - 6, cy - 6, cw + 12, ch + 12, 18, a * fade);
+    if (!view_is_3d(v)) UiRoundRect(cx, cy, cw, ch, 16, D3DCOLOR_ARGB(255, 22, 23, 31), D3DCOLOR_ARGB(255, 16, 17, 23));
     if (v && v->cover) view_cover(v, cx, cy, cw, ch, 16, D3DCOLOR_ARGB((int)(255 * fade), 255, 255, 255));
     else stage_placeholder(cx, cy, cw, ch, roms[sel].shown.c_str(), 1.0f);
     // Its name, facts and description at the right.
@@ -21139,10 +24605,9 @@ static void browser_draw_spotlight(const std::vector<RomEntry> &roms, int sel)
         rv = view_find(roms[i].file.c_str());
         if (s)
         {
-            selection_glow(x - 5, y - 5, SPOT_TW + 10, SPOT_TH + 10, 12, a);
-            UiRoundRing(x - 5, y - 5, SPOT_TW + 10, SPOT_TH + 10, 12, 3.0f, SEL_RING(a));
+            view_sel_glow(rv, x, y, SPOT_TW, SPOT_TH, 5, 12, a);
         }
-        UiRoundRect(x, y, SPOT_TW, SPOT_TH, 10, UiAlpha(D3DCOLOR_ARGB(255, 22, 23, 31), al), UiAlpha(D3DCOLOR_ARGB(255, 16, 17, 23), al));
+        if (!view_is_3d(rv)) UiRoundRect(x, y, SPOT_TW, SPOT_TH, 10, UiAlpha(D3DCOLOR_ARGB(255, 22, 23, 31), al), UiAlpha(D3DCOLOR_ARGB(255, 16, 17, 23), al));
         if (rv && rv->cover) view_cover(rv, x, y, SPOT_TW, SPOT_TH, 10, D3DCOLOR_ARGB((int)(255 * al), s ? 255 : 200, s ? 255 : 200, s ? 255 : 200));
         else stage_placeholder(x, y, SPOT_TW, SPOT_TH, roms[i].shown.c_str(), al);
     }
@@ -21636,11 +25101,11 @@ static float backdrop_video(const std::string &file)
 static void game_backdrop(const std::string &file, int flags)
 {
     float f, sa, ua, u0 = 0, u1 = 1, v0 = 0, v1 = 1, age, z, cu, cv, hu, hv;
-    if (s_videoBg || (flags & GPIC_LOGO))
+    if (s_videoBg)
     {
-        // Background videos (and the cinema view): the game's video behind it all.
+        // Background videos: the game's video behind it all (in every view, the cinema's too: none forces it).
         if (backdrop_video(file) > 0) return;
-        if (s_videoBg) return;   // no picture behind either (Background images is off with it)
+        return;   // no picture behind either (Background images is off with it)
     }
     if (!game_pics(file, flags) || !s_gameBg || !s_cine.snap) return;
     age = UiTime() - s_cine.at;
@@ -21724,10 +25189,9 @@ static void browser_draw_cinema(const std::vector<RomEntry> &roms, int sel)
         rv = view_find(roms[i].file.c_str());
         if (s)
         {
-            selection_glow(x - 5, y - 5, CINE_TW + 10, CINE_TH + 10, 12, a);
-            UiRoundRing(x - 5, y - 5, CINE_TW + 10, CINE_TH + 10, 12, 3.0f, SEL_RING(a));
+            view_sel_glow(rv, x, y, CINE_TW, CINE_TH, 5, 12, a);
         }
-        UiRoundRect(x, y, CINE_TW, CINE_TH, 10, UiAlpha(D3DCOLOR_ARGB(255, 22, 23, 31), al), UiAlpha(D3DCOLOR_ARGB(255, 16, 17, 23), al));
+        if (!view_is_3d(rv)) UiRoundRect(x, y, CINE_TW, CINE_TH, 10, UiAlpha(D3DCOLOR_ARGB(255, 22, 23, 31), al), UiAlpha(D3DCOLOR_ARGB(255, 16, 17, 23), al));
         if (rv && rv->cover) view_cover(rv, x, y, CINE_TW, CINE_TH, 10, D3DCOLOR_ARGB((int)(255 * al), s ? 255 : 190, s ? 255 : 190, s ? 255 : 190));
         else stage_placeholder(x, y, CINE_TW, CINE_TH, roms[i].shown.c_str(), al);
     }
@@ -21776,12 +25240,12 @@ static void browser_draw_single(const std::vector<RomEntry> &roms, int sel)
     UiBackdrop();
     browser_effect();
     pics = n && game_pics(roms[sel].file, GPIC_SNAP | GPIC_LOGO);   // its picture from the game and its logo
-    if (n && backdrop_video(roms[sel].file) > 0)
+    if (n && s_videoBg && backdrop_video(roms[sel].file) > 0)
     {
-        // The game's video when it plays (its sound is heard: it is seen too), darker behind the texts.
+        // The game's video (Background videos on), darker behind the texts.
         single_shade(1.0f);
     }
-    else if (pics && s_cine.snap)
+    else if (pics && s_cine.snap && s_gameBg)   // (Interface > Background images: off, none)
     {
         // The picture from the game over the whole screen (its middle, cut to the screen's shape),
         // dimmed, darker behind the texts.
@@ -21974,9 +25438,9 @@ static void browser_draw(const std::vector<RomEntry> &roms, int sel, int top, in
     UiBackdrop();
     browser_effect();
     if (n) pics = game_pics(roms[sel].file, GPIC_SNAP | GPIC_LOGO);   // its picture from the game and its logo
-    if (n && backdrop_video(roms[sel].file) > 0)
-        list_shade(380, 860, 1.0f);   // the game's video when it plays, darker behind the list
-    else if (pics && s_cine.snap)
+    if (n && s_videoBg && backdrop_video(roms[sel].file) > 0)
+        list_shade(380, 860, 1.0f);   // the game's video (Background videos on), darker behind the list
+    else if (pics && s_cine.snap && s_gameBg)   // (Interface > Background images: off, none)
     {
         // The picture from the game over the whole screen (its middle, cut to the screen's shape), dimmed.
         float sa = (float)s_cine.sw / s_cine.sh, ua = (float)UI_WIDTH / UI_HEIGHT, u0 = 0, u1 = 1, v0 = 0, v1 = 1;
@@ -21992,24 +25456,24 @@ static void browser_draw(const std::vector<RomEntry> &roms, int sel, int top, in
         list_shade(380, 860, 0.45f);   // no picture yet: the background a little darker behind the list
 
     // Top left: the logo, the tab's name and how many games it has, the tabs either side (LT / RT).
-    UiBrand(UI_SAFE_X, 52, 19.0f);
+    UiBrand(UI_SAFE_X, 60, 28.0f);
     {
         const int tabs = tab_count();
         float x;
         char name[160], prev[160], next[160];
         tab_name(s_tab, name, sizeof(name));
-        UiText(UI_BOLD, 26, UI_SAFE_X, 92, UI_COL_TEXT, name, UI_LEFT);
+        UiText(UI_BOLD, 26, UI_SAFE_X, 104, UI_COL_TEXT, name, UI_LEFT);
         x = UI_SAFE_X + UiTextWidth(UI_BOLD, 26, name) + 14;
         _snprintf(buf, sizeof(buf) - 1, "%d", s_tabGames);
         buf[sizeof(buf) - 1] = 0;
-        UiText(UI_REGULAR, 17, x, 94, UI_COL_TEXT2, buf, UI_LEFT);
+        UiText(UI_REGULAR, 17, x, 106, UI_COL_TEXT2, buf, UI_LEFT);
         if (tabs > 1)
         {
             tab_name((s_tab + tabs - 1) % tabs, prev, sizeof(prev));
             tab_name((s_tab + 1) % tabs, next, sizeof(next));
             _snprintf(buf, sizeof(buf) - 1, "LT  " UI_CH_MIDDOT "  %s     |     %s  " UI_CH_MIDDOT "  RT", prev, next);
             buf[sizeof(buf) - 1] = 0;
-            UiText(UI_REGULAR, 14, UI_SAFE_X, 120, UI_COL_TEXT3, buf, UI_LEFT);
+            UiText(UI_REGULAR, 14, UI_SAFE_X, 129, UI_COL_TEXT3, buf, UI_LEFT);
         }
     }
 
@@ -22195,8 +25659,15 @@ static void browser_draw(const std::vector<RomEntry> &roms, int sel, int top, in
         if (view && view->cover)
         {
             const float bx = UI_WIDTH - UI_SAFE_X - bw, by = LIST_BOX_B - bh + 10.0f * (1.0f - fade);
-            UiShadow(bx - 10, by - 6, bw + 20, bh + 20, 16, 24, D3DCOLOR_ARGB((int)(150 * fade), 0, 0, 0));
-            view_cover_still(view, bx, by, bw, bh, 8, D3DCOLOR_ARGB((int)(255 * fade), 255, 255, 255));   // (the video plays behind it all)
+            if (view_is_3d(view))
+            {
+                // a 3D box: its shadow on the floor under it only (not a dark card round the room)
+                float fx, fy, fw, fh;
+                view_box_rect(view, bx, by, bw, bh, &fx, &fy, &fw, &fh);
+                UiShadow(fx + fw * 0.08f, fy + fh - 6, fw * 0.84f, 12, 6, 14, D3DCOLOR_ARGB((int)(140 * fade), 0, 0, 0));
+            }
+            else UiShadow(bx - 10, by - 6, bw + 20, bh + 20, 16, 24, D3DCOLOR_ARGB((int)(150 * fade), 0, 0, 0));
+            view_cover(view, bx, by, bw, bh, 8, D3DCOLOR_ARGB((int)(255 * fade), 255, 255, 255));   // (its video over it; behind it all with Background videos)
         }
     }
     browser_footer(0);
@@ -22582,6 +26053,270 @@ static void det_packs(IDirect3DDevice9 *dev, Config *c, const char *rom)
             UiText(UI_BOLD, 13, x + w - 44 - cw * 0.5f, ry + 27, UiAlpha(UI_COL_TEXT, a), chip, UI_CENTER);
         }
         UiScreenFooter(Tr(here[sel].installed ? T_FOOT_DET_PACKS_ON : T_FOOT_DET_PACKS));
+        UiEnd();
+        UiPresent(dev);
+    }
+}
+
+static void det_section(float x, float y, const char *title, D3DCOLOR col);   // below
+
+// Whether any game's folder holds a .hts: a game without catalog packs (a hack) can then use one (det_packs_link).
+static int hd_any_installed(void)
+{
+    std::map<std::string, int>::const_iterator d;
+    hd_dirs_load();
+    for (d = s_hdDirs.begin(); d != s_hdDirs.end(); ++d)
+        if (d->second == 2) return 1;
+    return 0;
+}
+
+// "Use another game's pack": automatic (its code's game), each game's folder holding a .hts
+// (but its own), or none; written to its folder's link.txt - no pack is copied. 1 when it changed.
+struct LinkDir { std::string folder; int packs; unsigned mb; };
+static int det_link_pick(IDirect3DDevice9 *dev, const char *rom, const char *shown)
+{
+    std::vector<LinkDir> dirs;
+    char own[64], ownDir[192], link[64], pattern[208], line[192], fit[128];
+    WIN32_FIND_DATAA fd;
+    HANDLE h;
+    UiInput in;
+    int n, k, sel = 0, cur, changed = 0;
+    const float openAt = UiTime();
+    HiresFolderName(rom, own, sizeof(own));
+    _snprintf(ownDir, sizeof(ownDir) - 1, "%s\\%s", s_hiresDir, own);
+    ownDir[sizeof(ownDir) - 1] = 0;
+    _snprintf(pattern, sizeof(pattern) - 1, "%s\\*", s_hiresDir);
+    pattern[sizeof(pattern) - 1] = 0;
+    h = FindFirstFileA(pattern, &fd);
+    if (h != INVALID_HANDLE_VALUE)
+    {
+        do
+        {
+            LinkDir d;
+            WIN32_FIND_DATAA f2;
+            HANDLE h2;
+            unsigned __int64 bytes = 0;
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == '.' || !_stricmp(fd.cFileName, own)) continue;
+            _snprintf(pattern, sizeof(pattern) - 1, "%s\\%s\\*.hts", s_hiresDir, fd.cFileName);
+            pattern[sizeof(pattern) - 1] = 0;
+            d.folder = fd.cFileName;
+            d.packs = 0;
+            h2 = FindFirstFileA(pattern, &f2);
+            if (h2 == INVALID_HANDLE_VALUE) continue;
+            do { d.packs++; bytes += ((unsigned __int64)f2.nFileSizeHigh << 32) | f2.nFileSizeLow; } while (FindNextFileA(h2, &f2));
+            FindClose(h2);
+            d.mb = (unsigned)(bytes >> 20);
+            dirs.push_back(d);
+        } while (FindNextFileA(h, &fd) && dirs.size() < 64);
+        FindClose(h);
+    }
+    // rows: automatic, the games, none
+    n = (int)dirs.size() + 2;
+    k = hires_link_read(ownDir, link, sizeof(link));
+    cur = 0;
+    if (k == -1) cur = n - 1;
+    else if (k == 1)
+        for (int j = 0; j < (int)dirs.size(); j++)
+            if (!_stricmp(dirs[j].folder.c_str(), link)) cur = j + 1;
+    sel = cur;
+    UiInputInit(&in);
+    xb_audio_ui_sound(XB_SFX_OPEN);
+    for (;;)
+    {
+        const int vis = n < 7 ? n : 7, top = sel < vis ? 0 : sel - vis + 1;
+        const float w = 760, rh = 62, hh = 130 + vis * rh, x = (UI_WIDTH - w) * 0.5f, y = (UI_HEIGHT - hh) * 0.5f - 10;
+        const float a = ease_out((UiTime() - openAt) / 0.2f);
+        WORD down = UiInputPoll(&in);
+        if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) { xb_audio_ui_sound(XB_SFX_BACK); break; }
+        if (down & XINPUT_GAMEPAD_DPAD_UP) { sel = (sel + n - 1) % n; xb_audio_ui_sound(XB_SFX_MOVE); }
+        if (down & XINPUT_GAMEPAD_DPAD_DOWN) { sel = (sel + 1) % n; xb_audio_ui_sound(XB_SFX_MOVE); }
+        if (down & XINPUT_GAMEPAD_A)
+        {
+            if (sel != cur)
+            {
+                hires_link_write(ownDir, sel == 0 ? NULL : sel == n - 1 ? "-" : dirs[sel - 1].folder.c_str());
+                hd_forget();
+                changed = 1;
+            }
+            xb_audio_ui_sound(XB_SFX_SELECT);
+            break;
+        }
+        dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
+        UiBegin(dev);
+        UiBackdrop();
+        browser_effect();
+        UiRect(0, 0, UI_WIDTH, UI_HEIGHT, UiAlpha(D3DCOLOR_ARGB(120, 0, 0, 0), a));
+        edge_glow(x, y, w, hh, 22);
+        UiPanel(x, y, w, hh, 22);
+        UiText(UI_BOLD, 26, x + w * 0.5f, y + 44, UiAlpha(UI_COL_TEXT, a), Tr(T_HDL_PICK_TITLE), UI_CENTER);
+        _snprintf(line, sizeof(line) - 1, Tr(T_HDL_PICK_SUB), shown);
+        line[sizeof(line) - 1] = 0;
+        UiTextFit(UI_REGULAR, 15, w - 60, line, fit, sizeof(fit));
+        UiText(UI_REGULAR, 15, x + w * 0.5f, y + 76, UiAlpha(UI_COL_TEXT3, a), fit, UI_CENTER);
+        for (k = top; k < n && k < top + vis; k++)
+        {
+            const float ry = y + 100 + (k - top) * rh;
+            const char *t1, *chip = k == cur ? Tr(T_HDL_CURRENT) : NULL;
+            if (k == 0) { t1 = Tr(T_HDL_AUTO); _snprintf(line, sizeof(line) - 1, "%s", Tr(T_HDL_AUTO_DESC)); }
+            else if (k == n - 1) { t1 = Tr(T_HDL_NONE); _snprintf(line, sizeof(line) - 1, "%s", Tr(T_HDL_NONE_DESC)); }
+            else
+            {
+                const LinkDir &d = dirs[k - 1];
+                t1 = HiresGameName(d.folder.c_str());
+                _snprintf(line, sizeof(line) - 1, "%s  " UI_CH_MIDDOT "  %d .hts  " UI_CH_MIDDOT "  %u MB", d.folder.c_str(), d.packs, d.mb);
+            }
+            line[sizeof(line) - 1] = 0;
+            if (k == sel)
+            {
+                selection_glow(x + 20, ry, w - 40, rh - 8, 12, selection_pulse());
+                UiRoundRect(x + 24, ry + 2, w - 48, rh - 12, 12, UiAlpha(SEL_HI(70), a), UiAlpha(SEL_HI(40), a));
+            }
+            UiTextFit(UI_BOLD, 19, w - 220, t1, fit, sizeof(fit));
+            UiText(UI_BOLD, 19, x + 44, ry + 17, UiAlpha(UI_COL_TEXT, a), fit, UI_LEFT);
+            UiTextFit(UI_REGULAR, 14, w - 220, line, fit, sizeof(fit));
+            UiText(UI_REGULAR, 14, x + 44, ry + 38, UiAlpha(UI_COL_TEXT3, a), fit, UI_LEFT);
+            if (chip)
+            {
+                const float cw = UiTextWidth(UI_BOLD, 13, chip) + 22;
+                UiRoundRect(x + w - 44 - cw, ry + 14, cw, 24, 12, UiAlpha(PACK_ACTIVE_GREEN, a), UiAlpha(PACK_ACTIVE_GREEN, a));
+                UiText(UI_BOLD, 13, x + w - 44 - cw * 0.5f, ry + 26, UiAlpha(UI_COL_TEXT, a), chip, UI_CENTER);
+            }
+        }
+        UiScreenFooter(Tr(T_FOOT_HDL_PICK));
+        UiEnd();
+        UiPresent(dev);
+    }
+    return changed;
+}
+
+// A game's HD textures when the catalog has no pack for it (a hack, another region...): the packs it
+// uses - its own, the game's chosen for it, or (automatic) its cartridge code's game's - with the one
+// in use; A uses one or takes it out of use (its own active.txt: the other game's choice stays as it is),
+// X (or the last row) another game's (det_link_pick). B: back to the details.
+static void det_packs_link(IDirect3DDevice9 *dev, Config *c, const char *rom, const char *code, const char *shown, const char *romPath)
+{
+    unsigned mb[HIRES_PACKS_MAX];
+    char line[192], fit[128], own[64];
+    UiInput in;
+    int n = 0, k, sel = 0, inUse = -1;
+    const float openAt = UiTime();
+    HiresFolderName(rom, own, sizeof(own));
+    UiInputInit(&in);
+    xb_audio_ui_sound(XB_SFX_OPEN);
+    for (int fresh = 1;;)
+    {
+        if (fresh)
+        {
+            char act[128];
+            WIN32_FILE_ATTRIBUTE_DATA fa;
+            fresh = 0;
+            HiresScanPacks(rom, code, romPath);
+            n = HiresPackCount();
+            for (k = 0; k < n; k++)
+                mb[k] = GetFileAttributesExA(HiresPackPath(k), GetFileExInfoStandard, &fa) ? (unsigned)((((unsigned __int64)fa.nFileSizeHigh << 32) | fa.nFileSizeLow) >> 20) : 0;
+            inUse = !n || !c->hiTex || HiresActiveFor(act, sizeof(act)) == -1 ? -1 : hires_active_index(c);
+            if (sel > n) sel = n;
+        }
+        const int rows = n + 1, vis = n < 4 ? n : 4, at = sel < n ? sel : n - 1, top = at < vis ? 0 : at - vis + 1;
+        const float w = 820, rh = 60, hh = 380 + (vis ? vis : 1) * rh, x = (UI_WIDTH - w) * 0.5f, y = (UI_HEIGHT - hh) * 0.5f - 10;
+        const float a = ease_out((UiTime() - openAt) / 0.2f);
+        float ry;
+        WORD down = UiInputPoll(&in);
+        if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) { xb_audio_ui_sound(XB_SFX_BACK); break; }
+        if (down & XINPUT_GAMEPAD_DPAD_UP) { sel = (sel + rows - 1) % rows; xb_audio_ui_sound(XB_SFX_MOVE); }
+        if (down & XINPUT_GAMEPAD_DPAD_DOWN) { sel = (sel + 1) % rows; xb_audio_ui_sound(XB_SFX_MOVE); }
+        if ((down & XINPUT_GAMEPAD_X) || ((down & XINPUT_GAMEPAD_A) && sel == n))
+        {
+            if (det_link_pick(dev, rom, shown)) { fresh = 1; sel = 0; }
+            UiInputInit(&in);
+            continue;
+        }
+        if ((down & XINPUT_GAMEPAD_A) && sel < n)
+        {
+            char ownDir[192];
+            _snprintf(ownDir, sizeof(ownDir) - 1, "%s\\%s", s_hiresDir, own);
+            ownDir[sizeof(ownDir) - 1] = 0;
+            mkdir_p(ownDir);
+            HiresActiveWrite(ownDir, sel == inUse ? NULL : HiresPackName(sel));
+            if (sel != inUse) c->hiTex = 1;   // HD textures on, as when one is installed
+            xb_audio_ui_sound(sel == inUse ? XB_SFX_VALUE_DOWN : XB_SFX_VALUE_UP);
+            fresh = 1;
+            continue;
+        }
+        dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
+        UiBegin(dev);
+        UiBackdrop();
+        browser_effect();
+        UiRect(0, 0, UI_WIDTH, UI_HEIGHT, UiAlpha(D3DCOLOR_ARGB(120, 0, 0, 0), a));
+        edge_glow(x, y, w, hh, 22);
+        UiPanel(x, y, w, hh, 22);
+        UiText(UI_BOLD, 28, x + w * 0.5f, y + 44, UiAlpha(UI_COL_TEXT, a), Tr(T_DET_HD), UI_CENTER);
+        UiTextFit(UI_REGULAR, 16, w - 60, shown, fit, sizeof(fit));
+        UiText(UI_REGULAR, 16, x + w * 0.5f, y + 76, UiAlpha(UI_COL_TEXT3, a), fit, UI_CENTER);
+        _snprintf(line, sizeof(line) - 1, Tr(T_HDL_SUB), rom, code);
+        line[sizeof(line) - 1] = 0;
+        UiText(UI_REGULAR, 14, x + w * 0.5f, y + 98, UiAlpha(UI_COL_TEXT3, a), line, UI_CENTER);
+        // where its packs are from
+        ry = y + 132;
+        {
+            const int src = HiresPackSource();
+            const char *game = HiresGameName(HiresPackFolder());
+            if (src == HSRC_OWN) _snprintf(line, sizeof(line) - 1, "%s", Tr(T_HDL_SEC_OWN));
+            else if (src == HSRC_LINK) _snprintf(line, sizeof(line) - 1, Tr(T_HDL_SEC_LINK), game);
+            else if (src == HSRC_AUTO) _snprintf(line, sizeof(line) - 1, Tr(T_HDL_SEC_AUTO), game);
+            else _snprintf(line, sizeof(line) - 1, "%s", Tr(T_HDL_SEC_NONE));
+            line[sizeof(line) - 1] = 0;
+            UiTextFit(UI_BOLD, 16, w - 80, line, fit, sizeof(fit));
+            det_section(x + 30, ry, fit, UiAlpha(D3DCOLOR_ARGB(255, 150, 100, 230), a));
+        }
+        ry += 22;
+        for (k = top; k < n && k < top + vis; k++, ry += rh)
+        {
+            const char *chip = k == inUse ? Tr(T_DET_PACK_IN_USE) : Tr(T_PACKS_ACQUIRED);
+            const D3DCOLOR cc = k == inUse ? PACK_ACTIVE_GREEN : D3DCOLOR_ARGB(255, 90, 150, 240);
+            const float cw = UiTextWidth(UI_BOLD, 13, chip) + 22;
+            const char *author = HiresPackAuthor(k), *file = HiresPackName(k), *dot = strrchr(file, '.');
+            char name[96];
+            _snprintf(name, sizeof(name) - 1, "%.*s", dot ? (int)(dot - file) : (int)strlen(file), file);
+            name[sizeof(name) - 1] = 0;
+            if (k == sel)
+            {
+                selection_glow(x + 20, ry, w - 40, rh - 6, 12, selection_pulse());
+                UiRoundRect(x + 24, ry + 2, w - 48, rh - 10, 12, UiAlpha(SEL_HI(70), a), UiAlpha(SEL_HI(40), a));
+            }
+            UiTextFit(UI_BOLD, 19, w - 140 - cw, name, fit, sizeof(fit));
+            UiText(UI_BOLD, 19, x + 44, ry + 18, UiAlpha(UI_COL_TEXT, a), fit, UI_LEFT);
+            if (author) _snprintf(line, sizeof(line) - 1, "%s  " UI_CH_MIDDOT "  %u MB", author, mb[k]);
+            else _snprintf(line, sizeof(line) - 1, "%u MB", mb[k]);
+            line[sizeof(line) - 1] = 0;
+            UiText(UI_REGULAR, 14, x + 44, ry + 39, UiAlpha(UI_COL_TEXT3, a), line, UI_LEFT);
+            UiRoundRect(x + w - 44 - cw, ry + 15, cw, 24, 12, UiAlpha(cc, a), UiAlpha(cc, a));
+            UiText(UI_BOLD, 13, x + w - 44 - cw * 0.5f, ry + 27, UiAlpha(UI_COL_TEXT, a), chip, UI_CENTER);
+        }
+        if (!n) ry += rh;
+        // chosen by hand
+        ry += 12;
+        det_section(x + 30, ry, Tr(T_HDL_SEC_MANUAL), UiAlpha(D3DCOLOR_ARGB(255, 150, 100, 230), a));
+        ry += 22;
+        if (sel == n)
+        {
+            selection_glow(x + 20, ry, w - 40, rh - 6, 12, selection_pulse());
+            UiRoundRect(x + 24, ry + 2, w - 48, rh - 10, 12, UiAlpha(SEL_HI(70), a), UiAlpha(SEL_HI(40), a));
+        }
+        UiText(UI_BOLD, 19, x + 44, ry + 18, UiAlpha(UI_COL_TEXT, a), Tr(T_HDL_OTHER), UI_LEFT);
+        UiText(UI_REGULAR, 14, x + 44, ry + 39, UiAlpha(UI_COL_TEXT3, a), Tr(T_HDL_OTHER_DESC), UI_LEFT);
+        ry += rh + 6;
+        // how the pack is chosen
+        UiRoundRect(x + 24, ry, w - 48, 104, 14, UiAlpha(D3DCOLOR_ARGB(255, 22, 24, 42), a), UiAlpha(D3DCOLOR_ARGB(255, 22, 24, 42), a));
+        UiText(UI_BOLD, 15, x + 44, ry + 18, UiAlpha(UI_COL_TEXT2, a), Tr(T_HDL_INFO_TITLE), UI_LEFT);
+        _snprintf(line, sizeof(line) - 1, Tr(T_HDL_INFO1), own);
+        line[sizeof(line) - 1] = 0;
+        UiTextFit(UI_REGULAR, 14, w - 100, line, fit, sizeof(fit));
+        UiText(UI_REGULAR, 14, x + 44, ry + 40, UiAlpha(UI_COL_TEXT2, a), fit, UI_LEFT);
+        UiText(UI_REGULAR, 14, x + 44, ry + 58, UiAlpha(UI_COL_TEXT2, a), Tr(T_HDL_INFO2), UI_LEFT);
+        UiText(UI_REGULAR, 14, x + 44, ry + 76, UiAlpha(UI_COL_TEXT2, a), Tr(T_HDL_INFO3), UI_LEFT);
+        UiText(UI_REGULAR, 14, x + 44, ry + 94, UiAlpha(UI_COL_TEXT3, a), Tr(T_HDL_INFO4), UI_LEFT);
+        UiScreenFooter(Tr(T_FOOT_HDL));
         UiEnd();
         UiPresent(dev);
     }
@@ -23235,7 +26970,7 @@ static int game_detail(IDirect3DDevice9 *dev, Config *c, const char *settingsPat
             PreviewWant(NULL, NULL);
         }
         title = g.hasInfo && g.gi.title[0] ? g.gi.title : roms[*sel].shown.c_str();
-        nAct = g.ri.hd || HiresPackCountFor(g.ri.name) ? 4 : 3;
+        nAct = g.ri.hd || HiresPackCountFor(g.ri.name) || (g.ri.ok && hd_any_installed()) ? 4 : 3;   // (a hack: another game's packs)
         if (act >= nAct) act = nAct - 1;
         det_cover_path(&g, coverFile, sizeof(coverFile), 0);
         det_cover_path(&g, videoFile, sizeof(videoFile), 1);
@@ -23399,12 +27134,14 @@ static int game_detail(IDirect3DDevice9 *dev, Config *c, const char *settingsPat
                 else { PreviewWant(NULL, NULL); preview_apply(c); }
                 xb_audio_ui_sound(XB_SFX_SELECT);
             }
-            if (act == DET_HD && (HiresPackCountFor(g.ri.name) || g.ri.hd == 3))
+            if (act == DET_HD && nAct == 4)
             {
-                // the game's packs: downloaded and put in use here (its own PNG pack, without catalog ones: made a .hts)
+                // the game's packs: downloaded and put in use here (its own PNG pack, without catalog ones: made a .hts;
+                // without either, a hack: the packs it uses, another game's)
                 PreviewWant(NULL, NULL);
                 if (HiresPackCountFor(g.ri.name)) det_packs(dev, c, g.ri.name);
-                else hires_download_screen(dev, c, 1, NULL);
+                else if (g.ri.hd == 3) hires_download_screen(dev, c, 1, NULL);
+                else det_packs_link(dev, c, g.ri.name, g.ri.code, title, path.c_str());
                 hd_forget();
                 rom_details(path.c_str(), &g.ri);
                 UiInputInit(&in);
@@ -23494,7 +27231,13 @@ static int game_detail(IDirect3DDevice9 *dev, Config *c, const char *settingsPat
                     prog = (float)dk / tk;
                     _snprintf(t, sizeof(t) - 1, "%s  %d %%", Tr(T_DET_DOWNLOADING), (int)(prog * 100));
                 }
+                else if (g.ri.hd == 2 && HiresPackSource() >= HSRC_LINK)
+                {
+                    done = 1;   // a hack: another game's pack ("From Mario Kart 64")
+                    _snprintf(t, sizeof(t) - 1, Tr(T_HDL_FROM), HiresGameName(HiresPackFolder()));
+                }
                 else if (g.ri.hd == 2) { done = 1; _snprintf(t, sizeof(t) - 1, "%s", Tr(T_DET_HD_INSTALLED)); }
+                else if (!g.ri.hd) _snprintf(t, sizeof(t) - 1, "%s", Tr(T_HDL_CHOOSE));   // none: another game's to choose
                 else
                 {
                     const HiresPackEntry *e = g.ri.hd == 1 ? HiresPackGet(g.ri.name, 0) : NULL;
@@ -23743,7 +27486,10 @@ static int game_detail(IDirect3DDevice9 *dev, Config *c, const char *settingsPat
 // into the card picked; the list, Online play and Settings are then as from the list. What the cards say about
 // online (players, rooms, messages) and the ranking are read in the background.
 // The cards as the D-pad goes through them: [Games][Online][All time] over [Settings][This week][All time].
-enum { HOME_QUIT = -1, HOME_GAMES = 0, HOME_ONLINE, HOME_SETTINGS, HOME_GLOBAL, HOME_WEEK, HOME_RESUME, HOME_FRIENDS, HOME_STORE, HOME_TOP };   // RESUME, FRIENDS: Y on
+enum { HOME_QUIT = -1, HOME_GAMES = 0, HOME_ONLINE, HOME_SETTINGS, HOME_GLOBAL, HOME_WEEK, HOME_RESUME, HOME_FRIENDS, HOME_STORE, HOME_TOP };
+// The main menu's dock, left to right (HOME_WEEK: Rankings on this week's).
+#define HOME_TILES 6
+static const int s_homeTiles[HOME_TILES] = { HOME_GAMES, HOME_ONLINE, HOME_GLOBAL, HOME_TOP, HOME_STORE, HOME_SETTINGS };   // RESUME, FRIENDS: Y on
                                                                                                                       // Games, on Online play (not cards)
 static int s_resumeSlot;   // the slot the game starting loads (MenuTakeResume)
 int MenuTakeResume(void) { const int s = s_resumeSlot; s_resumeSlot = 0; return s; }   // HOME_QUIT: B (or BACK), the quitting asked and said yes
@@ -23804,9 +27550,19 @@ static void home_hours(char *out, size_t size, int seconds)
 // A card's panel, as Interface > Borders and panels says (the panels' colour and opacity, the border's colour,
 // opacity, width and glow, the corners); the selected one in the selection's colour (at the panels' opacity) with its
 // own background moving inside (fxIcon: kodi_tile_fx's) and a shade over it so the text reads on any colour.
+// The main menu's panels: as every panel (Interface > Borders and panels: their colour, opacity, edge, roundness, the
+// edge's glow), without the cards' colour marks; `on`: ringed as the selection is.
+static void home_glass(float x, float y, float w, float h, float r, int on, float a)
+{
+    (void)a;
+    edge_glow(x, y, w, h, r);
+    UiPanel(x, y, w, h, r);
+    if (on) UiRoundRing(x, y, w, h, UiPanelRadius(r), 2.5f, SEL_RING(selection_pulse()));
+}
 static void home_panel(float x, float y, float w, float h, D3DCOLOR col, int fxIcon, int on, float a)
 {
     const float r = UiPanelRadius(20);
+    if (s_homeGlass) { home_glass(x, y, w, h, 18, 0, a); return; }   // (the card under the dock: never "picked" itself)
     if (on)
     {
         const int pa = (int)(UiPanelAlpha() * a);
@@ -23932,26 +27688,30 @@ static void home_top_box(IDirect3DDevice9 *dev, float x, float y, float w, float
         paragraph(UI_REGULAR, 15, x + 24, y + 50, w - 48, 3, UiAlpha(on ? UI_COL_TEXT : UI_COL_TEXT2, a), msg);
         return;
     }
-    for (k = 0; k < 3 && k < (int)top.size(); k++)
+    const int bigBox = h > 300;   // (the main menu's list view: the whole room, more rows, bigger)
+    const float rowH = bigBox ? 54.0f : 31.0f;
+    const int rowsMax = bigBox ? (int)((h - 80) / rowH) : 3;
+    for (k = 0; k < rowsMax && k < (int)top.size(); k++)
     {
         const OnlineTopGame *g = &top[k];
-        const float cy = y + 61 + k * 31;
+        const float cy = y + (bigBox ? 86 : 61) + k * rowH;
         char tx[32], title[96], ver[24], fit[96], key[16];
         int cw = 0, chh = 0;
         IDirect3DTexture9 *cover = NULL;
         float cx;
         sprintf(tx, "%d", k + 1);
-        UiCircle(x + 32, cy, 11, UiAlpha(medal[k], a));
-        UiText(UI_BOLD, 12, x + 32, cy, UiAlpha(D3DCOLOR_ARGB(255, 30, 30, 40), a), tx, UI_CENTER);
+        UiCircle(x + 32, cy, bigBox ? 14.0f : 11.0f, UiAlpha(k < 3 ? medal[k] : D3DCOLOR_ARGB(255, 120, 124, 140), a));
+        UiText(UI_BOLD, bigBox ? 14.0f : 12.0f, x + 32, cy, UiAlpha(D3DCOLOR_ARGB(255, 30, 30, 40), a), tx, UI_CENTER);
         if (ArtKeyFromCode(g->game.c_str(), g->code.c_str(), key)) cover = room_cover(dev, key, coverLoads, &cw, &chh);
-        online_box(cover, cw, chh, x + 50, cy - 13, 38, 26, 4);
+        if (bigBox) online_box(cover, cw, chh, x + 56, cy - 21, 62, 42, 5);
+        else online_box(cover, cw, chh, x + 50, cy - 13, 38, 26, 4);
         version_split(g->game.c_str(), title, sizeof(title), ver, sizeof(ver));
         _snprintf(tx, sizeof(tx) - 1, Tr(T_TOP_HOURS), (g->minutes + 30) / 60);
         tx[sizeof(tx) - 1] = 0;
-        home_text(UI_BOLD, 14, x + w - 24, cy, k == 0 ? D3DCOLOR_ARGB(255, 255, 196, 70) : UI_COL_TEXT, tx, UI_RIGHT, on, a);
-        UiTextFit(UI_BOLD, 14, w - 96 - 70 - 90, title, fit, sizeof(fit));
-        home_text(UI_BOLD, 14, x + 98, cy, UI_COL_TEXT, fit, UI_LEFT, on, a);
-        cx = x + 98 + UiTextWidth(UI_BOLD, 14, fit) + 8;
+        home_text(UI_BOLD, bigBox ? 18.0f : 14.0f, x + w - 24, cy, k == 0 ? D3DCOLOR_ARGB(255, 255, 196, 70) : UI_COL_TEXT, tx, UI_RIGHT, on, a);
+        UiTextFit(UI_BOLD, bigBox ? 18.0f : 14.0f, w - (bigBox ? 130 : 96) - 70 - 90, title, fit, sizeof(fit));
+        home_text(UI_BOLD, bigBox ? 18.0f : 14.0f, x + (bigBox ? 132 : 98), cy, UI_COL_TEXT, fit, UI_LEFT, on, a);
+        cx = x + (bigBox ? 132 : 98) + UiTextWidth(UI_BOLD, bigBox ? 18.0f : 14.0f, fit) + 8;
         if (ver[0])
         {
             char v[28];
@@ -24063,11 +27823,175 @@ static void home_store_tick(IDirect3DDevice9 *dev, HomeStore *hs)
     }
 }
 
+// The list view's Store: a wall of the packs' pictures (kept in the program: HiresPackThumbDecode), no names, sliding up
+// slowly, one lighting up after another; made a few a frame as it first shows, kept while the menu is open.
+#define HOME_WALL_MAX 64
+static IDirect3DTexture9 *s_wallTex[HOME_WALL_MAX];
+static int s_wallMade;
+static void home_wall_tick(IDirect3DDevice9 *dev)
+{
+    int k;
+    const int n = HiresPackThumbCount() < HOME_WALL_MAX ? HiresPackThumbCount() : HOME_WALL_MAX;
+    for (k = 0; k < 1 && s_wallMade < n; k++, s_wallMade++)   // (one a frame: no hitch as they are made)
+    {
+        int w = 0, h = 0;
+        unsigned char *px = HiresPackThumbDecode(s_wallMade, 192, 108, &w, &h);
+        if (px) { s_wallTex[s_wallMade] = UiImageCreate(dev, px, w, h); free(px); }
+    }
+}
+static void home_wall(float x, float y, float w, float h, int packs, float a)
+{
+    const int cols = 5, n = s_wallMade;
+    const float gap = 10, tw = (w - 32 - gap * (cols - 1)) / cols, th = tw * 9 / 16, rowH = th + gap, speed = 12.0f;
+    const float run = UiTime() * speed, scroll = fmodf(run, rowH);
+    const int base = (int)(run / rowH), lit = (int)(UiTime() / 1.6f), rows = (int)(h / rowH) + 2;
+    char line[96];
+    int r, c;
+    home_glass(x, y, w, h, 18, 0, a);
+    for (r = 0; n > 0 && r < rows; r++)
+        for (c = 0; c < cols; c++)
+        {
+            const int idx = ((base + r) * cols + c) % n, on = ((base + r) * 7 + c * 3 + lit) % 11 == 0;
+            const float tx = x + 16 + c * (tw + gap), ty = y + 14 + r * rowH - scroll;
+            // its rows coming in at the bottom and going at the top fading (nothing drawn past the card's edges)
+            const float fade = sp_clamp01((ty - y) / (th * 0.7f)) * sp_clamp01((y + h - (ty + th)) / (th * 0.7f));
+            const int b = on ? 255 : 165;
+            if (fade <= 0 || !s_wallTex[idx]) continue;
+            UiImage(s_wallTex[idx], tx, ty, tw, th, 8, UiAlpha(D3DCOLOR_ARGB(255, b, b, b), a * fade));
+            if (on) UiRoundRing(tx - 2, ty - 2, tw + 4, th + 4, 9, 2.0f, UiAlpha(D3DCOLOR_ARGB(210, 255, 255, 255), a * fade));
+        }
+    _snprintf(line, sizeof(line) - 1, Tr(T_HOME_STORE_WALL), packs);
+    line[sizeof(line) - 1] = 0;
+    {
+        const float pw = UiTextWidth(UI_BOLD, 16, line) + 48;
+        UiRoundRect(x + (w - pw) * 0.5f, y + h - 62, pw, 42, 21, UiAlpha(D3DCOLOR_ARGB(210, 8, 9, 14), a), UiAlpha(D3DCOLOR_ARGB(210, 8, 9, 14), a));
+        home_text(UI_BOLD, 16, x + w * 0.5f, y + h - 41, UI_COL_TEXT, line, UI_CENTER, 0, a);
+    }
+}
+
+// The list view's Games: box art of the player's own games at random (those with theirs downloaded), a few at a
+// time, one changing every few seconds, faint at the card's right.
+#define HOME_SHELF 6
+struct HomeShelf { IDirect3DTexture9 *tex[HOME_SHELF]; int w[HOME_SHELF], h[HOME_SHELF]; float at[HOME_SHELF]; float next; int turn; unsigned seed; int asked; };
+static HomeShelf s_shelf;
+// The box art read on a thread of its own (from the disk, a PNG decoded and made small: the menu held a moment for it
+// each time one changed): one ROM asked for at a time, its picture back (NULL: none of its own).
+static CRITICAL_SECTION s_shelfLock;
+static HANDLE s_shelfEvt;
+static int s_shelfStarted;                 // 1 running, -1 could not start
+static std::string s_shelfWant;            // under s_shelfLock: the ROM asked for ("" none)
+static u8 *s_shelfRgba;                    // ... its picture read (taken by home_shelf_tick)
+static int s_shelfW, s_shelfH, s_shelfDone;
+static DWORD WINAPI shelf_thread(LPVOID)
+{
+    for (;;)
+    {
+        std::string path;
+        u8 *rgba = NULL, *small = NULL;
+        int w = 0, h = 0, got = -1, tw = 0, th = 0;
+        WaitForSingleObject(s_shelfEvt, INFINITE);
+        EnterCriticalSection(&s_shelfLock);
+        path.swap(s_shelfWant);
+        LeaveCriticalSection(&s_shelfLock);
+        if (path.empty()) continue;
+        if (ArtReadCover(path.c_str(), ART_KIND_BOX, &rgba, &w, &h, &got) && rgba && got == ART_KIND_BOX && w > 0 && h > 0)
+        {
+            h64_image_fit(w, h, 168, 232, &tw, &th);   // (twice its size on the card at most: a small texture to make)
+            small = tw == w && th == h ? rgba : h64_image_scale(rgba, w, h, tw, th);
+            if (small != rgba) free(rgba);
+        }
+        else { free(rgba); tw = th = 0; }
+        EnterCriticalSection(&s_shelfLock);
+        free(s_shelfRgba);
+        s_shelfRgba = small;
+        s_shelfW = tw; s_shelfH = th;
+        s_shelfDone = 1;
+        LeaveCriticalSection(&s_shelfLock);
+    }
+    return 0;
+}
+static void home_shelf_tick(IDirect3DDevice9 *dev, const std::vector<RomEntry> &roms)
+{
+    if (roms.empty()) return;
+    if (!s_shelfStarted)
+    {
+        HANDLE h;
+        InitializeCriticalSection(&s_shelfLock);
+        s_shelfEvt = CreateEvent(NULL, FALSE, FALSE, NULL);
+        h = s_shelfEvt ? CreateThread(NULL, 64 * 1024, shelf_thread, NULL, CREATE_SUSPENDED, NULL) : NULL;
+        if (h)
+        {
+            XSetThreadProcessor(h, 1);   // (the details' thread's: the emulated CPU's, idle in the menus)
+            SetThreadPriority(h, THREAD_PRIORITY_BELOW_NORMAL);
+            ResumeThread(h);
+            CloseHandle(h);
+            s_shelfStarted = 1;
+        }
+        else s_shelfStarted = -1;
+    }
+    if (s_shelfStarted < 0) return;
+    if (s_shelf.asked)
+    {
+        // its answer: made a texture here (a small one), in its place
+        u8 *rgba = NULL;
+        int w = 0, h = 0, done;
+        EnterCriticalSection(&s_shelfLock);
+        done = s_shelfDone;
+        if (done) { rgba = s_shelfRgba; w = s_shelfW; h = s_shelfH; s_shelfRgba = NULL; s_shelfDone = 0; }
+        LeaveCriticalSection(&s_shelfLock);
+        if (!done) return;
+        s_shelf.asked = 0;
+        if (rgba)
+        {
+            const int k = s_shelf.turn % HOME_SHELF;
+            if (s_shelf.tex[k]) UiImageRelease(dev, s_shelf.tex[k]);
+            s_shelf.tex[k] = UiImageCreate(dev, rgba, w, h);
+            s_shelf.w[k] = w; s_shelf.h[k] = h; s_shelf.at[k] = UiTime();
+            s_shelf.turn++;
+            s_shelf.next = UiTime() + (s_shelf.turn < HOME_SHELF ? 0.2f : 2.5f);   // (the first ones quickly, then one now and then)
+            free(rgba);
+        }
+        else s_shelf.next = UiTime() + 0.1f;   // a game without its box art: another one
+        return;
+    }
+    if (UiTime() < s_shelf.next) return;
+    s_shelf.seed = s_shelf.seed * 1103515245u + 12345u;
+    EnterCriticalSection(&s_shelfLock);
+    s_shelfWant = roms[(s_shelf.seed >> 8) % roms.size()].file;
+    LeaveCriticalSection(&s_shelfLock);
+    s_shelf.asked = 1;
+    SetEvent(s_shelfEvt);
+}
+static void home_shelf(float x, float y, float a)
+{
+    static const float pos[HOME_SHELF][2] = { { 0, 0 }, { 96, 44 }, { 0, 124 }, { 96, 168 }, { 0, 248 }, { 96, 286 } };
+    int k;
+    for (k = 0; k < HOME_SHELF; k++)
+    {
+        const float bw = 84, bh = 104;
+        float fw = bw, fh = bh, f;
+        if (!s_shelf.tex[k] || s_shelf.w[k] <= 0) continue;
+        f = sp_clamp01((UiTime() - s_shelf.at[k]) / 0.8f);
+        fh = bw * s_shelf.h[k] / s_shelf.w[k];
+        if (fh > bh) { fh = bh; fw = bh * s_shelf.w[k] / s_shelf.h[k]; }
+        UiImage(s_shelf.tex[k], x + pos[k][0] + (bw - fw) * 0.5f, y + pos[k][1] + (bh - fh) * 0.5f, fw, fh, 6, UiAlpha(D3DCOLOR_ARGB(255, 150, 150, 160), a * f * 0.85f));
+    }
+}
+
 static void home_store_free(IDirect3DDevice9 *dev, HomeStore *hs)
 {
     int k;
     for (k = 0; k < 2; k++)
         if (hs->tex[k]) { UiImageRelease(dev, hs->tex[k]); hs->tex[k] = NULL; }
+    // (the wall and the shelf too: made again the next time the menu opens)
+    for (k = 0; k < s_wallMade; k++)
+        if (s_wallTex[k]) { UiImageRelease(dev, s_wallTex[k]); s_wallTex[k] = NULL; }
+    s_wallMade = 0;
+    for (k = 0; k < HOME_SHELF; k++)
+        if (s_shelf.tex[k]) { UiImageRelease(dev, s_shelf.tex[k]); s_shelf.tex[k] = NULL; }
+    s_shelf.turn = 0;
+    s_shelf.next = 0;
+    // (an answer still on its way: taken and dropped the next time - s_shelf.asked stays as it is)
 }
 
 static void home_store_card(const HomeStore *hs, float x, float y, float w, float h, int on, float a)
@@ -24089,7 +28013,7 @@ static void home_store_card(const HomeStore *hs, float x, float y, float w, floa
                     UiAlpha(D3DCOLOR_ARGB((int)(255 * t), dim, dim, dim + 6), a));
     }
     if (on) UiRoundRing(x, y, w, h, r, 3.0f, SEL_RING(selection_pulse()));
-    else UiRoundRect(x + 20, y, 70, 4, 2, UiAlpha(HOME_STORE_GOLD, a), UiAlpha(HOME_STORE_GOLD, a));   // its colour's mark, over the picture
+    else if (!s_homeGlass) UiRoundRect(x + 20, y, 70, 4, 2, UiAlpha(HOME_STORE_GOLD, a), UiAlpha(HOME_STORE_GOLD, a));   // its colour's mark, over the picture
     _snprintf(line, sizeof(line) - 1, Tr(T_HOME_STORE_COUNT), hs->count, hs->mine);
     line[sizeof(line) - 1] = 0;
     home_block(UI_ICON_HD, HOME_STORE_GOLD, Tr(T_HOME_STORE), Tr(T_HOME_STORE_SUB), line, x, y, w, h, on, a);
@@ -24113,7 +28037,8 @@ static void home_ticker(float a)
     items.push_back(Tr(T_TICKER_TELEGRAM)); kinds.push_back(1);
     items.push_back(Tr(T_TICKER_DONATE)); kinds.push_back(2);
     for (k = 0; k < items.size(); k++) total += 28 + UiTextWidth(UI_REGULAR, 16, items[k].c_str()) + 60;
-    UiPanel(x0, y, x1 - x0, h, h * 0.5f);   // as every panel (Interface > Borders and panels)
+    if (s_homeGlass) home_glass(x0, y, x1 - x0, h, h * 0.5f, 0, a);   // (the main menu's glass)
+    else UiPanel(x0, y, x1 - x0, h, h * 0.5f);   // as every panel (Interface > Borders and panels)
     off = fmodf(UiTime() * speed, total);
     UiClip(cx0, y, cw, h);
     for (pass = 0, xx = cx0 - off; xx < cx0 + cw && pass < 4; pass++)
@@ -24425,6 +28350,13 @@ void UiQuitLaikaDraw(IDirect3DDevice9 *dev, int open)
 // seconds, then lies down again - once a session.
 #define HOME_LAIKA_X 1100.0f
 #define HOME_LAIKA_GROUND 690.0f
+#define HOME_VIEWS 3               // the main menu's looks (Config::homeView): classic cards, a dock, a list
+// Laika's place in each view: by the footer (classic, list), on the dock's top edge.
+static void home_laika_place(Laika *lk, int view)
+{
+    lk->x = view == 1 ? 1150.0f : HOME_LAIKA_X;
+    lk->ground = view == 1 ? 522.0f : HOME_LAIKA_GROUND;
+}
 #define HOME_LAIKA_SCALE 0.6f      // as big as in the setup assistant
 #define HOME_LAIKA_REST 60.0f      // lying this long ...
 #define HOME_LAIKA_ASK 15.0f       // ... then up asking this long (once a session: s_homeAsked), then lying for good
@@ -24500,7 +28432,12 @@ static int home_screen(IDirect3DDevice9 *dev, Config *c, const std::vector<RomEn
     UiInput in;
     HANDLE th;
     static int s_homeSel = HOME_GAMES;   // the card picked last: selected again on coming back (from Settings, Online...)
-    int sel = s_homeSel, k, laikaLay = 0;
+    static int rankWeek;                 // the Rankings card on this week's ranking (else all time's)
+    int view = c->homeView >= 0 && c->homeView < HOME_VIEWS ? c->homeView : 0;   // Config::homeView: the menu's look (BACK)
+    int sel = view != 0 && s_homeSel == HOME_WEEK ? HOME_GLOBAL : s_homeSel, k, laikaLay = 0, rankTrig = 3, lastPick;
+    float riseAt;             // when the cards rose in (the menu opening, another view)
+    float pickAt = -10.0f;    // when the dock's pick changed (its card comes in)
+    UiAnim pickAnim;          // the dock's highlight sliding
     DWORD idleAt;
     const float openAt = UiTime();
     Laika lk, newsLk, quitLk;
@@ -24542,11 +28479,16 @@ static int home_screen(IDirect3DDevice9 *dev, Config *c, const std::vector<RomEn
         s_homeHeld = 1;
     }
     // Laika: in jumping from the right to under the ranking, sitting there, lying down a while after
-    laikaSits = laika_enter(&lk, openAt + 0.4f, HOME_LAIKA_X, HOME_LAIKA_GROUND, HOME_LAIKA_SCALE, 3);
+    // (jumping in to where the view keeps her: moved after the jumps began, they took her past it - by the footer's B)
+    laikaSits = laika_enter(&lk, openAt + 0.4f, view == 1 ? 1150.0f : HOME_LAIKA_X, view == 1 ? 522.0f : HOME_LAIKA_GROUND, HOME_LAIKA_SCALE, 3);
     UiInputInit(&in);
     xb_audio_ui_sound(XB_SFX_OPEN);
     UiFade(0.45f);   // out of black (from the list, Online play, Settings)
     H64_INFO("[menu] main menu");
+    s_homeGlass = view != 0;
+    riseAt = openAt;
+    lastPick = sel;
+    memset(&pickAnim, 0, sizeof(pickAnim));
     idleAt = GetTickCount();
     s_homeNews = 0;
     if (news)
@@ -24596,13 +28538,28 @@ static int home_screen(IDirect3DDevice9 *dev, Config *c, const std::vector<RomEn
             UiInputInit(&in);
             continue;
         }
-        const float a = ease_out((UiTime() - openAt) / 0.35f);
+        const float a = ease_out((UiTime() - riseAt) / 0.35f);
         const int ready = s_home.done != 0;
         SYSTEMTIME st;
+        if (down & XINPUT_GAMEPAD_BACK)
         {
-            // the grid: [Games][Online][All time] over [Settings][Store][This week][All time] (by HOME_*; RESUME and
+            // BACK: the next view of the menu (classic cards, the dock, the list), kept for the next time
+            view = (view + 1) % HOME_VIEWS;
+            c->homeView = view;
+            if (s_hookPath) ConfigWriteMenuKeys(c, s_hookPath, 1);
+            s_homeGlass = view != 0;
+            if (view == 0 && sel == HOME_GLOBAL && rankWeek) sel = HOME_WEEK;
+            if (view != 0 && sel == HOME_WEEK) { sel = HOME_GLOBAL; rankWeek = 1; }
+            home_laika_place(&lk, view);
+            riseAt = UiTime() - 0.1f;   // its cards rising in again
+            memset(&pickAnim, 0, sizeof(pickAnim));
+            xb_audio_ui_sound(XB_SFX_TAB);
+            down &= ~(WORD)XINPUT_GAMEPAD_BACK;
+        }
+        if (view == 0)
+        {
+            // the grid: [Games][Online][All time] over [Settings][Store][This week][Most played] (by HOME_*; RESUME and
             // FRIENDS are never the card picked)
-            // (3.6: the most played games under the global ranking, right of this week's)
             static const int left[9] = { HOME_GLOBAL, HOME_GAMES, HOME_TOP, HOME_ONLINE, HOME_STORE, HOME_GAMES, HOME_GAMES, HOME_SETTINGS, HOME_WEEK };
             static const int right[9] = { HOME_ONLINE, HOME_GLOBAL, HOME_STORE, HOME_GAMES, HOME_TOP, HOME_GAMES, HOME_GAMES, HOME_WEEK, HOME_SETTINGS };
             static const int vert[9] = { HOME_SETTINGS, HOME_WEEK, HOME_GAMES, HOME_TOP, HOME_ONLINE, HOME_GAMES, HOME_GAMES, HOME_ONLINE, HOME_GLOBAL };
@@ -24611,8 +28568,27 @@ static int home_screen(IDirect3DDevice9 *dev, Config *c, const std::vector<RomEn
             if (down & XINPUT_GAMEPAD_DPAD_RIGHT) sel = right[sel];
             if (down & (XINPUT_GAMEPAD_DPAD_UP | XINPUT_GAMEPAD_DPAD_DOWN)) sel = vert[sel];
             if (sel != was) xb_audio_ui_sound(XB_SFX_MOVE);
+            if (sel != lastPick) { lastPick = sel; pickAt = UiTime(); }
         }
-        if (down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_START)) break;
+        else
+        {
+            // the dock (left and right) or the list (up and down) along the tiles, round at the ends; on Rankings, LT / RT
+            // all time or this week
+            int k2;
+            const WORD prev = view == 1 ? XINPUT_GAMEPAD_DPAD_LEFT : XINPUT_GAMEPAD_DPAD_UP, next = view == 1 ? XINPUT_GAMEPAD_DPAD_RIGHT : XINPUT_GAMEPAD_DPAD_DOWN;
+            for (k2 = 0; k2 < HOME_TILES && s_homeTiles[k2] != sel; k2++) {}
+            if (k2 == HOME_TILES) k2 = 0;
+            if (down & prev) { k2 = (k2 + HOME_TILES - 1) % HOME_TILES; xb_audio_ui_sound(XB_SFX_MOVE); }
+            if (down & next) { k2 = (k2 + 1) % HOME_TILES; xb_audio_ui_sound(XB_SFX_MOVE); }
+            sel = s_homeTiles[k2];
+            if (sel == HOME_GLOBAL && exp_triggers(&rankTrig)) { rankWeek = !rankWeek; xb_audio_ui_sound(XB_SFX_TAB); }
+            if (sel != lastPick) { lastPick = sel; pickAt = UiTime(); }
+        }
+        if (down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_START))
+        {
+            if (view != 0 && sel == HOME_GLOBAL && rankWeek) sel = HOME_WEEK;   // (this week's ranking ringed: that one)
+            break;
+        }
         if ((down & XINPUT_GAMEPAD_Y) && sel == HOME_GAMES && !last.empty()) { sel = HOME_RESUME; break; }   // the last game (its newest state)
         if ((down & XINPUT_GAMEPAD_Y) && sel == HOME_ONLINE && OnlineRegistered()) { sel = HOME_FRIENDS; break; }
         if (down & XINPUT_GAMEPAD_Y)
@@ -24629,15 +28605,21 @@ static int home_screen(IDirect3DDevice9 *dev, Config *c, const std::vector<RomEn
             continue;
         }
         if (down & XINPUT_GAMEPAD_X) { AboutScreen(dev); UiInputInit(&in); idleAt = GetTickCount(); }
-        if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK))
+        if (down & XINPUT_GAMEPAD_B)
         {
-            // leaving: Laika comes to ask, angry
+            // leaving: Laika comes to ask, angry (B only: BACK changes the view)
             quitting = 1;
             quitHeard = 0;
             quitSound = home_quit_start(&quitLk, UiTime());
         }
         views_take(dev);   // the list's pictures go on arriving meanwhile (asked by the intro's preload): it opens with them there
         home_store_tick(dev, &store);
+        if (view == 2)
+        {
+            home_wall_tick(dev);
+            if (!s_shelf.seed) s_shelf.seed = GetTickCount() | 1;
+            home_shelf_tick(dev, roms);
+        }
         dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
         UiBegin(dev);
         UiBackdrop();
@@ -24656,162 +28638,470 @@ static int home_screen(IDirect3DDevice9 *dev, Config *c, const std::vector<RomEn
         _snprintf(t, sizeof(t) - 1, "%02d/%02d/%04d", st.wDay, st.wMonth, st.wYear); t[sizeof(t) - 1] = 0;
         home_text(UI_REGULAR, 15, 1216, 84, UI_COL_TEXT2, t, UI_RIGHT, 0, a);
         if (c->showNews) home_ticker(a);
-        // Games (each card rising into place a little after the one before: home_rise)
-        home_rise(openAt, 0);
-        home_card(64, 150, 356, 236, blue, UI_ICON_CONTROLS, KODI_FX_STICK, Tr(T_HOME_GAMES), Tr(T_HOME_GAMES_SUB), sel == HOME_GAMES, a);
+        if (view == 0)
         {
-            // Games and favourites on one line
-            _snprintf(t, sizeof(t) - 1, "%d", (int)roms.size()); t[sizeof(t) - 1] = 0;
-            home_text(UI_REGULAR, 15, 88, 254, UI_COL_TEXT2, Tr(T_HOME_GAMES), UI_LEFT, sel == HOME_GAMES, a);
-            home_text(UI_BOLD, 15, 214, 254, UI_COL_TEXT, t, UI_RIGHT, sel == HOME_GAMES, a);
-            UiRect(232, 244, 1, 20, UiAlpha(UI_COL_LINE, a));
-            _snprintf(t, sizeof(t) - 1, "%d", (int)s_favs.size()); t[sizeof(t) - 1] = 0;
-            home_text(UI_REGULAR, 15, 250, 254, UI_COL_TEXT2, Tr(T_HOME_FAVS), UI_LEFT, sel == HOME_GAMES, a);
-            home_text(UI_BOLD, 15, 396, 254, UI_COL_TEXT, t, UI_RIGHT, sel == HOME_GAMES, a);
-        }
-        if (!last.empty())
-        {
-            // Continue: the game's cover (the list's), its name, its newest state; Y plays it from there.
-            const float bx = 80, by = 272, bw = 324, bh = 100, cx0 = bx + 10, cy0 = by + 8, cw = 62, ch = 84, tx0 = bx + 86, tw0 = bw - 96;
-            const ArtView *v = view_find(c->lastRom);
-            char fit[160];
-            UiRoundRect(bx, by, bw, bh, 12, UiAlpha(D3DCOLOR_ARGB(140, 18, 20, 34), a), UiAlpha(D3DCOLOR_ARGB(140, 18, 20, 34), a));   // 30 % lighter
-            if (v && v->cover && v->coverW > 0 && v->coverH > 0)
-                UiImageFill(v->cover, cx0, cy0, cw, ch, 6, (float)v->coverW, (float)v->coverH, UiAlpha(D3DCOLOR_ARGB(255, 255, 255, 255), a));
-            else if (resume.tex) UiImageFill(resume.tex, cx0, cy0, cw, ch, 6, (float)resume.texW, (float)resume.texH, UiAlpha(D3DCOLOR_ARGB(255, 255, 255, 255), a));
-            else UiRoundRect(cx0, cy0, cw, ch, 6, UiAlpha(D3DCOLOR_ARGB(255, 50, 54, 80), a), UiAlpha(D3DCOLOR_ARGB(255, 50, 54, 80), a));
-            home_text(UI_REGULAR, 13, tx0, by + 20, UI_COL_TEXT3, Tr(T_HOME_CONTINUE), UI_LEFT, 0, a);
-            UiTextFit(UI_BOLD, 18, tw0, last.c_str(), fit, sizeof(fit));
-            home_text(UI_BOLD, 18, tx0, by + 42, UI_COL_TEXT, fit, UI_LEFT, sel == HOME_GAMES, a);
-            if (resume.slot)
+            // The classic view (Interface's own panels): [Games][Online][All time] over [Settings][Store][This week][Most played]
+            // Games (each card rising into place a little after the one before: home_rise)
+            home_rise(riseAt, 0);
+            home_card(64, 150, 356, 236, blue, UI_ICON_CONTROLS, KODI_FX_STICK, Tr(T_HOME_GAMES), Tr(T_HOME_GAMES_SUB), sel == HOME_GAMES, a);
             {
-                _snprintf(t, sizeof(t) - 1, Tr(T_HOME_RESUME_SLOT), resume.slot, resume.ago);
-                t[sizeof(t) - 1] = 0;
-                UiTextFit(UI_REGULAR, 13, tw0, t, fit, sizeof(fit));
-                home_text(UI_REGULAR, 13, tx0, by + 64, UI_COL_TEXT2, fit, UI_LEFT, 0, a);
+                // Games and favourites on one line
+                _snprintf(t, sizeof(t) - 1, "%d", (int)roms.size()); t[sizeof(t) - 1] = 0;
+                home_text(UI_REGULAR, 15, 88, 254, UI_COL_TEXT2, Tr(T_HOME_GAMES), UI_LEFT, sel == HOME_GAMES, a);
+                home_text(UI_BOLD, 15, 214, 254, UI_COL_TEXT, t, UI_RIGHT, sel == HOME_GAMES, a);
+                UiRect(232, 244, 1, 20, UiAlpha(UI_COL_LINE, a));
+                _snprintf(t, sizeof(t) - 1, "%d", (int)s_favs.size()); t[sizeof(t) - 1] = 0;
+                home_text(UI_REGULAR, 15, 250, 254, UI_COL_TEXT2, Tr(T_HOME_FAVS), UI_LEFT, sel == HOME_GAMES, a);
+                home_text(UI_BOLD, 15, 396, 254, UI_COL_TEXT, t, UI_RIGHT, sel == HOME_GAMES, a);
             }
-            UiCircle(tx0 + 9, by + 86, 9, UiAlpha(D3DCOLOR_ARGB(255, 210, 170, 40), a));
-            UiText(UI_BOLD, 11, tx0 + 9, by + 86, UiAlpha(D3DCOLOR_ARGB(255, 255, 255, 255), a), "Y", UI_CENTER);
-            home_text(UI_REGULAR, 13, tx0 + 24, by + 86, UI_COL_TEXT2, Tr(T_HOME_RESUME_GO), UI_LEFT, 0, a);
-        }
-        // Online play
-        home_rise(openAt, 1);
-        home_card(440, 150, 356, 236, green, UI_ICON_GLOBE, UI_ICON_GLOBE, Tr(T_ONLINE), Tr(T_HOME_ONLINE_SUB), sel == HOME_ONLINE, a);
-        if (!OnlineRegistered())
-        {
-            paragraph(UI_REGULAR, 16, 469, 264, 300, 3, UiAlpha(D3DCOLOR_ARGB(160, 0, 0, 0), a), Tr(T_HOME_NO_PROFILE));   // its shadow
-            paragraph(UI_REGULAR, 16, 468, 262, 300, 3, UiAlpha(sel == HOME_ONLINE ? UI_COL_TEXT : UI_COL_TEXT2, a), Tr(T_HOME_NO_PROFILE));
+            if (!last.empty())
+            {
+                // Continue: the game's cover (the list's), its name, its newest state; Y plays it from there.
+                const float bx = 80, by = 272, bw = 324, bh = 100, cx0 = bx + 10, cy0 = by + 8, cw = 62, ch = 84, tx0 = bx + 86, tw0 = bw - 96;
+                const ArtView *v = view_find(c->lastRom);
+                char fit[160];
+                UiRoundRect(bx, by, bw, bh, 12, UiAlpha(D3DCOLOR_ARGB(140, 18, 20, 34), a), UiAlpha(D3DCOLOR_ARGB(140, 18, 20, 34), a));   // 30 % lighter
+                if (v && v->cover && v->coverW > 0 && v->coverH > 0)
+                    UiImageFill(v->cover, cx0, cy0, cw, ch, 6, (float)v->coverW, (float)v->coverH, UiAlpha(D3DCOLOR_ARGB(255, 255, 255, 255), a));
+                else if (resume.tex) UiImageFill(resume.tex, cx0, cy0, cw, ch, 6, (float)resume.texW, (float)resume.texH, UiAlpha(D3DCOLOR_ARGB(255, 255, 255, 255), a));
+                else UiRoundRect(cx0, cy0, cw, ch, 6, UiAlpha(D3DCOLOR_ARGB(255, 50, 54, 80), a), UiAlpha(D3DCOLOR_ARGB(255, 50, 54, 80), a));
+                home_text(UI_REGULAR, 13, tx0, by + 20, UI_COL_TEXT3, Tr(T_HOME_CONTINUE), UI_LEFT, 0, a);
+                UiTextFit(UI_BOLD, 18, tw0, last.c_str(), fit, sizeof(fit));
+                home_text(UI_BOLD, 18, tx0, by + 42, UI_COL_TEXT, fit, UI_LEFT, sel == HOME_GAMES, a);
+                if (resume.slot)
+                {
+                    _snprintf(t, sizeof(t) - 1, Tr(T_HOME_RESUME_SLOT), resume.slot, resume.ago);
+                    t[sizeof(t) - 1] = 0;
+                    UiTextFit(UI_REGULAR, 13, tw0, t, fit, sizeof(fit));
+                    home_text(UI_REGULAR, 13, tx0, by + 64, UI_COL_TEXT2, fit, UI_LEFT, 0, a);
+                }
+                UiCircle(tx0 + 9, by + 86, 9, UiAlpha(D3DCOLOR_ARGB(255, 210, 170, 40), a));
+                UiText(UI_BOLD, 11, tx0 + 9, by + 86, UiAlpha(D3DCOLOR_ARGB(255, 255, 255, 255), a), "Y", UI_CENTER);
+                home_text(UI_REGULAR, 13, tx0 + 24, by + 86, UI_COL_TEXT2, Tr(T_HOME_RESUME_GO), UI_LEFT, 0, a);
+            }
+            // Online play
+            home_rise(riseAt, 1);
+            home_card(440, 150, 356, 236, green, UI_ICON_GLOBE, UI_ICON_GLOBE, Tr(T_ONLINE), Tr(T_HOME_ONLINE_SUB), sel == HOME_ONLINE, a);
+            if (!OnlineRegistered())
+            {
+                paragraph(UI_REGULAR, 16, 469, 264, 300, 3, UiAlpha(D3DCOLOR_ARGB(160, 0, 0, 0), a), Tr(T_HOME_NO_PROFILE));   // its shadow
+                paragraph(UI_REGULAR, 16, 468, 262, 300, 3, UiAlpha(sel == HOME_ONLINE ? UI_COL_TEXT : UI_COL_TEXT2, a), Tr(T_HOME_NO_PROFILE));
+            }
+            else
+            {
+                const char *wait = ready ? NULL : "...";
+                _snprintf(t, sizeof(t) - 1, "%d", s_home.users); t[sizeof(t) - 1] = 0;
+                home_line(440, 262, 356, Tr(T_HOME_PLAYERS), wait ? wait : t, sel == HOME_ONLINE, a);
+                _snprintf(t, sizeof(t) - 1, "%d", s_home.rooms); t[sizeof(t) - 1] = 0;
+                home_line(440, 292, 356, Tr(T_HOME_ROOMS), wait ? wait : t, sel == HOME_ONLINE, a);
+                _snprintf(t, sizeof(t) - 1, "%d", s_home.unread); t[sizeof(t) - 1] = 0;
+                home_line(440, 322, 356, Tr(T_HOME_MESSAGES), wait ? wait : t, sel == HOME_ONLINE, a);
+                {
+                    // The friends online, as the last "still here" told: their avatars and how many; Y opens the friends.
+                    OnlineFriendOn fr[5];
+                    const int nf = OnlineFriendsOnline(fr, 5);
+                    char fit[120];
+                    float fx = 476;
+                    for (k = 0; k < nf; k++, fx += 30) online_avatar(fx, 360, 13, fr[k].avatar, fr[k].name);
+                    if (nf) _snprintf(t, sizeof(t) - 1, Tr(T_HOME_FRIENDS_ON), nf);
+                    else _snprintf(t, sizeof(t) - 1, "%s", Tr(T_HOME_FRIENDS_NONE));
+                    t[sizeof(t) - 1] = 0;
+                    UiTextFit(UI_REGULAR, 13, 772 - (nf ? fx : 464), t, fit, sizeof(fit));
+                    home_text(UI_REGULAR, 13, nf ? fx - 4 : 464, 360, UI_COL_TEXT2, fit, UI_LEFT, 0, a);
+                }
+            }
+            // Settings (narrow: the gear on top, its name, the version), then the Store, side by side under Games and Online
+            // play (with This week: three cards)
+            home_rise(riseAt, 3);
+            home_panel(64, 406, 130, 150, purple, UI_ICON_SYSTEM, sel == HOME_SETTINGS, a);
+            home_icon(UI_ICON_GEAR, 129, 458, 26, 1.5f, purple, sel == HOME_SETTINGS, a);
+            home_text(UI_BOLD, 19, 129, 504, UI_COL_TEXT, Tr(T_SETTINGS), UI_CENTER, sel == HOME_SETTINGS, a);
+            {
+                char fit[96];
+                _snprintf(t, sizeof(t) - 1, "v%s  -  %s", H64_VERSION_STRING, OnlineNewerRelease()[0] ? Tr(T_HOME_UPDATE) : Tr(T_HOME_UP_TO_DATE));
+                t[sizeof(t) - 1] = 0;
+                UiTextFit(UI_REGULAR, 12, 114, t, fit, sizeof(fit));
+                home_text(UI_REGULAR, 12, 129, 526, sel == HOME_SETTINGS ? D3DCOLOR_ARGB(230, 255, 255, 255) : UI_COL_TEXT3, fit, UI_CENTER, sel == HOME_SETTINGS, a);
+            }
+            home_rise(riseAt, 4);
+            home_store_card(&store, 210, 406, 293, 150, sel == HOME_STORE, a);
+            {
+                // The rankings: of all time on the right (its first six, this player's place), this week's (time played online)
+                // under Online play (its first three). Players > Ranking: the whole of both.
+                static const D3DCOLOR teal = D3DCOLOR_ARGB(255, 60, 200, 200);
+                HomeRow rows[6];
+                const char *msg = !OnlineRegistered() ? Tr(T_HOME_NO_PROFILE) : !ready ? "..." : NULL;
+                char me[96], sub[64];
+                int n = 0;
+                const char *gmsg = msg ? msg : !s_home.okGlobal ? Tr(T_HOME_RANK_OFF) : s_home.global.empty() ? Tr(T_HOME_GLOBAL_EMPTY) : NULL;
+                for (k = 0; !gmsg && k < (int)s_home.global.size() && n < 3; k++, n++)
+                {
+                    rows[n].pos = s_home.global[k].pos;
+                    rows[n].avatar = s_home.global[k].avatar;
+                    rows[n].name = s_home.global[k].name;
+                    home_total(rows[n].value, sizeof(rows[n].value), s_home.global[k].minutes);
+                }
+                me[0] = 0;
+                if (s_home.myRank > 0)
+                {
+                    char u[24];
+                    home_total(u, sizeof(u), s_home.myMinutes);
+                    _snprintf(me, sizeof(me) - 1, Tr(T_HOME_RANK_ME), s_home.myRank, u);
+                    me[sizeof(me) - 1] = 0;
+                }
+                home_rise(riseAt, 2);
+                home_rank_box(816, 150, 400, 236, gold, UI_ICON_GRAPHICS, Tr(T_HOME_GLOBAL), Tr(T_HOME_GLOBAL_SUB), 0, rows, n, 38, me[0] ? me : NULL, gmsg,
+                              sel == HOME_GLOBAL, a);
+                {
+                    // under it (3.6): this week's most played games online
+                    static int topLoads;
+                    const char *tmsg = msg ? msg : !s_home.okTop ? Tr(T_HOME_RANK_OFF) : s_home.top.empty() ? Tr(T_TOP_EMPTY) : NULL;
+                    topLoads = 1;
+                    home_top_box(dev, 816, 406, 400, 150, gold, s_home.top, tmsg, sel == HOME_TOP, a, &topLoads);
+                }
+                n = 0;
+                gmsg = msg ? msg : !s_home.ok ? Tr(T_HOME_RANK_OFF) : s_home.week.top.empty() ? Tr(T_HOME_RANK_EMPTY) : NULL;
+                for (k = 0; !gmsg && k < (int)s_home.week.top.size() && n < 3; k++, n++)
+                {
+                    rows[n].pos = s_home.week.top[k].pos;
+                    rows[n].avatar = s_home.week.top[k].avatar;
+                    rows[n].name = s_home.week.top[k].name;
+                    {
+                        // short on the narrow card: "3h 46m", "53m"
+                        const int mins = s_home.week.top[k].seconds / 60;
+                        if (mins >= 60) _snprintf(rows[n].value, sizeof(rows[n].value) - 1, "%dh %02dm", mins / 60, mins % 60);
+                        else _snprintf(rows[n].value, sizeof(rows[n].value) - 1, "%dm", mins);
+                        rows[n].value[sizeof(rows[n].value) - 1] = 0;
+                    }
+                }
+                sub[0] = 0;
+                if (ready && s_home.ok) { _snprintf(sub, sizeof(sub) - 1, Tr(T_HOME_WEEK_LEFT), s_home.week.daysLeft); sub[sizeof(sub) - 1] = 0; }
+                home_rise(riseAt, 5);
+                home_rank_box(519, 406, 277, 150, teal, UI_ICON_CHART, Tr(T_HOME_RANKING), sub, 1, rows, n, 27, NULL, gmsg, sel == HOME_WEEK, a);
+            }
+            UiSetShift(0, 0, 1.0f);   // (the cards' rise over)
+            if (OnlineHasServer())
+            {
+                char title[96], line[128];
+                D3DCOLOR dot;
+                char both[240], fit[240];
+                if (server_words(title, sizeof(title), line, sizeof(line), &dot, -1) == ONLINE_SRV_OK) line[0] = 0;   // "Server online" alone
+                _snprintf(both, sizeof(both) - 1, line[0] ? "%s  -  %s" : "%s", title, line);
+                both[sizeof(both) - 1] = 0;
+                // Quiet lines: a dot and small grey words (a box with a border was too much) - the server, then internet
+                UiCircle(75, 584, 5, UiAlpha(dot, a));
+                UiTextFit(UI_REGULAR, 14, 600, both, fit, sizeof(fit));
+                home_text(UI_REGULAR, 14, 88, 584, UI_COL_TEXT3, fit, UI_LEFT, 0, a);
+                {
+                    const int net = OnlineInternetState();
+                    UiCircle(75, 606, 5, UiAlpha(net == ONLINE_NET_YES ? D3DCOLOR_ARGB(255, 80, 210, 120) : D3DCOLOR_ARGB(255, 140, 142, 160), a));
+                    home_text(UI_REGULAR, 14, 88, 606, UI_COL_TEXT3, Tr(net == ONLINE_NET_YES ? T_NET_YES : net == ONLINE_NET_NO ? T_NET_NO : T_NET_CHECKING), UI_LEFT, 0, a);
+                }
+            }
         }
         else
         {
-            const char *wait = ready ? NULL : "...";
-            _snprintf(t, sizeof(t) - 1, "%d", s_home.users); t[sizeof(t) - 1] = 0;
-            home_line(440, 262, 356, Tr(T_HOME_PLAYERS), wait ? wait : t, sel == HOME_ONLINE, a);
-            _snprintf(t, sizeof(t) - 1, "%d", s_home.rooms); t[sizeof(t) - 1] = 0;
-            home_line(440, 292, 356, Tr(T_HOME_ROOMS), wait ? wait : t, sel == HOME_ONLINE, a);
-            _snprintf(t, sizeof(t) - 1, "%d", s_home.unread); t[sizeof(t) - 1] = 0;
-            home_line(440, 322, 356, Tr(T_HOME_MESSAGES), wait ? wait : t, sel == HOME_ONLINE, a);
-            {
-                // The friends online, as the last "still here" told: their avatars and how many; Y opens the friends.
-                OnlineFriendOn fr[5];
-                const int nf = OnlineFriendsOnline(fr, 5);
-                char fit[120];
-                float fx = 476;
-                for (k = 0; k < nf; k++, fx += 30) online_avatar(fx, 360, 13, fr[k].avatar, fr[k].name);
-                if (nf) _snprintf(t, sizeof(t) - 1, Tr(T_HOME_FRIENDS_ON), nf);
-                else _snprintf(t, sizeof(t) - 1, "%s", Tr(T_HOME_FRIENDS_NONE));
-                t[sizeof(t) - 1] = 0;
-                UiTextFit(UI_REGULAR, 13, 772 - (nf ? fx : 464), t, fit, sizeof(fit));
-                home_text(UI_REGULAR, 13, nf ? fx - 4 : 464, 360, UI_COL_TEXT2, fit, UI_LEFT, 0, a);
-            }
-        }
-        // Settings (narrow: the gear on top, its name, the version), then the Store, side by side under Games and Online
-        // play (with This week: three cards)
-        home_rise(openAt, 3);
-        home_panel(64, 406, 130, 150, purple, UI_ICON_SYSTEM, sel == HOME_SETTINGS, a);
-        home_icon(UI_ICON_GEAR, 129, 458, 26, 1.5f, purple, sel == HOME_SETTINGS, a);
-        home_text(UI_BOLD, 19, 129, 504, UI_COL_TEXT, Tr(T_SETTINGS), UI_CENTER, sel == HOME_SETTINGS, a);
+        if (view == 1)
         {
-            char fit[96];
-            _snprintf(t, sizeof(t) - 1, "v%s  -  %s", H64_VERSION_STRING, OnlineNewerRelease()[0] ? Tr(T_HOME_UPDATE) : Tr(T_HOME_UP_TO_DATE));
-            t[sizeof(t) - 1] = 0;
-            UiTextFit(UI_REGULAR, 12, 114, t, fit, sizeof(fit));
-            home_text(UI_REGULAR, 12, 129, 526, sel == HOME_SETTINGS ? D3DCOLOR_ARGB(230, 255, 255, 255) : UI_COL_TEXT3, fit, UI_CENTER, sel == HOME_SETTINGS, a);
-        }
-        home_rise(openAt, 4);
-        home_store_card(&store, 210, 406, 293, 150, sel == HOME_STORE, a);
-        {
-            // The rankings: of all time on the right (its first six, this player's place), this week's (time played online)
-            // under Online play (its first three). Players > Ranking: the whole of both.
-            static const D3DCOLOR teal = D3DCOLOR_ARGB(255, 60, 200, 200);
-            HomeRow rows[6];
-            const char *msg = !OnlineRegistered() ? Tr(T_HOME_NO_PROFILE) : !ready ? "..." : NULL;
-            char me[96], sub[64];
-            int n = 0;
-            const char *gmsg = msg ? msg : !s_home.okGlobal ? Tr(T_HOME_RANK_OFF) : s_home.global.empty() ? Tr(T_HOME_GLOBAL_EMPTY) : NULL;
-            for (k = 0; !gmsg && k < (int)s_home.global.size() && n < 3; k++, n++)
+            static const int icons[HOME_TILES] = { UI_ICON_CONTROLS, UI_ICON_GLOBE, UI_ICON_CHART, UI_ICON_TROPHY, UI_ICON_HD, UI_ICON_GEAR };
+            const float dx = 64, dy = 520, dw = 1152, dh = 110, tw = (dw - 24) / HOME_TILES;
+            char sub[96], fit[96];
+            int i;
+            home_rise(riseAt, 1);
+            home_glass(dx, dy, dw, dh, 20, 0, a);
             {
-                rows[n].pos = s_home.global[k].pos;
-                rows[n].avatar = s_home.global[k].avatar;
-                rows[n].name = s_home.global[k].name;
-                home_total(rows[n].value, sizeof(rows[n].value), s_home.global[k].minutes);
+                // the picked tile's highlight, sliding to it
+                float at = 0;
+                for (i = 0; i < HOME_TILES; i++) if (s_homeTiles[i] == sel) at = (float)i;
+                at = anim_step_rate(&pickAnim, at, !pickAnim.live, 14.0f, 0.002f);
+                s_homeGlass = 0;   // (the picked tile as the selection is drawn everywhere: Interface's colours and effects)
+                home_panel(dx + 12 + at * tw, dy + 12, tw - 12, dh - 24, blue, sel == HOME_GAMES ? KODI_FX_STICK : icons[(int)(at + 0.5f)], 1, a);
+                s_homeGlass = 1;
             }
-            me[0] = 0;
-            if (s_home.myRank > 0)
+            for (i = 0; i < HOME_TILES; i++)
             {
-                char u[24];
-                home_total(u, sizeof(u), s_home.myMinutes);
-                _snprintf(me, sizeof(me) - 1, Tr(T_HOME_RANK_ME), s_home.myRank, u);
-                me[sizeof(me) - 1] = 0;
-            }
-            home_rise(openAt, 2);
-            home_rank_box(816, 150, 400, 236, gold, UI_ICON_GRAPHICS, Tr(T_HOME_GLOBAL), Tr(T_HOME_GLOBAL_SUB), 0, rows, n, 38, me[0] ? me : NULL, gmsg,
-                          sel == HOME_GLOBAL, a);
-            {
-                // under it (3.6): this week's most played games online
-                static int topLoads;
-                const char *tmsg = msg ? msg : !s_home.okTop ? Tr(T_HOME_RANK_OFF) : s_home.top.empty() ? Tr(T_TOP_EMPTY) : NULL;
-                topLoads = 1;
-                home_top_box(dev, 816, 406, 400, 150, gold, s_home.top, tmsg, sel == HOME_TOP, a, &topLoads);
-            }
-            n = 0;
-            gmsg = msg ? msg : !s_home.ok ? Tr(T_HOME_RANK_OFF) : s_home.week.top.empty() ? Tr(T_HOME_RANK_EMPTY) : NULL;
-            for (k = 0; !gmsg && k < (int)s_home.week.top.size() && n < 3; k++, n++)
-            {
-                rows[n].pos = s_home.week.top[k].pos;
-                rows[n].avatar = s_home.week.top[k].avatar;
-                rows[n].name = s_home.week.top[k].name;
+                const int id = s_homeTiles[i], on = sel == id;
+                const float tx = dx + 12 + i * tw, ty = dy + 12, th = dh - 24;
+                const char *title = Tr(id == HOME_GAMES ? T_HOME_GAMES : id == HOME_ONLINE ? T_HOME_DOCK_ONLINE : id == HOME_GLOBAL ? T_HOME_DOCK_RANKS :
+                                       id == HOME_TOP ? T_TOP_MENU : id == HOME_STORE ? T_HOME_STORE : T_SETTINGS);
+                UiCircle(tx + 32, ty + th * 0.5f, 19, UiAlpha(D3DCOLOR_ARGB(on ? 70 : 40, 255, 255, 255), a));
+                UiSetScale(tx + 32, ty + th * 0.5f, 0.85f);
+                menu_icon(icons[i], tx + 32, ty + th * 0.5f, UiAlpha(icon_colour(icons[i], UI_COL_TEXT), a));
+                UiSetScale(0, 0, 1.0f);
+                sub[0] = 0;
+                if (id == HOME_GAMES) _snprintf(sub, sizeof(sub) - 1, "%d", (int)roms.size());
+                else if (id == HOME_ONLINE && OnlineRegistered() && ready) _snprintf(sub, sizeof(sub) - 1, Tr(T_HOME_DOCK_PLAYERS), s_home.users);
+                else if (id == HOME_GLOBAL && s_home.myRank > 0) _snprintf(sub, sizeof(sub) - 1, Tr(T_HOME_DOCK_PLACE), s_home.myRank);
+                else if (id == HOME_TOP) _snprintf(sub, sizeof(sub) - 1, "%s", Tr(T_TOP_HOME_SUB));
+                else if (id == HOME_STORE) _snprintf(sub, sizeof(sub) - 1, "%s", Tr(T_HOME_STORE_SUB));
+                else if (id == HOME_SETTINGS) _snprintf(sub, sizeof(sub) - 1, "v%s", H64_VERSION_STRING);
+                sub[sizeof(sub) - 1] = 0;
+                UiTextFit(UI_BOLD, 18, tw - 84, title, fit, sizeof(fit));
+                home_text(UI_BOLD, 18, tx + 60, ty + th * 0.5f - (sub[0] ? 11 : 0), UI_COL_TEXT, fit, UI_LEFT, on, a);
+                if (sub[0])
                 {
-                    // short on the narrow card: "3h 46m", "53m"
+                    UiTextFit(UI_REGULAR, 13, tw - 84, sub, fit, sizeof(fit));
+                    home_text(UI_REGULAR, 13, tx + 60, ty + th * 0.5f + 13, on ? D3DCOLOR_ARGB(235, 255, 255, 255) : UI_COL_TEXT3, fit, UI_LEFT, on, a);
+                }
+            }
+        }
+        else
+        {
+            // The list view: the options down a glass list on the left (each its symbol, its name, a fact), the picked one's
+            // card at its right, low; the background over the rest of the screen.
+            static const int icons[HOME_TILES] = { UI_ICON_CONTROLS, UI_ICON_GLOBE, UI_ICON_CHART, UI_ICON_TROPHY, UI_ICON_HD, UI_ICON_GEAR };
+            const float lx = 40, ly = 130, lw = 350, rh = 80;
+            char sub[96], fit[96];
+            int i;
+            home_rise(riseAt, 1);
+            home_glass(lx, ly, lw, 24 + HOME_TILES * rh, 20, 0, a);
+            {
+                float at = 0;
+                for (i = 0; i < HOME_TILES; i++) if (s_homeTiles[i] == sel) at = (float)i;
+                at = anim_step_rate(&pickAnim, at, !pickAnim.live, 14.0f, 0.002f);
+                s_homeGlass = 0;
+                home_panel(lx + 12, ly + 12 + at * rh, lw - 24, rh - 8, blue, sel == HOME_GAMES ? KODI_FX_STICK : icons[(int)(at + 0.5f)], 1, a);
+                s_homeGlass = 1;
+            }
+            for (i = 0; i < HOME_TILES; i++)
+            {
+                const int id = s_homeTiles[i], on = sel == id;
+                const float ty = ly + 12 + i * rh, cy = ty + (rh - 8) * 0.5f;
+                const char *title = Tr(id == HOME_GAMES ? T_HOME_GAMES : id == HOME_ONLINE ? T_HOME_DOCK_ONLINE : id == HOME_GLOBAL ? T_HOME_DOCK_RANKS :
+                                       id == HOME_TOP ? T_TOP_MENU : id == HOME_STORE ? T_HOME_STORE : T_SETTINGS);
+                UiCircle(lx + 50, cy, 21, UiAlpha(D3DCOLOR_ARGB(on ? 70 : 40, 255, 255, 255), a));
+                UiSetScale(lx + 50, cy, 0.9f);
+                menu_icon(icons[i], lx + 50, cy, UiAlpha(icon_colour(icons[i], UI_COL_TEXT), a));
+                UiSetScale(0, 0, 1.0f);
+                sub[0] = 0;
+                if (id == HOME_GAMES) _snprintf(sub, sizeof(sub) - 1, "%d %s  " UI_CH_MIDDOT "  %d %s", (int)roms.size(), Tr(T_HOME_GAMES), (int)s_favs.size(), Tr(T_HOME_FAVS));
+                else if (id == HOME_ONLINE && OnlineRegistered() && ready) _snprintf(sub, sizeof(sub) - 1, Tr(T_HOME_DOCK_PLAYERS), s_home.users);
+                else if (id == HOME_GLOBAL && s_home.myRank > 0) _snprintf(sub, sizeof(sub) - 1, Tr(T_HOME_DOCK_PLACE), s_home.myRank);
+                else if (id == HOME_TOP) _snprintf(sub, sizeof(sub) - 1, "%s", Tr(T_TOP_HOME_SUB));
+                else if (id == HOME_STORE) _snprintf(sub, sizeof(sub) - 1, "%s", Tr(T_HOME_STORE_SUB));
+                else if (id == HOME_SETTINGS) _snprintf(sub, sizeof(sub) - 1, "v%s", H64_VERSION_STRING);
+                sub[sizeof(sub) - 1] = 0;
+                UiTextFit(UI_BOLD, 20, lw - 110, title, fit, sizeof(fit));
+                home_text(UI_BOLD, 20, lx + 84, cy - (sub[0] ? 11 : 0), UI_COL_TEXT, fit, UI_LEFT, on, a);
+                if (sub[0])
+                {
+                    UiTextFit(UI_REGULAR, 13, lw - 110, sub, fit, sizeof(fit));
+                    home_text(UI_REGULAR, 13, lx + 84, cy + 14, on ? D3DCOLOR_ARGB(235, 255, 255, 255) : UI_COL_TEXT3, fit, UI_LEFT, on, a);
+                }
+            }
+        }
+        {
+            // the card over the dock: the picked tile's facts, coming in (rising, fading in) as the pick changes
+            // each card as big as what it shows, standing just over the dock
+            // (the list view: the whole room right of the list, but Settings')
+            const int big = view == 2 && sel != HOME_SETTINGS;
+            // (in it each as big as what it shows: the Store about a box's size, Games and Online a little smaller, the rankings
+            // without the empty room under their rows)
+            const float bigW = sel == HOME_GAMES ? 796.0f : sel == HOME_ONLINE ? 640.0f : 796.0f;
+            const float bigH = sel == HOME_GAMES ? 420.0f : sel == HOME_ONLINE ? 320.0f : sel == HOME_GLOBAL ? 440.0f : 504.0f;
+            const float cw = big ? bigW : sel == HOME_GAMES ? 500.0f : sel == HOME_TOP ? 440.0f : sel == HOME_GLOBAL ? 296.0f : sel == HOME_ONLINE ? 320.0f :
+                             sel == HOME_SETTINGS ? 340.0f : 420.0f;
+            const float ch = big ? bigH : sel == HOME_GAMES ? 200.0f : sel == HOME_ONLINE ? 168.0f : sel == HOME_GLOBAL ? 196.0f : 150.0f;
+            const float cx = view == 1 ? 64.0f : 420.0f, cy = big ? 130.0f : view == 1 ? 506 - ch : 640 - ch, ce = ease_out((UiTime() - pickAt) / 0.3f);
+            home_rise(riseAt, 0);
+            if (ce < 1.0f && UiTime() - riseAt > 0.7f) UiSetShift(0, (1.0f - ce) * 18.0f, ce);
+            if (sel == HOME_GAMES)
+            {
+                home_glass(cx, cy, cw, ch, 18, 0, a);
+                if (big) home_shelf(cx + cw - 214, cy + 26, a);   // the player's own box art at random, at its right
+                if (!last.empty())
+                {
+                    // Continue: the game's cover (the list's), its name, its newest state; Y plays it from there
+                    // (the list view: the cover big at the left, the words beside it larger)
+                    const float roomW = big ? 260.0f : 84.0f, roomH = big ? 356.0f : 114.0f, bx = cx + (big ? 28 : 22), by = cy + (big ? 30 : 22);
+                    const float tx0 = bx + roomW + (big ? 30 : 18), tw0 = cw - (tx0 - cx) - (big ? 240 : 24), ts = big ? 1.2f : 1.0f, ty0 = big ? by + 96 : by;
+                    const ArtView *v = view_find(c->lastRom);
+                    IDirect3DTexture9 *ct = v && v->cover && v->coverW > 0 ? v->cover : resume.tex;
+                    const float tw = v && v->cover && v->coverW > 0 ? (float)v->coverW : (float)resume.texW, th = v && v->cover && v->coverW > 0 ? (float)v->coverH : (float)resume.texH;
+                    char fit[160];
+                    if (ct && tw > 0 && th > 0)
+                    {
+                        // the whole cover, its own proportions, in the room (not cut to it)
+                        float fw = roomW, fh = roomW * th / tw;
+                        if (fh > roomH) { fh = roomH; fw = roomH * tw / th; }
+                        UiShadow(bx + (roomW - fw) * 0.5f, by + (roomH - fh) * 0.5f + 8, fw, fh, 8, 20, UiAlpha(D3DCOLOR_ARGB(140, 0, 0, 0), a));
+                        UiImage(ct, bx + (roomW - fw) * 0.5f, by + (roomH - fh) * 0.5f, fw, fh, 8, UiAlpha(D3DCOLOR_ARGB(255, 255, 255, 255), a));
+                    }
+                    home_text(UI_REGULAR, 14 * ts, tx0, ty0 + 12, UI_COL_TEXT3, Tr(T_HOME_CONTINUE), UI_LEFT, 0, a);
+                    UiTextFit(UI_BOLD, 22 * ts, tw0, last.c_str(), fit, sizeof(fit));
+                    home_text(UI_BOLD, 22 * ts, tx0, ty0 + 40 * ts, UI_COL_TEXT, fit, UI_LEFT, 0, a);
+                    if (resume.slot)
+                    {
+                        _snprintf(t, sizeof(t) - 1, Tr(T_HOME_RESUME_SLOT), resume.slot, resume.ago);
+                        t[sizeof(t) - 1] = 0;
+                        UiTextFit(UI_REGULAR, 14 * ts, tw0, t, fit, sizeof(fit));
+                        home_text(UI_REGULAR, 14 * ts, tx0, ty0 + 70 * ts, UI_COL_TEXT2, fit, UI_LEFT, 0, a);
+                    }
+                    UiCircle(tx0 + 10 * ts, ty0 + 104 * ts, 10 * ts, UiAlpha(D3DCOLOR_ARGB(255, 210, 170, 40), a));
+                    UiText(UI_BOLD, 12 * ts, tx0 + 10 * ts, ty0 + 104 * ts, UiAlpha(D3DCOLOR_ARGB(255, 255, 255, 255), a), "Y", UI_CENTER);
+                    home_text(UI_REGULAR, 14 * ts, tx0 + 28 * ts, ty0 + 104 * ts, UI_COL_TEXT2, Tr(T_HOME_RESUME_GO), UI_LEFT, 0, a);
+                }
+                else home_text(UI_BOLD, 22, cx + 24, cy + 50, UI_COL_TEXT, Tr(T_HOME_GAMES_SUB), UI_LEFT, 0, a);
+                _snprintf(t, sizeof(t) - 1, "%d %s  " UI_CH_MIDDOT "  %d %s", (int)roms.size(), Tr(T_HOME_GAMES), (int)s_favs.size(), Tr(T_HOME_FAVS));
+                t[sizeof(t) - 1] = 0;
+                home_text(UI_REGULAR, big ? 16.0f : 14.0f, big ? cx + 318 : cx + 24, cy + ch - (big ? 36 : 24), UI_COL_TEXT3, t, UI_LEFT, 0, a);
+            }
+            else if (sel == HOME_ONLINE)
+            {
+                home_glass(cx, cy, cw, ch, 18, 0, a);
+                home_text(UI_BOLD, big ? 30.0f : 22.0f, cx + (big ? 36 : 24), cy + (big ? 46 : 32), UI_COL_TEXT, Tr(T_ONLINE), UI_LEFT, 0, a);
+                if (!OnlineRegistered()) paragraph(UI_REGULAR, 16, cx + 24, cy + 62, cw - 48, 3, UiAlpha(UI_COL_TEXT2, a), Tr(T_HOME_NO_PROFILE));
+                else if (big)
+                {
+                    // the list view: players, rooms and messages large on the left; the friends online on the right
+                    static const int rowIcon[3] = { UI_ICON_FRIENDS, UI_ICON_PLAY, UI_ICON_CHAT };
+                    const int rowText[3] = { T_HOME_PLAYERS, T_HOME_ROOMS, T_HOME_MESSAGES }, rowVal[3] = { s_home.users, s_home.rooms, s_home.unread };
+                    OnlineFriendOn fr[8];
+                    const int nf = OnlineFriendsOnline(fr, 8);
+                    const float fxl = cx + 400;
+                    int r;
+                    for (r = 0; r < 3; r++)
+                    {
+                        const float ry = cy + 110 + r * 62;
+                        char fit[80];
+                        UiCircle(cx + 64, ry, 24, UiAlpha(D3DCOLOR_ARGB(60, 255, 255, 255), a));
+                        UiSetScale(cx + 64, ry, 1.0f);
+                        menu_icon(rowIcon[r], cx + 64, ry, UiAlpha(icon_colour(rowIcon[r], UI_COL_TEXT), a));
+                        UiSetScale(0, 0, 1.0f);
+                        UiTextFit(UI_REGULAR, 20, 240, Tr(rowText[r]), fit, sizeof(fit));
+                        home_text(UI_REGULAR, 20, cx + 100, ry, UI_COL_TEXT2, fit, UI_LEFT, 0, a);
+                        _snprintf(t, sizeof(t) - 1, "%d", rowVal[r]); t[sizeof(t) - 1] = 0;
+                        home_text(UI_BOLD, 26, cx + 364, ry, UI_COL_TEXT, ready ? t : "...", UI_RIGHT, 0, a);
+                    }
+                    UiRect(fxl - 20, cy + 80, 1, ch - 110, UiAlpha(UI_COL_LINE, a));
+                    _snprintf(t, sizeof(t) - 1, "%s", nf ? Tr(T_HOME_FRIENDS_ON) : Tr(T_HOME_FRIENDS_NONE));
+                    if (nf) _snprintf(t, sizeof(t) - 1, Tr(T_HOME_FRIENDS_ON), nf);
+                    t[sizeof(t) - 1] = 0;
+                    home_text(UI_BOLD, 15, fxl, cy + 94, UI_COL_TEXT, t, UI_LEFT, 0, a);
+                    for (k = 0; k < nf && cy + 130 + k * 30 < cy + ch - 18; k++)
+                    {
+                        char fit[64];
+                        const float fy = cy + 130 + k * 30;
+                        online_avatar(fxl + 12, fy, 11, fr[k].avatar, fr[k].name);
+                        UiTextFit(UI_REGULAR, 14, cw - (fxl - cx) - 50, fr[k].name, fit, sizeof(fit));
+                        home_text(UI_REGULAR, 14, fxl + 32, fy, UI_COL_TEXT2, fit, UI_LEFT, 0, a);
+                    }
+                }
+                else
+                {
+                    const char *wait = ready ? NULL : "...";
+                    OnlineFriendOn fr[6];
+                    const int nf = OnlineFriendsOnline(fr, 6);
+                    char fit[120];
+                    float fx = cx + 36;
+                    static const int rowIcon[3] = { UI_ICON_FRIENDS, UI_ICON_PLAY, UI_ICON_CHAT };
+                    const int rowText[3] = { T_HOME_PLAYERS, T_HOME_ROOMS, T_HOME_MESSAGES }, rowVal[3] = { s_home.users, s_home.rooms, s_home.unread };
+                    int r;
+                    for (r = 0; r < 3; r++)
+                    {
+                        // its symbol in a small circle, its name, its number at the card's right
+                        const float ry = cy + 64 + r * 26;
+                        char fit[80];
+                        UiCircle(cx + 36, ry, 11, UiAlpha(D3DCOLOR_ARGB(60, 255, 255, 255), a));
+                        UiSetScale(cx + 36, ry, 0.55f);
+                        menu_icon(rowIcon[r], cx + 36, ry, UiAlpha(icon_colour(rowIcon[r], UI_COL_TEXT), a));
+                        UiSetScale(0, 0, 1.0f);
+                        UiTextFit(UI_REGULAR, 16, cw - 120, Tr(rowText[r]), fit, sizeof(fit));
+                        home_text(UI_REGULAR, 16, cx + 56, ry, UI_COL_TEXT2, fit, UI_LEFT, 0, a);
+                        _snprintf(t, sizeof(t) - 1, "%d", rowVal[r]); t[sizeof(t) - 1] = 0;
+                        home_text(UI_BOLD, 16, cx + cw - 24, ry, UI_COL_TEXT, wait ? wait : t, UI_RIGHT, 0, a);
+                    }
+                    for (k = 0; k < nf; k++, fx += 30) online_avatar(fx, cy + 146, 13, fr[k].avatar, fr[k].name);
+                    if (nf) _snprintf(t, sizeof(t) - 1, Tr(T_HOME_FRIENDS_ON), nf);
+                    else _snprintf(t, sizeof(t) - 1, "%s", Tr(T_HOME_FRIENDS_NONE));
+                    t[sizeof(t) - 1] = 0;
+                    UiTextFit(UI_REGULAR, 13, cx + cw - 24 - (nf ? fx : cx + 24), t, fit, sizeof(fit));
+                    home_text(UI_REGULAR, 13, nf ? fx - 4 : cx + 24, cy + 146, UI_COL_TEXT2, fit, UI_LEFT, 0, a);
+                }
+            }
+            else if (sel == HOME_GLOBAL)
+            {
+                // both rankings side by side: of all time, and online (this week's time played online); LT / RT which
+                // one A opens (ringed)
+                static const D3DCOLOR teal = D3DCOLOR_ARGB(255, 60, 200, 200);
+                HomeRow rows[6];
+                const char *msg = !OnlineRegistered() ? Tr(T_HOME_NO_PROFILE) : !ready ? "..." : NULL;
+                const int most = big ? 6 : 3, comp = big ? 0 : 1;
+                const float bw2 = big ? (cw - 8) * 0.5f : cw, c2 = cx + bw2 + 8, rowH = big ? 48.0f : 30.0f;
+                char me[96], wsub[64];
+                int n = 0;
+                const char *gmsg = msg ? msg : !s_home.okGlobal ? Tr(T_HOME_RANK_OFF) : s_home.global.empty() ? Tr(T_HOME_GLOBAL_EMPTY) : NULL;
+                for (k = 0; !gmsg && k < (int)s_home.global.size() && n < most; k++, n++)
+                {
+                    rows[n].pos = s_home.global[k].pos;
+                    rows[n].avatar = s_home.global[k].avatar;
+                    rows[n].name = s_home.global[k].name;
+                    home_total(rows[n].value, sizeof(rows[n].value), s_home.global[k].minutes);
+                }
+                me[0] = 0;
+                if (s_home.myRank > 0)
+                {
+                    char u[24];
+                    home_total(u, sizeof(u), s_home.myMinutes);
+                    _snprintf(me, sizeof(me) - 1, Tr(T_HOME_RANK_ME), s_home.myRank, u);
+                    me[sizeof(me) - 1] = 0;
+                }
+                home_rank_box(cx, cy, bw2, ch, gold, UI_ICON_GRAPHICS, Tr(T_HOME_GLOBAL), Tr(T_HOME_GLOBAL_SUB), comp, rows, n, rowH, me[0] ? me : NULL, gmsg, 0, a);
+                n = 0;
+                gmsg = msg ? msg : !s_home.ok ? Tr(T_HOME_RANK_OFF) : s_home.week.top.empty() ? Tr(T_HOME_RANK_EMPTY) : NULL;
+                for (k = 0; !gmsg && k < (int)s_home.week.top.size() && n < most; k++, n++)
+                {
                     const int mins = s_home.week.top[k].seconds / 60;
+                    rows[n].pos = s_home.week.top[k].pos;
+                    rows[n].avatar = s_home.week.top[k].avatar;
+                    rows[n].name = s_home.week.top[k].name;
                     if (mins >= 60) _snprintf(rows[n].value, sizeof(rows[n].value) - 1, "%dh %02dm", mins / 60, mins % 60);
                     else _snprintf(rows[n].value, sizeof(rows[n].value) - 1, "%dm", mins);
                     rows[n].value[sizeof(rows[n].value) - 1] = 0;
                 }
+                wsub[0] = 0;
+                if (ready && s_home.ok) { _snprintf(wsub, sizeof(wsub) - 1, Tr(T_HOME_WEEK_LEFT), s_home.week.daysLeft); wsub[sizeof(wsub) - 1] = 0; }
+                home_rank_box(c2, cy, bw2, ch, teal, UI_ICON_CHART, Tr(T_HOME_RANK_ONLINE), wsub, comp, rows, n, rowH, NULL, gmsg, 0, a);
+                UiRoundRing(rankWeek ? c2 : cx, cy, bw2, ch, UiPanelRadius(18), 2.5f, SEL_RING(selection_pulse()));
+                home_text(UI_BOLD, 12, c2 + bw2 - 22, cy + ch - 18, UI_COL_TEXT3, "LT  " UI_CH_MIDDOT "  RT", UI_RIGHT, 0, a);
             }
-            sub[0] = 0;
-            if (ready && s_home.ok) { _snprintf(sub, sizeof(sub) - 1, Tr(T_HOME_WEEK_LEFT), s_home.week.daysLeft); sub[sizeof(sub) - 1] = 0; }
-            home_rise(openAt, 5);
-            home_rank_box(519, 406, 277, 150, teal, UI_ICON_CHART, Tr(T_HOME_RANKING), sub, 1, rows, n, 27, NULL, gmsg, sel == HOME_WEEK, a);
+            else if (sel == HOME_TOP)
+            {
+                static int topLoads;
+                const char *tmsg = !OnlineRegistered() ? Tr(T_HOME_NO_PROFILE) : !ready ? "..." : !s_home.okTop ? Tr(T_HOME_RANK_OFF) : s_home.top.empty() ? Tr(T_TOP_EMPTY) : NULL;
+                topLoads = 1;
+                home_top_box(dev, cx, cy, cw, ch, gold, s_home.top, tmsg, 0, a, &topLoads);
+            }
+            else if (sel == HOME_STORE && big) home_wall(cx, cy, cw, ch, store.count, a);
+            else if (sel == HOME_STORE) home_store_card(&store, cx, cy, cw, ch, 0, a);
+            else
+            {
+                // Settings: the version, whether it is up to date; the server and internet
+                char fit[160];
+                home_glass(cx, cy, cw, ch, 18, 0, a);
+                home_text(UI_BOLD, 22, cx + 24, cy + 32, UI_COL_TEXT, Tr(T_SETTINGS), UI_LEFT, 0, a);
+                _snprintf(t, sizeof(t) - 1, "LAIKA 64 v%s  " UI_CH_MIDDOT "  %s", H64_VERSION_STRING, OnlineNewerRelease()[0] ? Tr(T_HOME_UPDATE) : Tr(T_HOME_UP_TO_DATE));
+                t[sizeof(t) - 1] = 0;
+                home_text(UI_REGULAR, 15, cx + 24, cy + 62, UI_COL_TEXT2, t, UI_LEFT, 0, a);
+                if (OnlineHasServer())
+                {
+                    char title[96], line[128], both[240];
+                    D3DCOLOR dot;
+                    if (server_words(title, sizeof(title), line, sizeof(line), &dot, -1) == ONLINE_SRV_OK) line[0] = 0;
+                    _snprintf(both, sizeof(both) - 1, line[0] ? "%s  -  %s" : "%s", title, line);
+                    both[sizeof(both) - 1] = 0;
+                    UiCircle(cx + 30, cy + 96, 5, UiAlpha(dot, a));
+                    UiTextFit(UI_REGULAR, 14, cw - 70, both, fit, sizeof(fit));
+                    home_text(UI_REGULAR, 14, cx + 44, cy + 96, UI_COL_TEXT3, fit, UI_LEFT, 0, a);
+                }
+                {
+                    const int net = OnlineInternetState();
+                    UiCircle(cx + 30, cy + 120, 5, UiAlpha(net == ONLINE_NET_YES ? D3DCOLOR_ARGB(255, 80, 210, 120) : D3DCOLOR_ARGB(255, 140, 142, 160), a));
+                    home_text(UI_REGULAR, 14, cx + 44, cy + 120, UI_COL_TEXT3, Tr(net == ONLINE_NET_YES ? T_NET_YES : net == ONLINE_NET_NO ? T_NET_NO : T_NET_CHECKING), UI_LEFT, 0, a);
+                }
+            }
         }
         UiSetShift(0, 0, 1.0f);   // (the cards' rise over)
-        if (OnlineHasServer())
-        {
-            char title[96], line[128];
-            D3DCOLOR dot;
-            char both[240], fit[240];
-            if (server_words(title, sizeof(title), line, sizeof(line), &dot, -1) == ONLINE_SRV_OK) line[0] = 0;   // "Server online" alone
-            _snprintf(both, sizeof(both) - 1, line[0] ? "%s  -  %s" : "%s", title, line);
-            both[sizeof(both) - 1] = 0;
-            // Quiet lines: a dot and small grey words (a box with a border was too much) - the server, then internet
-            UiCircle(75, 584, 5, UiAlpha(dot, a));
-            UiTextFit(UI_REGULAR, 14, 600, both, fit, sizeof(fit));
-            home_text(UI_REGULAR, 14, 88, 584, UI_COL_TEXT3, fit, UI_LEFT, 0, a);
-            {
-                const int net = OnlineInternetState();
-                UiCircle(75, 606, 5, UiAlpha(net == ONLINE_NET_YES ? D3DCOLOR_ARGB(255, 80, 210, 120) : D3DCOLOR_ARGB(255, 140, 142, 160), a));
-                home_text(UI_REGULAR, 14, 88, 606, UI_COL_TEXT3, Tr(net == ONLINE_NET_YES ? T_NET_YES : net == ONLINE_NET_NO ? T_NET_NO : T_NET_CHECKING), UI_LEFT, 0, a);
-            }
         }
         {
             // A pack coming down or being made (Settings > HD textures; "Download all" goes on in the background).
@@ -24828,8 +29118,8 @@ static int home_screen(IDirect3DDevice9 *dev, Config *c, const std::vector<RomEn
                 if (totalKb) _snprintf(line, sizeof(line) - 1, "%u %%  -  %u / %u MB", doneKb * 100u / totalKb, doneKb >> 10, totalKb >> 10);
                 else line[0] = 0;
                 line[sizeof(line) - 1] = 0;
-                home_bar(440, 572, 356, 0, title, line, a);
-                if (totalKb) UiRoundRect(440 + 20, 572 + 50, (356 - 40) * (float)doneKb / totalKb, 3, 1, UiAlpha(gold, a), UiAlpha(gold, a));
+                home_bar(view == 0 ? 440 : 760, view == 0 ? 572 : 440, view == 0 ? 356 : 456, 0, title, line, a);
+                if (totalKb) UiRoundRect((view == 0 ? 440 : 760) + 20, (view == 0 ? 572 : 440) + 50, ((view == 0 ? 356 : 456) - 40) * (float)doneKb / totalKb, 3, 1, UiAlpha(gold, a), UiAlpha(gold, a));
             }
             else if (HiresPrefetchStatus(&ptitle, &doneKb, &totalKb) && ptitle)
             {
@@ -24839,7 +29129,7 @@ static int home_screen(IDirect3DDevice9 *dev, Config *c, const std::vector<RomEn
                 if (totalKb) _snprintf(line, sizeof(line) - 1, "%u %%  -  %u / %u MB", doneKb * 100u / totalKb, doneKb >> 10, totalKb >> 10);
                 else line[0] = 0;
                 line[sizeof(line) - 1] = 0;
-                home_bar(440, 572, 356, 0, title, line, a);
+                home_bar(view == 0 ? 440 : 760, view == 0 ? 572 : 440, view == 0 ? 356 : 456, 0, title, line, a);
             }
         }
         if (!laikaLay && UiTime() > laikaSits + 6.0f)
@@ -24898,6 +29188,9 @@ static int home_screen(IDirect3DDevice9 *dev, Config *c, const std::vector<RomEn
     }
     // (Laika's pictures, the avatars and flags kept: s_homeHeld)
     if (sel != HOME_QUIT) s_homeSel = sel == HOME_RESUME ? HOME_GAMES : sel == HOME_FRIENDS ? HOME_ONLINE : sel;
+    if (view != 0 && sel == HOME_WEEK) rankWeek = 1;
+    else if (view != 0 && sel == HOME_GLOBAL) rankWeek = 0;
+    s_homeGlass = 0;   // (the other screens' panels as they are)
     if (sel == HOME_RESUME) s_resumeSlot = resume.slot;
     if (resume.tex) UiImageRelease(dev, resume.tex);
     home_store_free(dev, &store);
@@ -24971,6 +29264,114 @@ static void browser_pill(int kind, float at, int design)
     UiText(UI_BOLD, 11, x + 13, cy, UiAlpha(UI_COL_TEXT2, a), "RT", UI_CENTER);
 }
 
+// ---- START in the game list: the View panel, on the right over the list, which goes on behind it and shows each
+// change at once (each one saved as it is made). The views' own settings: every view takes them as they are here.
+enum { VP_DESIGN = 0, VP_KIND, VP_BOX3D, VP_VIDEOBG, VP_GAMEBG, VP_PREVIEW, VP_CYCLE, VP_TRANSDESC, VP_HINTS, VP_COUNT };   // (the background effect: Interface's own page)
+static int s_vpSel;
+static float s_vpAt;
+
+// A row's name and value.
+static void view_panel_row(const Config *c, int row, const char **name, const char **value)
+{
+    switch (row)
+    {
+    case VP_DESIGN: *name = Tr(T_DESIGN); *value = Tr(s_designLabels[c->browserDesign >= 0 && c->browserDesign < BD_COUNT ? c->browserDesign : 0]); break;
+    case VP_KIND: *name = Tr(T_GAME_IMAGES); *value = Tr(s_artKindLabels[c->artKind >= 0 && c->artKind < CONFIG_ART_COUNT ? c->artKind : 0]); break;
+    case VP_BOX3D: *name = Tr(T_ART_BOX3D_SS); *value = Tr(c->artBox3dSs ? T_ON : T_OFF); break;
+    case VP_VIDEOBG: *name = Tr(T_VIDEO_BG); *value = Tr(!c->videoBackdrop || c->gameBackdrop ? T_OFF : c->videoBackdrop == 2 ? T_VIDEOBG_MUTE : T_VIDEOBG_SOUND); break;
+    case VP_GAMEBG: *name = Tr(T_GAME_BG); *value = Tr(c->gameBackdrop ? T_ON : T_OFF); break;
+    case VP_PREVIEW: *name = Tr(T_PREVIEW_VIDEO); *value = Tr(c->previewVideo ? T_ON : T_OFF); break;
+    case VP_CYCLE: *name = Tr(T_ART_CYCLE); *value = Tr(c->artCycle ? T_ON : T_OFF); break;
+    case VP_TRANSDESC: *name = Tr(T_TRANSLATE_DESC); *value = Tr(c->descTranslate ? T_ON : T_OFF); break;
+    default: *name = Tr(T_HIDE_HINTS); *value = Tr(c->hideHints ? T_ON : T_OFF); break;
+    }
+}
+
+// Its buttons while open: up/down a row, left/right (or A) its value, START or B close it. 1 when the
+// view changed (the list then places its page again), 2 when it closed, else 0.
+static int view_panel_input(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, WORD down)
+{
+    const int dir = (down & XINPUT_GAMEPAD_DPAD_RIGHT) || (down & XINPUT_GAMEPAD_A) ? 1 : (down & XINPUT_GAMEPAD_DPAD_LEFT) ? -1 : 0;
+    int r = 0;
+    if (down & (XINPUT_GAMEPAD_START | XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) { xb_audio_ui_sound(XB_SFX_BACK); return 2; }
+    if (down & XINPUT_GAMEPAD_DPAD_UP) { s_vpSel = (s_vpSel + VP_COUNT - 1) % VP_COUNT; xb_audio_ui_sound(XB_SFX_MOVE); }
+    if (down & XINPUT_GAMEPAD_DPAD_DOWN) { s_vpSel = (s_vpSel + 1) % VP_COUNT; xb_audio_ui_sound(XB_SFX_MOVE); }
+    if (!dir) return 0;
+    switch (s_vpSel)
+    {
+    case VP_DESIGN: c->browserDesign = (c->browserDesign + dir + BD_COUNT) % BD_COUNT; r = 1; break;
+    case VP_KIND: c->artKind = ((c->artKind >= 0 && c->artKind < CONFIG_ART_COUNT ? c->artKind : 0) + dir + CONFIG_ART_COUNT) % CONFIG_ART_COUNT; break;
+    case VP_BOX3D: c->artBox3dSs = !c->artBox3dSs; break;
+    case VP_VIDEOBG:
+    {
+        // as Interface > Background videos: off, with its sound, without it; on, the pictures behind off
+        const int now = c->videoBackdrop && !c->gameBackdrop ? c->videoBackdrop : 0;
+        c->videoBackdrop = (now + (dir < 0 ? 2 : 1)) % 3;
+        if (c->videoBackdrop) { c->gameBackdrop = 0; c->previewVideo = 1; c->gameMusic = 0; }
+        break;
+    }
+    case VP_GAMEBG: c->gameBackdrop = !c->gameBackdrop; if (c->gameBackdrop) c->videoBackdrop = 0; break;
+    case VP_PREVIEW: c->previewVideo = !c->previewVideo; if (c->previewVideo) c->gameMusic = 0; break;
+    case VP_CYCLE: c->artCycle = !c->artCycle; break;
+    case VP_TRANSDESC: c->descTranslate = !c->descTranslate; ArtSetLang(art_lang(c)); break;   // the descriptions read again in it
+    default: c->hideHints = !c->hideHints; break;
+    }
+    xb_audio_ui_sound(dir < 0 ? XB_SFX_VALUE_DOWN : XB_SFX_VALUE_UP);
+    ui_from_config(c);   // the list behind as it is now (the 3D boxes, the pictures and video behind, the buttons)
+    preview_apply(c);
+    if (ArtGetKind() != art_kind_of(c))
+    {
+        // another kind of picture: every view read again in it
+        views_clear(dev);
+        ArtSetKind(art_kind_of(c));
+        r = 1;
+    }
+    ConfigWriteMenuKeys(c, settingsPath, 1);
+    return r;
+}
+
+static void view_panel_draw(const Config *c)
+{
+    const float a = ease_out((UiTime() - s_vpAt) / 0.2f), w = 460, x = UI_WIDTH - 20 - w + 40 * (1 - a), y = 20, h = UI_HEIGHT - 90, rh = 48;
+    char line[160], fit[128];
+    int k;
+    UiRect(0, 0, UI_WIDTH, UI_HEIGHT, UiAlpha(D3DCOLOR_ARGB(90, 0, 0, 0), a));
+    UiPanel(x, y, w, h, 22);   // (no glow round it)
+    UiText(UI_BOLD, 28, x + 30, y + 38, UiAlpha(UI_COL_TEXT, a), Tr(T_VIEW_PANEL), UI_LEFT);
+    UiText(UI_REGULAR, 14, x + 30, y + 70, UiAlpha(UI_COL_TEXT3, a), Tr(T_VIEW_PANEL_SUB), UI_LEFT);
+    for (k = 0; k < VP_COUNT; k++)
+    {
+        const char *name, *value;
+        const float ry = y + 96 + k * rh;
+        view_panel_row(c, k, &name, &value);
+        if (k == s_vpSel)
+        {
+            selection_glow(x + 20, ry, w - 40, rh - 6, 10, selection_pulse());
+            UiRoundRect(x + 20, ry, w - 40, rh - 6, 10, UiAlpha(SEL_HI(70), a), UiAlpha(SEL_HI(40), a));
+            _snprintf(line, sizeof(line) - 1, "<  %s  >", value);
+        }
+        else _snprintf(line, sizeof(line) - 1, "%s", value);
+        line[sizeof(line) - 1] = 0;
+        UiTextFit(UI_BOLD, 16, 190, line, fit, sizeof(fit));
+        UiText(UI_BOLD, 16, x + w - 36, ry + (rh - 6) * 0.5f, UiAlpha(k == s_vpSel ? UI_COL_TEXT : UI_COL_TEXT2, a), fit, UI_RIGHT);
+        UiTextFit(k == s_vpSel ? UI_BOLD : UI_REGULAR, 17, w - 260, name, fit, sizeof(fit));
+        UiText(k == s_vpSel ? UI_BOLD : UI_REGULAR, 17, x + 36, ry + (rh - 6) * 0.5f, UiAlpha(UI_COL_TEXT, a), fit, UI_LEFT);
+    }
+    if (s_vpSel == VP_KIND)
+    {
+        // every kind there is, on the row of Game images
+        line[0] = 0;
+        for (k = 0; k < CONFIG_ART_COUNT; k++)
+        {
+            if (k) strncat(line, "  " UI_CH_MIDDOT "  ", sizeof(line) - strlen(line) - 1);
+            strncat(line, Tr(s_artKindLabels[k]), sizeof(line) - strlen(line) - 1);
+        }
+        UiTextFit(UI_REGULAR, 13, w - 60, line, fit, sizeof(fit));
+        UiText(UI_REGULAR, 13, x + 30, y + h - 26, UiAlpha(UI_COL_TEXT3, a), fit, UI_LEFT);
+    }
+    UiScreenFooter(Tr(T_FOOT_VIEW_PANEL));
+}
+
 int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char *path, size_t pathSize)
 {
     static int s_booted;   // the first visit of this session (Settings > System > Game at start)
@@ -24994,6 +29395,7 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
     int pillKind = PILL_NONE;   // the note at the top: the view or the category just changed (browser_pill) ...
     float pillAt = -10.0f;      // ... and when
     msg[0] = 0;
+    s_viewPanel = 0;   // START's View panel: closed when the list comes back
     // Every folder of Settings > Paths, there to be filled from the first start on; the ROMs' read from its own.
     paths_apply(c);
     paths_create(c);
@@ -25376,10 +29778,34 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
         if (n && c->previewVideo && c->artCycle && preview_alpha(roms[sel].file.c_str()) > 0 && PreviewRounds() >= 1)
             pvSkip = roms[sel].file;   // its video played once: its pictures take turns now
         // By themselves after a moment on it (Game images > Pictures taking turns), never under its video.
-        art_auto_turn(n && c->artCycle && !design_still(c->browserDesign) && preview_alpha(roms[sel].file.c_str()) <= 0 ? roms[sel].file : std::string());
+        art_auto_turn(n && c->artCycle && preview_alpha(roms[sel].file.c_str()) <= 0 ? roms[sel].file : std::string());
         music_volume_stick(c, settingsPath, 1);   // RS up and down: the menus' music volume; left and right: the track
         s_hookCfg = c;                          // (and in every menu opened from here: global_notes)
         s_hookPath = settingsPath;
+        if (s_viewPanel)
+        {
+            // START's View panel: its buttons alone (the list keeps going behind it)
+            int vr = view_panel_input(dev, c, settingsPath, down);
+            if (vr == 2) s_viewPanel = 0;
+            if (vr == 1)
+            {
+                // another view or kind of picture: placed as BACK places it
+                viewAt = UiTime();
+                pillKind = PILL_VIEW;
+                pillAt = viewAt;
+                page = n ? sel / grid_per_page(grid_layout(c->browserDesign)) : 0;
+                if (sel < top || sel >= top + rows) top = sel >= rows ? sel - rows + 1 : 0;
+                lastSel = -1;
+            }
+            down = 0;
+        }
+        else if ((down & XINPUT_GAMEPAD_START) && s_romsTotal && !homeGo)
+        {
+            s_viewPanel = 1;
+            s_vpAt = UiTime();
+            xb_audio_ui_sound(XB_SFX_OPEN);
+            down = 0;
+        }
         if ((down & XINPUT_GAMEPAD_B) || homeGo == 3)
         {
             // Back to the main menu (B, or leaving Online play); its card picked as at the start (quitting LAIKA is there now).
@@ -25828,6 +30254,7 @@ int RomBrowser(IDirect3DDevice9 *dev, Config *c, const char *settingsPath, char 
                 if (vd > 0) UiRoundRect(right - bw, cy - 3, bw * vd / vt, 6, 3, UI_COL_ACCENT_HI, UI_COL_ACCENT);
             }
         }
+        if (s_viewPanel) view_panel_draw(c);
         music_volume_bar(c->volumeMusic);
         music_now_bar();
         if (msg[0])

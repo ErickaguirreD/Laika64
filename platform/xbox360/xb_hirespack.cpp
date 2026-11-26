@@ -18,6 +18,7 @@
 #include "xb_net.h"
 #include "xb_hirespack.h"
 #include "xb_ui.h"
+#include "xb_pack_thumbs.h"
 
 #include "7z.h"
 #include "7zCrc.h"
@@ -1659,9 +1660,44 @@ static DWORD WINAPI image_thread(LPVOID)
     return 0;
 }
 
+// A pack's picture kept in the program (xb_pack_thumbs.h), by its address: its JPEG and size, NULL without one.
+static const unsigned char *pack_thumb(const char *url, long *size)
+{
+    int k;
+    for (k = 0; url && k < PACK_THUMB_COUNT; k++)
+        if (!strcmp(s_packThumbs[k].url, url)) { *size = s_packThumbs[k].size; return s_packThumbs[k].jpg; }
+    return NULL;
+}
+
+int HiresPackThumbCount(void) { return PACK_THUMB_COUNT; }
+unsigned char *HiresPackThumbDecode(int k, int maxW, int maxH, int *w, int *h)
+{
+    *w = *h = 0;
+    return k >= 0 && k < PACK_THUMB_COUNT ? UiDecodeImage(s_packThumbs[k].jpg, s_packThumbs[k].size, maxW, maxH, w, h) : NULL;
+}
+
 int HiresPackImage(int i, const unsigned char **rgba, int *w, int *h)
 {
     if (i < 0 || i >= PACK_COUNT || !s_packs[i].image) return HPINFO_FAILED;
+    if (s_img[i].state == HPINFO_NONE)
+    {
+        // kept in the program: at once (a clean install has none downloaded yet)
+        long size = 0;
+        const unsigned char *jpg = pack_thumb(s_packs[i].image, &size);
+        if (jpg)
+        {
+            int tw = 0, th = 0;
+            unsigned char *px = UiDecodeImage(jpg, size, 480, 270, &tw, &th);
+            if (px)
+            {
+                free(s_img[i].rgba);
+                s_img[i].rgba = px;
+                s_img[i].w = tw;
+                s_img[i].h = th;
+                InterlockedExchange(&s_img[i].state, HPINFO_OK);
+            }
+        }
+    }
     if (s_img[i].state == HPINFO_NONE)
     {
         InterlockedExchange(&s_img[i].state, HPINFO_LOADING);
@@ -1710,6 +1746,7 @@ static DWORD WINAPI image_prefetch_thread(LPVOID)
         u32 len = 0;
         DWORD attr;
         if (!url || !s_imgCache[0]) continue;
+        { long sz; if (pack_thumb(url, &sz)) continue; }   // (kept in the program: nothing to download)
         image_cache_path(url, cached, sizeof(cached));
         attr = GetFileAttributesA(cached);
         if (attr != (DWORD)-1) continue;   // there already

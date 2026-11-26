@@ -111,6 +111,7 @@ void ConfigDefaults(Config *c)
     c->startRom[0] = 0;
     c->shotBtn1 = c->shotBtn2 = -1;
     c->browserDesign = 0;
+    c->homeView = 0;
     c->bgEffect = 18;   // the nebula (BGFX_NEBULA): what the setup assistant shows
     c->fxColor[0] = c->fxColor[1] = c->fxColor[2] = 0;   // the effect's own colours
     c->fxOpacity = 100;
@@ -184,6 +185,8 @@ void ConfigDefaults(Config *c)
     c->stretch = 1;   // "16:9 by software" (the wider 3D) off: the 4:3 picture stretched, no graphics errors
     c->asyncGfx = 1;
     c->netBlackhole = 0;
+    c->netChatShow = 1;
+    c->netPlayersShow = 1;
     c->parseWorker = 1;
     c->asyncAudio = 1;
     c->audioCycles = 100000;
@@ -221,6 +224,7 @@ int ConfigParseFile(Config *c, const char *path)
         if (line[0] == '#' || line[0] == ';' || !eq) continue;
         *eq = 0;
         // Outside the chain below: it is at the compiler's limit of nested else-ifs.
+        if (!strcmp(line, "homeview")) c->homeView = atoi(eq + 1);   // (out of the chain below: it is at the compiler's limit)
         if (!strcmp(line, "devmode")) c->devMode = atoi(eq + 1);
         if (!strcmp(line, "audiocheck")) c->audioCheck = atoi(eq + 1);
         if (!strcmp(line, "gfxlog")) c->gfxLog = atoi(eq + 1);
@@ -254,6 +258,8 @@ int ConfigParseFile(Config *c, const char *path)
         if (!strcmp(line, "res169")) c->res169 = atoi(eq + 1);
         if (!strcmp(line, "reswide")) c->resWide = atoi(eq + 1) != 0;
         if (!strcmp(line, "netblackhole")) c->netBlackhole = atoi(eq + 1);   // (out of the long chain below: VS2010's nesting limit)
+        if (!strcmp(line, "netchat")) c->netChatShow = atoi(eq + 1) != 0;
+        if (!strcmp(line, "netplayers")) c->netPlayersShow = atoi(eq + 1) != 0;
         if (!strcmp(line, "resolution"))
         {
             // Older files: 1-3 native x1, x2, x3 (4:3), 4 HD 1280x720 (16:9).
@@ -507,7 +513,7 @@ int ConfigWriteMenuKeys(const Config *c, const char *path, int withLastRom)
     fprintf(f, "hk_save=%X\nhk_load=%X\nhk_slotprev=%X\nhk_slotnext=%X\nhk_shot=%X\n", c->hotkey[HK_SAVE], c->hotkey[HK_LOAD],
             c->hotkey[HK_SLOT_PREV], c->hotkey[HK_SLOT_NEXT], c->hotkey[HK_SHOT]);
     fprintf(f, "padloss=%d\nautosaveslot=%d\nbatterywarn=%d\nuisounds=%d\n", c->padLoss, c->autoSaveSlot, c->batteryWarn, c->uiSounds);
-    if (withLastRom) fprintf(f, "artdownload=%d\nartextras=%d\nartbg=%d\nartbox3d=%d\nbrowserdesign=%d\nbgeffect=%d\n", c->artDownload, c->artExtras, c->artBackground, c->artBox3dSs, c->browserDesign, c->bgEffect);
+    if (withLastRom) fprintf(f, "artdownload=%d\nartextras=%d\nartbg=%d\nartbox3d=%d\nbrowserdesign=%d\nbgeffect=%d\nhomeview=%d\n", c->artDownload, c->artExtras, c->artBackground, c->artBox3dSs, c->browserDesign, c->bgEffect, c->homeView);
     if (withLastRom)
         fprintf(f, "fxcolor1=%d\nfxcolor2=%d\nfxcolor3=%d\nfxopacity=%d\nfxspeed=%d\n", c->fxColor[0], c->fxColor[1], c->fxColor[2],
                 c->fxOpacity, c->fxSpeed);
@@ -535,6 +541,7 @@ int ConfigWriteMenuKeys(const Config *c, const char *path, int withLastRom)
     if (withLastRom) fprintf(f, "volumegame=%d\nvolumemusic=%d\nvolumesfx=%d\nmusicmode=%d\n", c->volumeGame, c->volumeMusic, c->volumeSfx, c->musicMode);
     if (withLastRom && c->musicTrack[0]) fprintf(f, "musictrack=%s\n", c->musicTrack);
     if (withLastRom) fprintf(f, "startrommode=%d\n", c->startRomMode);
+    if (withLastRom) fprintf(f, "netchat=%d\nnetplayers=%d\n", c->netChatShow, c->netPlayersShow);
     if (withLastRom && c->startRom[0]) fprintf(f, "startrom=%s\n", c->startRom);
     fprintf(f, "audiomono=%d\n", c->audioMono);
     // Controls: "map=default" first (a game's profile then undoes custom

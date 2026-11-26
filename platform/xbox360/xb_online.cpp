@@ -1557,6 +1557,7 @@ static int s_pongs;                 // the server's answers to this console's pi
 static DWORD s_roomAt;              // when the room opened (its first pings every second)
 static int s_newPlayer;             // a player came into the room (OnlineRoomNewPlayer) ...
 static char s_newTag[ONLINE_TAG_MAX + 1];   // ... this one
+static int s_roomLocked;            // the room was made or joined with a password (OnlineRoomRejoin)
 
 int OnlineRoomNewPlayer(char *tag, size_t size)
 {
@@ -1808,6 +1809,7 @@ int OnlineRoomCreate(const char *name, const char *password, const char *game, u
     add(&q, "max", max);
     add(&q, "art", art);
     if (!room_open(q) || !room_wait("created", ONLINE_ANSWER_MS)) return 0;
+    s_roomLocked = password && password[0];
     *code = s_lobby.code;
     return 1;
 }
@@ -1822,6 +1824,7 @@ int OnlineRoomJoin(unsigned code, const char *password)
     add(&q, "pass", password);
     if (!room_open(q) || !room_wait("players", ONLINE_ANSWER_MS)) return 0;
     s_lobby.code = code;
+    s_roomLocked = password && password[0];
     return 1;
 }
 
@@ -1886,3 +1889,100 @@ void OnlineRoomGiveBack(NetWs *w)
 }
 
 int OnlineRoomBack(void) { return s_room && s_back; }
+
+// ---- The game's room again (its connection lost while the consoles go on directly) ----
+// Opening a connection blocks (DNS, TLS: a second or more), so it is done on a thread of its own: the game goes on.
+static volatile LONG s_rejoinState;   // 0 none, 1 trying, 2 back (s_rejoinWs), 3 failed this time, 4 the room is gone
+static volatile LONG s_rejoinCancel;  // the game is over: what the thread opens is closed
+static NetWs *s_rejoinWs;
+static std::string s_rejoinPath;
+
+static DWORD WINAPI rejoin_thread(LPVOID)
+{
+    NetWs *w = NetWsOpen(s_me.server, s_rejoinPath.c_str());
+    LONG st = 3;
+    if (w)
+    {
+        // Its first word: "rejoined" (its place in the game again), "none" (no such game any more) or another refusal.
+        const DWORD t0 = GetTickCount();
+        while (GetTickCount() - t0 < ONLINE_ANSWER_MS)
+        {
+            char line[64];
+            int text = 0, n = NetWsRecv(w, line, sizeof(line) - 1, 200, &text);
+            if (n < 0) break;
+            if (n == 0 || !text) continue;
+            line[n] = 0;
+            st = !strncmp(line, "rejoined", 8) ? 2 : !strcmp(line, "none") ? 4 : 3;
+            H64_INFO("[online] the game's room again: \"%s\"", line);
+            break;
+        }
+        if (st != 2 || s_rejoinCancel)
+        {
+            if (st == 2) st = 3;
+            NetWsClose(w);
+            w = NULL;
+        }
+    }
+    else H64_INFO("[online] the game's room again: not reached");
+    s_rejoinWs = w;
+    InterlockedExchange(&s_rejoinState, st);
+    return 0;
+}
+
+int OnlineRoomRejoin(int port, int local, int players, const char *who)
+{
+    std::string q;
+    char hex[12], code[8];
+    HANDLE th;
+    if (s_rejoinState == 1 || !s_lobby.code || !OnlineRegistered() || !s_me.server[0]) return 0;
+    OnlineRoomRejoinCancel();
+    _snprintf(code, sizeof(code), "%06u", s_lobby.code);
+    add(&q, "op", "rejoin");
+    add(&q, "code", code);
+    add(&q, "port", port);
+    add(&q, "local", local);
+    add(&q, "players", players);
+    add(&q, "who", who);
+    add(&q, "locked", s_roomLocked);
+    add(&q, "name", s_lobby.name);
+    add(&q, "game", s_lobby.game);
+    _snprintf(hex, sizeof(hex), "%08X", s_lobby.crc1);
+    add(&q, "crc1", hex);
+    _snprintf(hex, sizeof(hex), "%08X", s_lobby.crc2);
+    add(&q, "crc2", hex);
+    add(&q, "g", s_me.tag);
+    add(&q, "t", s_me.token);
+    add(&q, "proto", ONLINE_PROTO);
+    add(&q, "conn", OnlineMyConn());
+    s_rejoinPath = "/v1/room?" + q;
+    s_rejoinCancel = 0;
+    s_rejoinState = 1;
+    th = CreateThread(NULL, 256 * 1024, rejoin_thread, NULL, CREATE_SUSPENDED, NULL);
+    if (!th) { s_rejoinState = 0; return 0; }
+    XSetThreadProcessor(th, 3);   // away from the CPU (0) and graphics (2, 5) threads, as the others
+    SetThreadPriority(th, THREAD_PRIORITY_BELOW_NORMAL);
+    ResumeThread(th);
+    CloseHandle(th);
+    return 1;
+}
+
+NetWs *OnlineRoomRejoined(int *state)
+{
+    const LONG st = s_rejoinState;
+    NetWs *w = NULL;
+    *state = 0;
+    if (st < 2) return NULL;
+    if (st == 2) { w = s_rejoinWs; s_rejoinWs = NULL; *state = 1; }
+    else *state = st == 4 ? -2 : -1;
+    s_rejoinState = 0;
+    return w;
+}
+
+void OnlineRoomRejoinCancel(void)
+{
+    s_rejoinCancel = 1;   // a try still going closes what it opens
+    if (s_rejoinState == 1) return;
+    if (s_rejoinWs) NetWsClose(s_rejoinWs);
+    s_rejoinWs = NULL;
+    s_rejoinState = 0;
+}

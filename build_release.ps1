@@ -100,7 +100,13 @@ Copy-Item (Join-Path $repo 'assets\assistant\laika_orbit.mp3') (Join-Path $stage
 New-Item -ItemType Directory -Force (Join-Path $stage 'cheats') | Out-Null
 Copy-Item (Join-Path $repo 'assets\cheats\mupencheat.txt') (Join-Path $stage 'cheats')
 New-Item -ItemType Directory -Force (Join-Path $stage 'art') | Out-Null
-foreach ($f in 'cover.png', 'background.png', 'icon.png') { Copy-Item (Join-Path $art $f) (Join-Path $stage 'art') }
+foreach ($f in 'cover.png', 'background.png', 'icon.png', 'aurora_cover_900x600.png', 'aurora_front_422x600.png') { Copy-Item (Join-Path $art $f) (Join-Path $stage 'art') }
+# Aurora box art to choose from: four designs in Spanish, English and Portuguese (art\covers\<es|en|pt>\).
+foreach ($lang in 'es', 'en', 'pt') {
+    $to = Join-Path $stage "art\covers\$lang"
+    New-Item -ItemType Directory -Force $to | Out-Null
+    Copy-Item (Join-Path $art "covers\$lang\*.png") $to
+}
 # The PC script that fills art\games\ (box art, game information) for consoles without internet.
 New-Item -ItemType Directory -Force (Join-Path $stage 'tools') | Out-Null
 Copy-Item (Join-Path $repo 'tools\fetch_game_art.py'), (Join-Path $repo 'tools\make_hts.py') (Join-Path $stage 'tools')
@@ -119,7 +125,9 @@ LAIKA 64 $version - Nintendo 64 emulator for Xbox 360 (RGH/JTAG)
 3. In Aurora, add the parent folder (e.g. Hdd1:\Emulators\) to the scan
    paths, or browse to LAIKA 64 and launch default.xex. It shows up as
    "LAIKA 64". The art folder has a cover and a background you can load
-   from the game's asset menu in Aurora.
+   from the game's asset menu in Aurora: aurora_cover_900x600.png (the
+   whole box) and aurora_front_422x600.png (its front), and in art\covers\
+   four more designs in Spanish (es), English (en) and Portuguese (pt).
 
 Folders (LAIKA 64 makes any missing one by itself):
    roms\           your games

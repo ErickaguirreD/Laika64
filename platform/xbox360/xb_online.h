@@ -225,5 +225,12 @@ int OnlineRoomLocal(int count);   // how many play on this console (1-3), before
 NetWs *OnlineRoomTake(int *port, int *players, int *local, unsigned char *owner);   // owner: ONLINE_ROOM_PLAYERS + 1 entries
 void OnlineRoomGiveBack(NetWs *w);   // the game's connection back: "back" said, the room's lobby again
 int OnlineRoomBack(void);            // a room given back and still open (its lobby to show)
+// The game's room again, its connection lost while the consoles play on directly: tried on a thread of its own
+// (OnlineRoomRejoin: 1 when a try started; who: the consoles in the game, "1:TAG,3:TAG2"). OnlineRoomRejoined
+// then: the connection once back (*state 1), else NULL with *state 0 (still trying, or none), -1 (failed this
+// time) or -2 (the server has no such game any more). OnlineRoomRejoinCancel when the game is over.
+int OnlineRoomRejoin(int port, int local, int players, const char *who);
+NetWs *OnlineRoomRejoined(int *state);
+void OnlineRoomRejoinCancel(void);
 
 #endif

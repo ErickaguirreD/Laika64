@@ -103,9 +103,10 @@ struct Config
     int browserDemo;    // browserdemo=N: the ROM browser moves its selection down every N ms (captures in Xenia)
     char browserSel[128]; // browsersel=FILE: the ROM browser starts on that file name (console checks), over lastrom=
     int artAll;         // artall=1: the ROM browser starts "Get box art for all games" by itself (checks)
+    int homeView;       // homeview=0..2: the main menu's look - its classic cards (0), a dock of tiles (1), a list (2); BACK there
     int browserDesign;  // browserdesign=0..9: the ROM browser's layout, the list+card of old (0), a covers grid (1), big covers (2), a carousel (3),
                         // mosaic (4), spotlight (5), cartridges (6), cinema (7), 3D boxes (8), single game (9)
-    int bgEffect;       // bgeffect=0..30: the ROM browser's animated background, none (0), the waves (1, default) ... (xb_menu.cpp BGFX_*)
+    int bgEffect;       // bgeffect=0..75: the ROM browser's animated background, none (0), the waves (1, default) ... (xb_menu.cpp BGFX_*)
     int fxColor[3];     // fxcolor1..3=0..13: the effect's colours, from xb_menu.cpp's palette; fxcolor1=0: the effect's own, 2 and 3 = 0: unused
     int fxOpacity;      // fxopacity=10..200: how strongly the effect shows, in % (default 100)
     int fxSpeed;        // fxspeed=25..300: how fast it moves, in % (default 100)
@@ -152,6 +153,8 @@ struct Config
     int asyncGfx;       // asyncgfx=0: graphics tasks and presents on the CPU thread
     int netBlackhole;   // netblackhole=1: every connection goes to an address that never answers (a network that
                         // resolves names but reaches nothing, as a user's console did with 3.4)
+    int netChatShow;    // netchat=0: online, the others' messages not shown beside the game (the online window)
+    int netPlayersShow; // netplayers=0: online, the players and their pings not shown down the right edge
     int parseWorker;    // parseworker=0: display lists parsed on the graphics worker too (no second worker)
     int asyncAudio;     // asyncaudio=0: audio HLE tasks on the CPU thread
     u32 audioCycles;    // audiocycles=N: CPU cycles an asynchronous audio task keeps the RSP busy
@@ -210,7 +213,7 @@ enum { CONFIG_PERF_FPS = 1, CONFIG_PERF_CPU = 2, CONFIG_PERF_RAM = 4, CONFIG_PER
        CONFIG_PERF_TCPU = 32, CONFIG_PERF_TGPU = 64, CONFIG_PERF_TRAM = 128, CONFIG_PERF_ALL = 255 };
 
 // The games' picture in the ROM list (Config::artKind).
-enum { CONFIG_ART_BOX = 0, CONFIG_ART_BOX3D, CONFIG_ART_SNAP, CONFIG_ART_TITLE, CONFIG_ART_LOGO, CONFIG_ART_COUNT };
+enum { CONFIG_ART_BOX = 0, CONFIG_ART_BOX3D, CONFIG_ART_SNAP, CONFIG_ART_TITLE, CONFIG_ART_LOGO, CONFIG_ART_CART, CONFIG_ART_COUNT };
 
 // The folders of Config::path, and each one's file key.
 enum { CONFIG_PATH_ROMS = 0, CONFIG_PATH_MUSIC, CONFIG_PATH_SOUNDS, CONFIG_PATH_WALLS, CONFIG_PATH_SAVES, CONFIG_PATH_SHOTS, CONFIG_PATH_TEXTURES,

@@ -91,6 +91,10 @@ int HiresPackInfoGet(int i, HiresPackInfo *out, int ask);
 // asked for (a thread) the first time; HiresPackImageDone once made a texture (the pixels
 // go), HiresPackImageForget when the screen closes (its textures gone: loaded again).
 int HiresPackImage(int i, const unsigned char **rgba, int *w, int *h);
+// The pictures kept in the program (all the packs', a few hundred KB of JPEG): how many, and one decoded to RGBA (at most
+// maxW x maxH; malloc'd, NULL if it cannot be) - the main menu's wall of packs.
+int HiresPackThumbCount(void);
+unsigned char *HiresPackThumbDecode(int k, int maxW, int maxH, int *w, int *h);
 void HiresPackImageDone(int i);
 void HiresPackImageForget(void);
 void HiresPackImageRetry(void);                 // the failed ones asked for again

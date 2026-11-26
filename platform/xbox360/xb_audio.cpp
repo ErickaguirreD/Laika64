@@ -1210,13 +1210,15 @@ void xb_audio_ui_sound(int kind) { sfx_play(kind, 0); }
 
 void xb_audio_ui_sound_instead(int kind) { sfx_play(kind, 1); }
 
-// ---- The online intro's sound (xb_menu.cpp online_intro): data going down a line ----
-// Made here as the interface sounds are (sfx_tone, in the glass style whatever the one chosen), 4.3 s timed to
-// the tunnel: a rush of noise opening up and a carrier humming higher as it speeds up, short beeps of data
-// quicker and quicker, then at 2.2 s (the logo in front) a low thump and a bright chord ringing out; from 3 s
-// (the way out) the rush swelling again with beeps racing by, to 4 s (into the light: online play's screen) and
-// a soft chord there.
-#define INTRO_MS 4900
+// ---- The online intro's sound (xb_menu.cpp online_intro): the stars, the flight down the tunnel, the logo ----
+// Made here as the interface sounds are (sfx_tone, in the glass style whatever the one chosen), 5.3 s timed to the
+// way in: the still stars twinkling softly; from 0.7 s the flight - a rush of noise opening up and a carrier humming
+// higher with the speed, beeps of data quicker and quicker; at 2.2 s (full speed) a low thump and a zing; from 3 s
+// (the tunnel's end coming) the rush swelling with beeps racing by, to 4 s - the flash: a bright burst, and the
+// chord ringing out under the LAIKA 64 ONLINE logo until online play's screen.
+#define INTRO_MS 5300
+#define INTRO_STILL 0.7f
+#define INTRO_FAST 1.4f
 #define INTRO_LANDS 2.2f
 #define INTRO_EXIT 3.0f
 #define INTRO_LIGHT 4.0f
@@ -1241,48 +1243,53 @@ static u32 intro_make(void)
     if (!mix) return 0;
     for (i = 0; i < len; i++)
     {
-        const float ti = i / (float)SFX_RATE, open = ti < INTRO_LANDS ? ti / INTRO_LANDS : 1.0f;
+        // The flight's speed as the picture's (0 still, 1 at full speed by INTRO_LANDS).
+        const float ti = i / (float)SFX_RATE;
+        const float fly = ti < INTRO_STILL ? 0.0f : ti < INTRO_FAST ? 0.65f * ((ti - INTRO_STILL) / (INTRO_FAST - INTRO_STILL)) * ((ti - INTRO_STILL) / (INTRO_FAST - INTRO_STILL))
+                        : ti < INTRO_LANDS ? 0.65f + 0.35f * (ti - INTRO_FAST) / (INTRO_LANDS - INTRO_FAST) : 1.0f;
         float n, env, henv;
         if (!(i & 63))
         {
-            // The rush's band (between two one-pole low-passes), opening from 300 Hz to 3.8 kHz.
-            const float fc = 300.0f + 3500.0f * open * open;
+            // The rush's band (between two one-pole low-passes), opening from 300 Hz to 3.8 kHz with the speed.
+            const float fc = 300.0f + 3500.0f * fly * fly;
             a1 = 1.0f - expf(-pi2 * fc / SFX_RATE);
             a2 = 1.0f - expf(-pi2 * fc * 0.25f / SFX_RATE);
         }
         n = (intro_rand(&seed) & 0xFFFF) / 32768.0f - 1.0f;
         lp1 += a1 * (n - lp1);
         lp2 += a2 * (n - lp2);
-        env = ti < INTRO_LANDS ? 0.05f + 0.25f * open * open : 0.30f * expf(-(ti - INTRO_LANDS) / 0.35f);
+        env = ti < INTRO_STILL ? 0.0f : ti < INTRO_LANDS ? 0.04f + 0.26f * fly * fly : 0.12f + 0.18f * expf(-(ti - INTRO_LANDS) / 0.35f);
         if (ti > INTRO_EXIT)
         {
-            // The way out: swelling into the light, then breathing out.
+            // The tunnel's end: swelling into the flash, then gone under the logo.
             const float e = (ti - INTRO_EXIT) / (INTRO_LIGHT - INTRO_EXIT);
-            env += ti < INTRO_LIGHT ? 0.34f * e * e : 0.34f * expf(-(ti - INTRO_LIGHT) / 0.2f);
+            env = ti < INTRO_LIGHT ? 0.12f + 0.3f * e * e : 0.42f * expf(-(ti - INTRO_LIGHT) / 0.12f);
         }
         mix[i] += (lp1 - lp2) * env * 1.6f;
-        // The carrier: 55 Hz rising to 110, pulsing eight times a second.
-        hum += pi2 * (55.0f + 55.0f * open) / SFX_RATE;
-        henv = (ti < 0.3f ? ti / 0.3f : 1.0f) * (ti < INTRO_LANDS + 0.1f ? 1.0f : expf(-(ti - INTRO_LANDS - 0.1f) / 0.5f));
+        // The carrier: 55 Hz rising to 110 with the speed, pulsing eight times a second; quiet while the stars are.
+        hum += pi2 * (55.0f + 55.0f * fly) / SFX_RATE;
+        henv = (ti < INTRO_STILL ? 0.0f : ti < INTRO_STILL + 0.3f ? (ti - INTRO_STILL) / 0.3f : 1.0f) * (ti < INTRO_LIGHT ? 1.0f : expf(-(ti - INTRO_LIGHT) / 0.15f));
         mix[i] += 0.10f * henv * (float)sin(hum) * (0.75f + 0.25f * sinf(pi2 * 8.0f * ti));
     }
     s_sfxStyle = XB_SFX_STYLE_GLASS;
-    for (t = 0.12f; t < 3.6f;)
+    for (t = 0.08f; t < INTRO_STILL;)
     {
-        // The data: beeps of 12 to 32 ms, closer and closer until the logo lands, then thinning out.
-        const float d = 0.012f + (intro_rand(&seed) % 20) / 1000.0f, f = notes[intro_rand(&seed) % 8];
-        const float gap = t < INTRO_LANDS ? 0.075f - 0.05f * (t / INTRO_LANDS) : 0.03f + (t - INTRO_LANDS) * 0.12f;
-        const float amp = t < INTRO_LANDS ? 0.05f + 0.06f * (t / INTRO_LANDS) : 0.11f * expf(-(t - INTRO_LANDS) / 0.5f);
+        // The still stars: soft high twinkles, far apart.
+        const float f = notes[4 + intro_rand(&seed) % 4] * 1.5f;
+        sfx_tone(mix, len, t * 1000.0f, 120, f, f, 0.025f, 4, 110);
+        t += 0.12f + (intro_rand(&seed) % 100) / 900.0f;
+    }
+    for (t = INTRO_STILL + 0.05f; t < INTRO_EXIT;)
+    {
+        // The data: beeps of 12 to 32 ms, closer and closer up to full speed, then steady.
+        const float d = 0.012f + (intro_rand(&seed) % 20) / 1000.0f, f = notes[intro_rand(&seed) % 8], k = t < INTRO_LANDS ? (t - INTRO_STILL) / (INTRO_LANDS - INTRO_STILL) : 1.0f;
+        const float gap = 0.075f - 0.045f * k, amp = 0.04f + 0.06f * k;
         sfx_tone(mix, len, t * 1000.0f, d * 1000.0f, f, f * ((intro_rand(&seed) & 1) ? 1.06f : 0.97f), amp, 0.8f, d * 600.0f);
         t += d + gap * (0.5f + (intro_rand(&seed) % 100) / 100.0f);
     }
-    // Locked on: the thump and the chord (C6 E6 G6, C7 and a shimmer over them).
+    // Full speed: the thump and a rising zing.
     sfx_tone(mix, len, INTRO_LANDS * 1000.0f, 400, 140, 45, 0.45f, 2, 110);
-    sfx_tone(mix, len, INTRO_LANDS * 1000.0f, 1900, 1046.5f, 1046.5f, 0.14f, 4, 700);
-    sfx_tone(mix, len, INTRO_LANDS * 1000.0f + 30, 1870, 1318.5f, 1318.5f, 0.12f, 4, 700);
-    sfx_tone(mix, len, INTRO_LANDS * 1000.0f + 60, 1840, 1568.0f, 1568.0f, 0.12f, 4, 750);
-    sfx_tone(mix, len, INTRO_LANDS * 1000.0f + 90, 1500, 2093.0f, 2093.0f, 0.06f, 4, 600);
-    sfx_tone(mix, len, INTRO_LANDS * 1000.0f + 90, 1200, 4186.0f, 4180.0f, 0.02f, 4, 400);
+    sfx_tone(mix, len, INTRO_LANDS * 1000.0f, 350, 1568.0f, 3136.0f, 0.06f, 4, 250);
     for (t = INTRO_EXIT + 0.03f; t < INTRO_LIGHT;)
     {
         // The way out's beeps, racing by.
@@ -1290,10 +1297,13 @@ static u32 intro_make(void)
         sfx_tone(mix, len, t * 1000.0f, d * 1000.0f, f, f * 1.08f, 0.04f + 0.05f * e, 0.8f, d * 600.0f);
         t += d + (0.05f - 0.03f * e) * (0.5f + (intro_rand(&seed) % 100) / 100.0f);
     }
-    // Into the light: a soft chord (G5 C6 E6).
-    sfx_tone(mix, len, INTRO_LIGHT * 1000.0f, 700, 784.0f, 784.0f, 0.08f, 4, 500);
-    sfx_tone(mix, len, INTRO_LIGHT * 1000.0f + 25, 680, 1046.5f, 1046.5f, 0.07f, 4, 500);
-    sfx_tone(mix, len, INTRO_LIGHT * 1000.0f + 50, 660, 1318.5f, 1318.5f, 0.06f, 4, 500);
+    // The flash: a low hit and the chord ringing under the logo (C6 E6 G6, C7 and a shimmer over them).
+    sfx_tone(mix, len, INTRO_LIGHT * 1000.0f, 450, 120, 40, 0.4f, 2, 140);
+    sfx_tone(mix, len, INTRO_LIGHT * 1000.0f, 1250, 1046.5f, 1046.5f, 0.14f, 4, 600);
+    sfx_tone(mix, len, INTRO_LIGHT * 1000.0f + 30, 1220, 1318.5f, 1318.5f, 0.12f, 4, 600);
+    sfx_tone(mix, len, INTRO_LIGHT * 1000.0f + 60, 1190, 1568.0f, 1568.0f, 0.12f, 4, 650);
+    sfx_tone(mix, len, INTRO_LIGHT * 1000.0f + 90, 1100, 2093.0f, 2093.0f, 0.06f, 4, 550);
+    sfx_tone(mix, len, INTRO_LIGHT * 1000.0f + 90, 900, 4186.0f, 4180.0f, 0.02f, 4, 400);
     s_sfxStyle = keepStyle;
     s_introPcm = (s16 *)malloc(len * sizeof(s16));
     if (s_introPcm)

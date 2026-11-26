@@ -1036,22 +1036,17 @@ static int RunFrame(H64System *sys)
 // pack (*.hts): HiresScanPacks (xb_menu.cpp) lists them for the Graphics settings'
 // page (pause menu > HD textures) and for us here. c->hiTexFile picks which one (empty: the first
 // one found, same as before this game could have more than one).
+static char s_hiresRomPath[256];   // the ROM's file (RunGameBody): a hack's original game found by its name too
 static void HiresOpen(H64System *sys, H64Renderer *renderer, const Config *c)
 {
     int n = 0, use = 0, i, act = 0;
     char active[128];
-    HiresScanPacks(sys->rom.name);
+    HiresScanPacks(sys->rom.name, sys->rom.gameCode, s_hiresRomPath);   // a hack without packs of its own: its original game's
     if (HiresPackCount() > 0)
     {
-        // The game's folder's active.txt (the Packs screen, START in the ROM list): the pack in
-        // use, or none ("-": HD off for this game); else Settings > Graphics' pick, else the first.
-        char dir[192];
-        const char *path = HiresPackPath(0), *slash = strrchr(path, '\\');
-        size_t dn = slash ? (size_t)(slash - path) : 0;
-        if (dn >= sizeof(dir)) dn = sizeof(dir) - 1;
-        memcpy(dir, path, dn);
-        dir[dn] = 0;
-        act = HiresActiveRead(dir, active, sizeof(active));
+        // The game's active.txt (Details > HD textures in the ROM list): the pack in use, or none
+        // ("-": HD off for this game); else Settings > Graphics' pick, else the first.
+        act = HiresActiveFor(active, sizeof(active));
         for (i = 0; i < HiresPackCount(); i++)
             if (!_stricmp(HiresPackName(i), act == 1 ? active : c->hiTexFile)) { use = i; break; }
     }
@@ -1105,7 +1100,7 @@ static void SavesTick(H64System *sys, u32 presented, int leaving)
 // D-pad left/right change the slot. A message shows the result for 2 s.
 static int s_stateSlot = 1;
 static int s_statePending;          // a save waits for a quiet point (no HLE task in progress)
-static char s_osd[160];
+static char s_osd[256];   // (UTF-8: an Arabic text takes 3 bytes a letter)
 static DWORD s_osdUntil;
 #define OSD_MS 2000                 // how long a toast stays
 static DWORD s_osdLen = OSD_MS;     // ... this one (the online ones longer)
@@ -1165,7 +1160,12 @@ static double QpcMs(void);
 #define NET_HASH_EVERY 60           // frames between two state hashes (each of a different MB of RDRAM, and the CPU)
 #define NET_HASHES 64
 // A message's type: its low bytes; the server puts the sender's port in the top byte (0: directly, the other console).
-enum { NM_HELLO = 1, NM_INPUT, NM_HASH, NM_BYE, NM_PING, NM_PONG, NM_INPUT2 };   // a ping's a: its sender's tick; a pong's b: who it answers
+enum { NM_HELLO = 1, NM_INPUT, NM_HASH, NM_BYE, NM_PING, NM_PONG, NM_INPUT2, NM_STATUS };   // a ping's a: its sender's tick; a pong's b: who it answers; a status's a: 1 in the menu, 0 back
+// A console in its menu says so each NET_MENU_SAY_MS, the way its game's messages go (directly too: through the
+// room's text only, it was not heard while the room was lost); the others take it as in the menu while it keeps
+// saying so, and the game's wait for it is not a slow connection then.
+#define NET_MENU_SAY_MS 1000
+#define NET_MENU_HEARD_MS 3000
 // NM_INPUT2: the inputs of two reads in one message (the room's: half the messages the server counts), a and a + 1 in b and c.
 // A type's third byte: which of the sender's ports an input is of (0: its first, 1 the next...).
 #define NET_KIND(t) ((t) & 0xFFFF)
@@ -1206,6 +1206,10 @@ static u8 s_netGone[NET_PLAYERS + 1];           // per port: it left the game
 // Per console: the room said it left while it was still heard directly (the room had lost it, not the game): it
 // leaves only once the direct way from it goes quiet too.
 static u8 s_netByeHeld[NET_PLAYERS + 1];
+static DWORD s_netMenuAt[NET_PLAYERS + 1];      // per console: when it last said it is in its menu (0: it is not)
+static int s_netMyMenu;                         // this console is in its menu (NetStatus) ...
+static DWORD s_netMenuSaidAt;                   // ... and said so last then
+static int s_netBackSay;                        // "back in the game" said this many times more (a lost packet)
 static int s_netFromRoom;                       // the message NetMessage reads came through the room
 static H64Pad s_netIn[NET_PLAYERS + 1][NET_RING];   // per port: its inputs (this console's own too)
 static u8 s_netBuf[512];
@@ -1237,14 +1241,31 @@ static u32 s_netSentUpTo;                   // reads whose own input is sent: [0
 // The input delay as a time, whatever the game: s_netDelay counts controller reads, and games read 60 times
 // a second (Smash) or 30 and less (Mario Kart: the same 5 reads were twice the time and more). Every
 // NET_RATE_VI frames each console counts the reads of those frames - the same on all, the emulation being the
-// same - and the delay becomes the reads that make s_netBaseVi frames, changed at the same read on all: own
-// inputs already sent are kept (a few presses dropped when it shrinks, the last one repeated when it grows).
+// same - and the delay becomes the reads that make s_netBaseVi frames: own inputs already sent are kept (the last
+// one repeated when it grows). Shrinking leaves out one read's input a step: a step waits for a read whose input
+// is the one before it again (nothing lost), up to NET_SHRINK_WAIT reads (a stick always moving: one read's
+// change lost). Each console's inputs carry their read, so each steps when it can (the others just get them sooner).
 #define NET_RATE_VI 180
+#define NET_SHRINK_WAIT 30
+static u32 s_netShrinkWait;                 // reads waited for a step down that loses nothing
+// The time this frame waited for the others' inputs (NetPad): the frame clock moves on by it, not caught up after.
+// Caught up, the console ahead ran its next frame at once, was ahead again and waited again - a 45 ms frame and
+// a 5 ms one by turns for seconds (each console's clock moves up to 1 % with its sound queue: one is always ahead).
+static double s_netWaitAbsorbMs;
 static u32 s_netBaseVi;                     // the delay in frames (agreed: the hello's delay, 4 directly)
 static u32 s_netNextSlot;                   // the next read this console's own input goes to
 static u32 s_netRateReads;                  // s_netReads at the last count
 static u32 s_netDelayNext;                  // a new delay, from the next read on (0: none)
 static DWORD s_netRelayPingAt;              // directly: the next ping that keeps the room open
+// Directly, the room is only the chat and the way back should the direct one fail: a room silent this long (its
+// pongs, one each NET_ROOM_PING_MS) is taken as lost - the server's own limit is 60 s - and asked for again in the
+// background (NetRoomRejoinTick). A console the server had put out for its silence played on without its chat.
+#define NET_ROOM_PING_MS 10000
+#define NET_ROOM_SILENT_MS 30000
+static int s_netRoomGame;                   // this game came from a room (its chat; its BACK is the quick chat's)
+static DWORD s_netRoomHeardAt;              // the room's last word
+static int s_netRejoining;                  // a try to get the room back is going (OnlineRoomRejoin)
+static DWORD s_netRejoinAt, s_netRejoinWait;   // the next try (0: none), and the wait after a failed one
 static DWORD s_netP2pOffAt;                 // the direct way was left (GetTickCount; 0: never, or the game never had one)
 static DWORD s_netP2pGoodAt;                // back on the room: since when every console is heard directly (0: not now)
 // This console standing still (a screenshot through xbdm froze the whole console, a slow disk...): coming back, the
@@ -1275,6 +1296,16 @@ static int s_qcOpen, s_qcKbd, s_qcRow, s_qcCol;   // the quick chat open, its ke
 static WORD s_qcPrev;
 static char s_qcText[84];
 static OnlineKbd s_qcKb;
+// The online window (BACK held in a room's game): over the running game - nobody's game stops for it - a few
+// settings that cost nothing and the ways out (NetWindowInput). The controller plays nothing while it shows, and
+// after it until its buttons are let go (the B that closed it is not the game's).
+enum { OW_RESUME, OW_VOLUME, OW_RUMBLE, OW_PERF, OW_CHAT, OW_PLAYERS, OW_ROOM, OW_LEAVE, OW_ROWS };
+static int s_owOpen, s_owSel, s_owSure, s_owChanged, s_owLeave, s_owMute;   // s_owLeave: 1 the room's lobby, 2 the ROM list
+static WORD s_owPrev;
+static int s_owPerfWas;                      // the performance box's items before it was hidden here
+static const Config *s_owCfg;                // the game's settings (its values drawn)
+static int s_netShowChat = 1, s_netShowPlayers = 1;   // Config::netChatShow / netPlayersShow for this game
+static void NetWindowDraw(void);
 static IDirect3DTexture9 *s_emojiTex[EMOJI_COUNT];   // made by the overlay (it has the device), kept
 
 IDirect3DTexture9 *EmojiTex(int k)
@@ -1303,6 +1334,26 @@ static void NetOsd(const char *text, DWORD ms)
     H64_INFO("[net] %s", text);
 }
 
+// No more tries to get the game's room back (the game is over).
+static void NetRejoinStop(void)
+{
+    OnlineRoomRejoinCancel();
+    s_netRejoining = 0;
+    s_netRejoinAt = 0;
+}
+
+// The room's connection lost while every console plays directly: the game goes on that way; the room is asked
+// for again in the background (its chat back, and its relay should the direct way fail).
+static void NetRoomLost(void)
+{
+    NetWsClose(s_netWs);
+    s_netWs = NULL;
+    s_qcOpen = s_qcKbd = 0;
+    s_netRejoinWait = 3000;
+    s_netRejoinAt = GetTickCount() + s_netRejoinWait;
+    NetOsd(Tr(T_NET_ROOM_LOST), 8000);
+}
+
 static void NetEnd(const char *why)
 {
     char t[160];
@@ -1310,6 +1361,7 @@ static void NetEnd(const char *why)
     s_netSock = INVALID_SOCKET;
     if (s_netWs) NetWsClose(s_netWs);
     s_netWs = NULL;
+    NetRejoinStop();
     if (s_netMode > 0)
     {
         _snprintf(t, sizeof(t) - 1, "EN LINEA: %s - sigues solo", why);
@@ -1433,6 +1485,17 @@ static int NetMessage(const NetMsg *m)
         s_netTheirs[p][slot][1] = m->b;
         NetHashCheck(p, slot);
     }
+    else if (type == NM_STATUS && p <= NET_PLAYERS)
+    {
+        // Another console in its menu (said again each second), or back in the game: told once each way.
+        char t[96];
+        const int was = s_netMenuAt[p] && GetTickCount() - s_netMenuAt[p] < NET_MENU_HEARD_MS;
+        s_netMenuAt[p] = m->a ? GetTickCount() | 1 : 0;
+        if (!m->a == !was) return 1;
+        _snprintf(t, sizeof(t) - 1, Tr(m->a ? T_NET_IN_MENU : T_NET_BACK_GAME), s_netTagOf[p], p);
+        t[sizeof(t) - 1] = 0;
+        NetOsd(t, m->a ? 120000 : 8000);   // in the menu: shown until it comes back
+    }
     else if (type == NM_PING) NetSend(NM_PONG, m->a, (u32)p, 0);
     else if (type == NM_PONG && (int)m->b == s_netPort)
     {
@@ -1454,6 +1517,50 @@ static int NetMessage(const NetMsg *m)
         return NetConsoleLeft(p);
     }
     return 1;
+}
+
+// The room lost in a game played directly: a try to get it back when its time comes (3 s, then twice as long each
+// time up to 30 s), and its answer once there is one.
+static void NetRoomRejoinTick(void)
+{
+    const DWORD now = GetTickCount();
+    int state = 0;
+    NetWs *w;
+    if (!s_netRejoining)
+    {
+        char who[96];
+        int p, at = 0;
+        if (!s_netRejoinAt || (int)(now - s_netRejoinAt) < 0) return;
+        // The consoles in the game (their first ports), should the server have to make the room again.
+        who[0] = 0;
+        for (p = 1; p <= s_netPlayers; p++)
+            if (NET_CONSOLE(p) && s_netTagOf[p][0] && at < (int)sizeof(who) - 24)
+                at += _snprintf(who + at, sizeof(who) - at, "%s%d:%s", at ? "," : "", p, s_netTagOf[p]);
+        s_netRejoining = OnlineRoomRejoin(s_netPort, s_netLocal, s_netPlayers, who);
+        s_netRejoinAt = s_netRejoining ? 0 : now + 30000;
+        return;
+    }
+    w = OnlineRoomRejoined(&state);
+    if (!state) return;
+    s_netRejoining = 0;
+    if (w)
+    {
+        s_netWs = w;
+        s_netRoomHeardAt = now;
+        s_netRelayPingAt = now + NET_ROOM_PING_MS;
+        H64_INFO("[net] the room's connection is back (read %u)", s_netReads);
+        NetOsd(Tr(T_NET_ROOM_BACK), 6000);
+    }
+    else if (state == -2)
+    {
+        H64_INFO("[net] the server has no such game any more: on directly without the room (read %u)", s_netReads);
+        NetOsd(Tr(T_NET_ROOM_GONE), 8000);
+    }
+    else
+    {
+        s_netRejoinWait = s_netRejoinWait < 15000 ? s_netRejoinWait * 2 : 30000;
+        s_netRejoinAt = now + s_netRejoinWait;
+    }
 }
 
 // Reads what has arrived; `ms`: how long to wait for something when nothing has (0: not at all).
@@ -1500,8 +1607,14 @@ static void NetPump(int ms)
             if (s_netP2p && s_netWs && (int)(GetTickCount() - s_netRelayPingAt) >= 0)
             {
                 NetWsSend(s_netWs, "ping\t0", 6, 1);   // the room closes when nothing comes for a while
-                s_netRelayPingAt = GetTickCount() + 20000;
+                s_netRelayPingAt = GetTickCount() + NET_ROOM_PING_MS;
             }
+            if (s_netP2p && s_netWs && GetTickCount() - s_netRoomHeardAt > NET_ROOM_SILENT_MS && GetTickCount() - s_netGraceAt > NET_ROOM_SILENT_MS)
+            {
+                H64_WARN("[net] the room silent %u ms: its connection taken as lost (read %u)", (u32)(GetTickCount() - s_netRoomHeardAt), s_netReads);
+                NetRoomLost();
+            }
+            if (s_netP2p && !s_netWs) NetRoomRejoinTick();
         }
         else if (s_netMode > 0 && s_netP2pOffAt)
         {
@@ -1520,7 +1633,8 @@ static void NetPump(int ms)
                 s_netP2p = 1;
                 s_netP2pOffAt = s_netP2pGoodAt = 0;
                 s_netBaseVi = 4;
-                s_netRelayPingAt = now + 20000;
+                s_netRelayPingAt = now + NET_ROOM_PING_MS;
+                s_netRoomHeardAt = now;   // (the room was heard all along: its pongs are counted from here)
                 H64_INFO("[net] direct way back (read %u)", s_netReads);
                 NetOsd("EN LINEA: conexion directa recuperada", 6000);
             }
@@ -1537,18 +1651,16 @@ static void NetPump(int ms)
             H64_WARN("[net] the room's connection is over: %s (read %u)", NetWsWhy(s_netWs), s_netReads);
             if (s_netP2p)
             {
-                // Playing directly with every console: the game goes on that way, without the room (its chat and its
-                // way back if the direct one fails). Ending it here ended 20-minute games that went on fine directly.
-                NetWsClose(s_netWs);
-                s_netWs = NULL;
-                NetOsd("EN LINEA: sin conexion al servidor - sigues por conexion directa", 8000);
+                // Playing directly with every console: the game goes on that way, the room asked for again (its chat
+                // and its way back if the direct one fails). Ending it here ended 20-minute games that went on fine.
+                NetRoomLost();
                 return;
             }
             NetEnd("conexion perdida");
             return;
         }
         if (n == 0) return;
-        s_netLastRecv = GetTickCount();
+        s_netLastRecv = s_netRoomHeardAt = GetTickCount();
         if (text) { buf[n] = 0; NetText(buf); continue; }   // the room's words (chat, menus)
         if (n != (int)sizeof(m)) continue;
         memcpy(&m, buf, sizeof(m));
@@ -1607,12 +1719,6 @@ static void NetPad(H64System *sys)
     u32 n = s_netReads++, made = 0, s;
     int p, k;
     double w0 = QpcMs();
-    if (s_netDelayNext)
-    {
-        H64_INFO("[net] delay %u -> %u reads (read %u)", s_netDelay, s_netDelayNext, n);
-        s_netDelay = s_netDelayNext;
-        s_netDelayNext = 0;
-    }
     // This console's controllers, one per port it plays (its first: the one whose BACK opens the quick chat).
     for (k = 0; k < s_netLocal; k++)
     {
@@ -1620,10 +1726,36 @@ static void NetPad(H64System *sys)
         local[k] = zero;
         if (k == 0)
         {
-            if (s_padValid && !(s_pad.Gamepad.wButtons & XINPUT_GAMEPAD_BACK) && !s_qcOpen) PadFromXInput(&s_pad.Gamepad, 0, &local[0]);   // the quick chat: it plays nothing
+            if (s_owMute && (!s_padValid || !s_pad.Gamepad.wButtons)) s_owMute = 0;   // the online window's buttons let go
+            if (s_padValid && !(s_pad.Gamepad.wButtons & XINPUT_GAMEPAD_BACK) && !s_qcOpen && !s_owOpen && !s_owMute)
+                PadFromXInput(&s_pad.Gamepad, 0, &local[0]);   // the quick chat, the online window: it plays nothing
         }
         else if (XInputGetState(k, &xs) == ERROR_SUCCESS) PadFromXInput(&xs.Gamepad, k, &local[k]);
     }
+    if (s_netDelayNext > s_netDelay)
+    {
+        H64_INFO("[net] delay %u -> %u reads (read %u)", s_netDelay, s_netDelayNext, n);
+        s_netDelay = s_netDelayNext;
+        s_netDelayNext = 0;
+    }
+    else if (s_netDelayNext && s_netDelayNext < s_netDelay)
+    {
+        // One read down, on a read whose input is the last one sent again: the one left out is that same input.
+        int same = s_netNextSlot > 0;
+        for (k = 0; k < s_netLocal && same; k++)
+        {
+            const H64Pad *last = &s_netIn[s_netPort + k][(s_netNextSlot - 1) % NET_RING];
+            same = last->buttons == local[k].buttons && last->x == local[k].x && last->y == local[k].y;
+        }
+        if (same || ++s_netShrinkWait >= NET_SHRINK_WAIT)
+        {
+            H64_INFO("[net] delay %u -> %u reads (read %u, waited %u%s)", s_netDelay, s_netDelay - 1, n, s_netShrinkWait, same ? "" : ", one change lost");
+            s_netDelay--;
+            s_netShrinkWait = 0;
+            if (s_netDelay == s_netDelayNext) s_netDelayNext = 0;
+        }
+    }
+    else s_netDelayNext = 0;
     // This read's input for read n + delay: none when that one is sent already (the delay shrank), the reads
     // up to it too when it grew (all ports go on without a gap).
     while (s_netNextSlot <= n + s_netDelay)
@@ -1683,11 +1815,16 @@ static void NetPad(H64System *sys)
                 char t[96];
                 for (p = 1; p <= s_netPlayers; p++)
                     if (!NET_MINE(p) && !s_netGone[p] && s_netHave[p] <= n) break;
-                if (p <= s_netPlayers && s_netTagOf[p][0]) _snprintf(t, sizeof(t) - 1, "EN LINEA: esperando a %s - conexion lenta", s_netTagOf[p]);
-                else _snprintf(t, sizeof(t) - 1, "EN LINEA: esperando al jugador %d - conexion lenta", p <= s_netPlayers ? p : 0);
-                t[sizeof(t) - 1] = 0;
-                NetOsd(t, 4000);
-                told = 1;
+                // A console in its menu: the wait is that (its notice stays), not a slow connection - which took
+                // the place of "in the menu" a second after it. (Asked again each pass: one that stops saying so is.)
+                if (!(p <= s_netPlayers && s_netMenuAt[s_netOwner[p]] && GetTickCount() - s_netMenuAt[s_netOwner[p]] < NET_MENU_HEARD_MS))
+                {
+                    if (p <= s_netPlayers && s_netTagOf[p][0]) _snprintf(t, sizeof(t) - 1, "EN LINEA: esperando a %s - conexion lenta", s_netTagOf[p]);
+                    else _snprintf(t, sizeof(t) - 1, "EN LINEA: esperando al jugador %d - conexion lenta", p <= s_netPlayers ? p : 0);
+                    t[sizeof(t) - 1] = 0;
+                    NetOsd(t, 4000);
+                    told = 1;
+                }
             }
             if (s_workRenderer && GetTickCount() - waitAt >= 250 && GetTickCount() - shownAt >= 100)
             {
@@ -1698,6 +1835,7 @@ static void NetPad(H64System *sys)
         }
         double w = QpcMs() - w0;
         s_netWaitMs += w;
+        s_netWaitAbsorbMs += w;
         if (w > s_netWaitMax) s_netWaitMax = w;
     }
     // Each port: this console's own input, another's (neutral from the read after the last one it sent
@@ -1759,6 +1897,7 @@ static void NetVi(H64System *sys)
             if (d < 1) d = 1;
             if (d > NET_RING / 4) d = NET_RING / 4;
             if (d != s_netDelay && (q >= s_netDelay * 4 + 3 || q + 3 <= s_netDelay * 4)) s_netDelayNext = d;
+            else if (s_netDelayNext && d == s_netDelay) s_netDelayNext = 0;   // a step down not finished: where it is now is right
         }
     }
     if (s_netMode <= 0 || f % NET_HASH_EVERY) return;
@@ -1783,6 +1922,9 @@ static void NetConfig(H64System *sys)
     int d = 0, port = 0, players = 0, local = 1, p;
     u8 owner[NET_PLAYERS + 1];
     NetWs *room = OnlineRoomTake(&port, &players, &local, owner);
+    NetRejoinStop();
+    s_netRoomGame = 0;
+    s_owOpen = s_owMute = s_owLeave = 0;
     s_netMode = 0;
     s_netDelay = 3;
     s_netLocal = 1;
@@ -1810,6 +1952,7 @@ static void NetConfig(H64System *sys)
         }
         s_netLocal = local;
         s_netWs = room;
+        s_netRoomGame = 1;
         s_netPort = port;
         s_netPlayers = players;
         s_netMode = port == 1 ? 1 : 2;
@@ -1933,7 +2076,8 @@ static void NetP2pSetup(u32 token)
     if (all && s_netP2pOpen)
     {
         s_netP2p = 1;
-        s_netRelayPingAt = GetTickCount() + 20000;
+        s_netRelayPingAt = GetTickCount() + NET_ROOM_PING_MS;
+        s_netRoomHeardAt = GetTickCount();
         return;
     }
     // Not every way works: the room for everyone (a console that decided otherwise is told).
@@ -2048,13 +2192,19 @@ static void NetConnect(H64System *sys, const Config *c)
     memset(s_netTheirs, 0, sizeof(s_netTheirs));
     s_netBufLen = s_netDesync = s_netWaits = 0;
     s_netWaitMs = s_netWaitMax = 0;
-    s_netLastRecv = s_netLastSend = GetTickCount();
+    s_netLastRecv = s_netLastSend = s_netRoomHeardAt = GetTickCount();
     s_netAliveAt = s_netGraceAt = 0;
+    memset(s_netMenuAt, 0, sizeof(s_netMenuAt));
+    s_netMyMenu = s_netBackSay = 0;
+    s_owOpen = s_owMute = s_owLeave = 0;
+    s_netShowChat = c->netChatShow;
+    s_netShowPlayers = c->netPlayersShow;
     memset(s_netRtt, 0, sizeof(s_netRtt));
     s_netChatCount = 0;
     s_qcOpen = s_qcKbd = 0;
     s_netSentUpTo = s_netNextSlot = s_netDelay;   // reads [0, delay): neutral, sent by nobody
-    s_netRateReads = s_netDelayNext = 0;
+    s_netRateReads = s_netDelayNext = s_netShrinkWait = 0;
+    s_netWaitAbsorbMs = 0.0;
     if (relay) NetP2pSetup(hello.b ^ hello.c ^ (u32)s_netPlayers);   // directly if every way works (the same verdict everywhere)
     // The delay in frames from here on (see NET_RATE_VI): the hello's, 4 when the consoles reach each other directly.
     s_netBaseVi = s_netP2p && s_netDelay > 4 ? 4 : s_netDelay;
@@ -2073,6 +2223,17 @@ static void NetKeepAlive(void)
 {
     if (s_netMode <= 0) return;
     NetPump(0);
+    if (s_netMode > 0 && s_netMyMenu && GetTickCount() - s_netMenuSaidAt >= NET_MENU_SAY_MS)
+    {
+        s_netMenuSaidAt = GetTickCount();
+        NetSend(NM_STATUS, 1, 0, 0);   // still in the menu
+    }
+    else if (s_netMode > 0 && s_netBackSay && GetTickCount() - s_netMenuSaidAt >= 250)
+    {
+        s_netMenuSaidAt = GetTickCount();
+        s_netBackSay--;
+        NetSend(NM_STATUS, 0, 0, 0);   // back, again
+    }
     if (s_netMode > 0 && GetTickCount() - s_netLastSend >= NET_PING_MS) NetSend(NM_PING, GetTickCount(), 0, 0);
     if (s_netMode > 0 && GetTickCount() - s_netLastRecv > NET_TIMEOUT_MS) NetEnd("las demas consolas no responden");
 }
@@ -2092,6 +2253,9 @@ static void NetStop(void)
         else if (s_netWs) NetWsClose(s_netWs);
         s_netWs = NULL;
     }
+    NetRejoinStop();
+    s_netRoomGame = 0;
+    s_owOpen = s_owMute = s_owLeave = 0;
     s_netMode = 0;
     s_rumblePort = -1;
     s_rumbleLocal = 1;
@@ -2110,7 +2274,7 @@ static int NetRefuse(void)
 }
 
 // ---- Online play in the game: the quick chat (BACK), the others' messages, their menus, the ping ----
-// Through a room of the server only (its text lines: "chat\t<tag>\t<text>", "status\t<port>\t<tag>\t<what>").
+// Through a room of the server only (its text lines: "chat\t<tag>\t<text>"; the menus: NM_STATUS).
 // A short BACK opens the quick chat over the running game (the controller plays nothing meanwhile): the
 // emojis (a message "@e<n>", xb_emojis.h), quick texts and the keyboard; BACK held opens the usual menu,
 // and the others are told this player is in it (the game waits for it there). The messages show beside
@@ -2159,13 +2323,15 @@ static void NetText(char *line)
             else if (!strcmp(what, "off") && s_netP2p) NetP2pOff(0);
         }
     }
-    else if (!strcmp(f[0], "status") && n >= 4)
+    else if (!strcmp(f[0], "again") && n >= 2)
     {
-        char t[96];
-        const int menu = !strcmp(f[3], "menu");
-        _snprintf(t, sizeof(t) - 1, Tr(menu ? T_NET_IN_MENU : T_NET_BACK_GAME), f[2], atoi(f[1]));
-        t[sizeof(t) - 1] = 0;
-        NetOsd(t, menu ? 120000 : 8000);   // in the menu: shown until it comes back
+        // A console the room had said left (it lost its connection to it, NM_BYE kept) is back in the room.
+        const int port = atoi(f[1]);
+        if (port >= 1 && port <= NET_PLAYERS && s_netByeHeld[port])
+        {
+            s_netByeHeld[port] = 0;
+            H64_INFO("[net] console %d back in the room (read %u)", port, s_netReads);
+        }
     }
 }
 
@@ -2178,12 +2344,15 @@ static void NetChatSay(const char *text)
     NetWsSend(s_netWs, line, (int)strlen(line), 1);
 }
 
-static void NetStatus(const char *what)
+// This console into its menu (1) or back in the game (0): the others told (NM_STATUS; said again each second
+// while in the menu, NetKeepAlive).
+static void NetStatus(int menu)
 {
-    char line[24];
-    if (s_netMode <= 0 || !s_netWs) return;
-    _snprintf(line, sizeof(line), "status\t%s", what);
-    NetWsSend(s_netWs, line, (int)strlen(line), 1);
+    s_netMyMenu = menu;
+    s_netBackSay = menu ? 0 : 2;
+    if (s_netMode <= 0) return;
+    s_netMenuSaidAt = GetTickCount();
+    NetSend(NM_STATUS, (u32)menu, 0, 0);
 }
 
 // The keyboard's row of quick phrases above the keys: the game's tab of the quick texts, the first QC_PHRASES.
@@ -2334,6 +2503,7 @@ static void NetOverlayDraw(IDirect3DDevice9 *dev)
     if (s_netMode <= 0) return;
     for (k = 0; k < EMOJI_COUNT; k++)
         if (!s_emojiTex[k]) s_emojiTex[k] = UiImageCreate(dev, s_emojiRgba[k], EMOJI_SIZE, EMOJI_SIZE);
+    if (s_netShowPlayers)   // (the online window may hide them)
     {
         // The players down the right edge, no panel behind: in fixed columns, each port's colour and avatar on
         // one margin, the names in one column, each console's ping (there and back) right-aligned in its own;
@@ -2371,10 +2541,13 @@ static void NetOverlayDraw(IDirect3DDevice9 *dev)
             }
         }
     }
+    if (s_owOpen) { NetWindowDraw(); return; }
     if (!s_qcOpen)
     {
-        // The last messages beside the game, for a few seconds, with who wrote them.
+        // The last messages beside the game, for a few seconds, with who wrote them (unless the online window
+        // hid them: the quick chat still shows them).
         int y = 0;
+        if (!s_netShowChat) return;
         for (k = 0; k < s_netChatCount; k++)
         {
             const NetChatLine *l = &s_netChat[k];
@@ -4023,6 +4196,150 @@ static void TakeManualScreenshot(H64System *sys, H64Renderer *renderer)
     }
 }
 
+// ---- The online window (BACK held in a room's game; see s_owOpen) ----
+static void NetWindowOpen(const Config *c)
+{
+    s_owCfg = c;
+    s_owOpen = 1;
+    s_owSel = OW_RESUME;
+    s_owSure = s_owChanged = s_owLeave = 0;
+    s_owPrev = 0xFFFF;   // the BACK still held that opened it does nothing
+    xb_audio_ui_sound(XB_SFX_OPEN);
+    NetStatus(1);        // the others: "in the emulator's menu" (their game goes on)
+}
+
+// Closed: the others told, what changed kept - the game's volume and the online ones with the settings for all
+// games, the rumble and the performance box where the menu keeps them (the game's own settings when it has them).
+static void NetWindowClose(Config *c, int leaving)
+{
+    s_owOpen = 0;
+    s_owMute = 1;
+    if (!leaving) NetStatus(0);   // (leaving: the others hear it left instead)
+    if (s_owChanged)
+    {
+        const char *game = s_profilePath[0] && GetFileAttributesA(s_profilePath) != (DWORD)-1 ? s_profilePath : s_settingsPath;
+        char v[16];
+        int ok = 1;
+        if (s_settingsPath[0])
+        {
+            _snprintf(v, sizeof(v), "%d", c->volumeGame);
+            ok &= ConfigWriteKey(s_settingsPath, "volumegame", v);
+            ok &= ConfigWriteKey(s_settingsPath, "netchat", c->netChatShow ? "1" : "0");
+            ok &= ConfigWriteKey(s_settingsPath, "netplayers", c->netPlayersShow ? "1" : "0");
+        }
+        if (game[0])
+        {
+            _snprintf(v, sizeof(v), "%d", c->rumble);
+            ok &= ConfigWriteKey(game, "rumble", v);
+            _snprintf(v, sizeof(v), "%d", c->perfItems);
+            ok &= ConfigWriteKey(game, "perfitems", v);
+        }
+        if (!ok) H64_WARN("[main] online window: the settings could not all be written");
+    }
+    if (!leaving) xb_audio_ui_sound(XB_SFX_BACK);
+}
+
+// Its buttons, each frame while it shows: up/down a row, left/right a value, A a row's action, B or BACK closes it.
+static void NetWindowInput(Config *c)
+{
+    const WORD b = s_padValid ? s_pad.Gamepad.wButtons : 0;
+    WORD down = b & ~s_owPrev;
+    int lr;
+    s_owPrev = b;
+    down |= QcStickDirs();
+    if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) { NetWindowClose(c, 0); return; }
+    if (down & (XINPUT_GAMEPAD_DPAD_UP | XINPUT_GAMEPAD_DPAD_DOWN))
+    {
+        s_owSel = (s_owSel + ((down & XINPUT_GAMEPAD_DPAD_DOWN) ? 1 : OW_ROWS - 1)) % OW_ROWS;
+        s_owSure = 0;
+        xb_audio_ui_sound(XB_SFX_MOVE);
+        return;
+    }
+    lr = (down & XINPUT_GAMEPAD_DPAD_LEFT) ? -1 : (down & XINPUT_GAMEPAD_DPAD_RIGHT) ? 1 : (down & XINPUT_GAMEPAD_A) ? 2 : 0;
+    if (!lr) return;
+    switch (s_owSel)
+    {
+    case OW_RESUME:
+        if (lr == 2) NetWindowClose(c, 0);
+        return;
+    case OW_VOLUME:
+    case OW_RUMBLE:
+    {
+        // In tens, 0 to 100 (A: up, round to 0 after 100).
+        int *v = s_owSel == OW_VOLUME ? &c->volumeGame : &c->rumble;
+        int n = lr == 2 ? (*v >= 100 ? 0 : *v + 10) : *v + lr * 10;
+        n = n < 0 ? 0 : n > 100 ? 100 : n - n % 10;
+        if (n == *v) return;
+        *v = n;
+        if (s_owSel == OW_VOLUME) xb_audio_set_game_volume(n);
+        else s_rumbleOn = n;
+        break;
+    }
+    case OW_PERF:
+        if (c->perfItems) { s_owPerfWas = c->perfItems; c->perfItems = 0; }
+        else c->perfItems = s_owPerfWas ? s_owPerfWas : CONFIG_PERF_FPS;
+        s_showFps = c->perfItems;
+        break;
+    case OW_CHAT:
+        s_netShowChat = c->netChatShow = !c->netChatShow;
+        break;
+    case OW_PLAYERS:
+        s_netShowPlayers = c->netPlayersShow = !c->netPlayersShow;
+        break;
+    case OW_ROOM:
+        if (lr != 2) return;
+        s_owLeave = s_netWs ? 1 : 2;   // (the room lost: the ROM list)
+        NetWindowClose(c, 1);
+        return;
+    case OW_LEAVE:
+        if (lr != 2) return;
+        if (!s_owSure) { s_owSure = 1; xb_audio_ui_sound(XB_SFX_ACTION); return; }   // A again to leave
+        s_owLeave = 2;
+        NetWindowClose(c, 1);
+        return;
+    }
+    s_owChanged = 1;
+    xb_audio_ui_sound(lr < 0 ? XB_SFX_VALUE_DOWN : XB_SFX_VALUE_UP);
+}
+
+// Drawn over the running game (NetOverlayDraw): a panel in the middle, its rows, the values with their arrows.
+static void NetWindowDraw(void)
+{
+    static const int labels[OW_ROWS] = { T_OW_RESUME, T_OW_VOLUME, T_RUMBLE, T_PERF_OVERLAY, T_OW_CHAT, T_OW_PLAYERS, T_BACK_TO_ROOM, T_OW_LEAVE };
+    const Config *c = s_owCfg;
+    const float w = 500, rowH = 50, h = 124 + OW_ROWS * rowH + 56, x = (UI_WIDTH - w) * 0.5f, y = (UI_HEIGHT - h) * 0.5f;
+    int k;
+    UiPanel(x, y, w, h, 22);
+    UiText(UI_BOLD, 28, x + 32, y + 42, UI_COL_TEXT, Tr(T_OW_TITLE), UI_LEFT);
+    UiText(UI_REGULAR, 16, x + 32, y + 78, D3DCOLOR_ARGB(255, 255, 210, 140), Tr(T_OW_SUB), UI_LEFT);
+    for (k = 0; k < OW_ROWS; k++)
+    {
+        const float ry = y + 112 + k * rowH, cy = ry + rowH * 0.5f;
+        const int on = k == s_owSel, leave = k == OW_LEAVE;
+        char v[32];
+        v[0] = 0;
+        if (on) UiRoundRect(x + 16, ry + 3, w - 32, rowH - 6, 12, UI_COL_ACCENT, UI_COL_ACCENT);
+        UiText(on ? UI_BOLD : UI_REGULAR, 21, x + 36, cy, leave && !on ? D3DCOLOR_ARGB(255, 250, 120, 120) : UI_COL_TEXT,
+               Tr(leave && s_owSure ? T_OW_LEAVE_SURE : labels[k]), UI_LEFT);
+        if (c && k == OW_VOLUME) _snprintf(v, sizeof(v), "%d %%", c->volumeGame);
+        else if (c && k == OW_RUMBLE) { if (c->rumble) _snprintf(v, sizeof(v), "%d %%", c->rumble); else _snprintf(v, sizeof(v), "%s", Tr(T_OFF)); }
+        else if (c && k == OW_PERF) _snprintf(v, sizeof(v), "%s", Tr(c->perfItems ? T_ON : T_OFF));
+        else if (k == OW_CHAT) _snprintf(v, sizeof(v), "%s", Tr(s_netShowChat ? T_ON : T_OFF));
+        else if (k == OW_PLAYERS) _snprintf(v, sizeof(v), "%s", Tr(s_netShowPlayers ? T_ON : T_OFF));
+        v[sizeof(v) - 1] = 0;
+        if (v[0])
+        {
+            // "<  80 %  >": the value between its arrows, right-aligned.
+            const D3DCOLOR vc = on ? D3DCOLOR_ARGB(255, 255, 255, 255) : UI_COL_ACCENT_HI;
+            const float vw = UiTextWidth(UI_BOLD, 19, v), rx = x + w - 40;
+            UiText(UI_BOLD, 19, rx, cy, vc, ">", UI_RIGHT);
+            UiText(UI_BOLD, 19, rx - 24, cy, vc, v, UI_RIGHT);
+            UiText(UI_BOLD, 19, rx - 48 - vw, cy, vc, "<", UI_RIGHT);
+        }
+    }
+    UiScreenFooter(Tr(T_FOOT_OW));
+}
+
 static int RunGameBody(IDirect3DDevice9 *dev, Config *c, const char *romPath);
 
 // The game with its exceptions logged first (CrashFilter), then left to end the title as before: DashLaunch takes
@@ -4087,6 +4404,7 @@ static int RunGameBody(IDirect3DDevice9 *dev, Config *c, const char *romPath)
     }
     data = RomFileLoad(rom, &size);
     if (!data) { MessageScreen(dev, Tr(T_CANNOT_READ), rom, D3DCOLOR_XRGB(240, 60, 60)); return RG_BROWSER; }
+    strncpy(s_hiresRomPath, rom, sizeof(s_hiresRomPath) - 1);   // (HiresOpen)
     strncpy(s_romNow, rom, sizeof(s_romNow) - 1);   // the pause menu's "Now playing" (read when it first opens)
     s_romNow[sizeof(s_romNow) - 1] = 0;
     s_npTitle[0] = 0;
@@ -4368,7 +4686,7 @@ static int RunGameBody(IDirect3DDevice9 *dev, Config *c, const char *romPath)
             if (!backSince)
             {
                 backSince = GetTickCount() | 1;
-                backUsed = 0;
+                backUsed = s_owOpen;   // (a press that closes the online window is that, not the quick chat)
                 backHeldMs = 0;
                 H64_INFO("[pad] BACK down at VI %u", presented);
                 LogFlush();
@@ -4376,13 +4694,14 @@ static int RunGameBody(IDirect3DDevice9 *dev, Config *c, const char *romPath)
             else
                 backHeldMs += nowMs - backPolledAt > 100.0 ? 100.0 : nowMs - backPolledAt;
             backPolledAt = nowMs;
-            if (s_netMode > 0 && s_netWs)
+            if (s_netMode > 0 && s_netRoomGame)
             {
-                // Online: BACK held a moment is the menu (a short press, the quick chat).
-                if (!backUsed && backHeldMs >= NET_BACK_MENU_MS) { backUsed = 1; s_qcOpen = 0; menuRequest = 1; }
+                // Online: BACK held a moment is the online window over the running game (a short press, the quick
+                // chat); the pause menu, which stopped every console's game, is not opened online.
+                if (!backUsed && backHeldMs >= NET_BACK_MENU_MS) { backUsed = 1; s_qcOpen = 0; NetWindowOpen(c); }
             }
             else s_backHeldMs = backUsed ? 0.0f : (float)backHeldMs;   // the countdown (BackHoldDraw) while it is held
-            if (!backUsed && backHeldMs >= BACK_LEAVE_AT && !(s_netMode > 0 && s_netWs))
+            if (!backUsed && backHeldMs >= BACK_LEAVE_AT && !(s_netMode > 0 && s_netRoomGame))
             {
                 H64_INFO("[pad] BACK held to the end of the countdown: back to the ROM list");
                 s_backHeldMs = 0;
@@ -4400,12 +4719,15 @@ static int RunGameBody(IDirect3DDevice9 *dev, Config *c, const char *romPath)
             s_backHeldMs = 0;   // let go: no countdown
             if (backSince && !backUsed && backHeldMs < 600.0)   // a short press
             {
-                if (s_netMode > 0 && s_netWs)
+                if (s_netMode > 0 && s_netRoomGame)
                 {
                     // One press: the quick chat, or closed; a second press within 400 ms: straight to the keyboard.
+                    // Without the room (lost, the game going on directly) there is no chat: said so, the menu still
+                    // BACK held. The pause menu it opened instead looked like the chat had gone from the game.
                     static DWORD tapAt;
                     const DWORD now = GetTickCount();
-                    if (s_qcOpen && !s_qcKbd && tapAt && now - tapAt < 400) NetQuickChatKeyboard();
+                    if (!s_netWs) NetOsd(Tr(T_NET_CHAT_OFF), 5000);
+                    else if (s_qcOpen && !s_qcKbd && tapAt && now - tapAt < 400) NetQuickChatKeyboard();
                     else { s_qcOpen = !s_qcOpen; s_qcKbd = 0; s_qcRow = s_qcCol = 0; s_qcPrev = 0xFFFF; }
                     tapAt = now;
                 }
@@ -4415,6 +4737,19 @@ static int RunGameBody(IDirect3DDevice9 *dev, Config *c, const char *romPath)
         }
         prevButtons = s_padValid ? s_pad.Gamepad.wButtons : 0;
         if (s_qcOpen) NetQuickChatInput();
+        else if (s_owOpen && s_netMode <= 0) s_owOpen = 0;   // the online game over meanwhile ("sigues solo")
+        else if (s_owOpen)
+        {
+            NetWindowInput(c);
+            if (s_owLeave)
+            {
+                // Back to the room's lobby (as the pause menu's row) or to the ROM list.
+                s_toRoom = s_owLeave == 1;
+                s_owLeave = 0;
+                result = RG_BROWSER;
+                break;
+            }
+        }
         {
             // The shortcuts (Settings > Controls > Button shortcuts, Config::hotkey): one
             // fires when the last of its buttons goes down. With BACK in it, that BACK
@@ -4490,10 +4825,10 @@ static int RunGameBody(IDirect3DDevice9 *dev, Config *c, const char *romPath)
         if (menuRequest)
         {
             menuRequest = 0;
-            NetStatus("menu");   // online: the others are told why the game waits
+            NetStatus(1);   // online: the others are told why the game waits
             result = GameMenuSafe(sys, renderer, c);
             if (result != RG_CONTINUE) break;   // (leaving: the others hear it left, not "back to the game")
-            NetStatus("play");
+            NetStatus(0);
             result = RG_DASHBOARD;
             statsSkip = 1;   // the second with the pause in it is not the game's speed
             QueryPerformanceCounter(&frameStart);   // no catching up for the paused time
@@ -4705,6 +5040,12 @@ static int RunGameBody(IDirect3DDevice9 *dev, Config *c, const char *romPath)
                 if (e > 1.0) e = 1.0;
                 if (e < -1.0) e = -1.0;
                 frameTicks += (LONGLONG)(frameTicks * 0.01 * e);
+            }
+            if (s_netWaitAbsorbMs > 0.0)
+            {
+                // Online: the wait for the others is not caught up (see s_netWaitAbsorbMs).
+                if (s_netMode > 0) frameStart.QuadPart += (LONGLONG)(s_netWaitAbsorbMs * (double)freq.QuadPart / 1000.0);
+                s_netWaitAbsorbMs = 0.0;
             }
             for (;;)
             {

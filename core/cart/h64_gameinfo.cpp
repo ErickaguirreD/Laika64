@@ -189,6 +189,37 @@ int h64_gameinfo_format(const H64GameInfo *info, char *out, int outSize)
     return n;
 }
 
+// A text encoded twice (its UTF-8 read as Latin-1 and encoded again: "ConducciÃ³n"), put back as it was: only when
+// every character of it is below 256 and those bytes make UTF-8 with a character of more than one byte.
+static void undo_double_utf8(std::string &v)
+{
+    std::string out;
+    size_t i = 0, k, n;
+    int multi = 0;
+    while (i < v.size())
+    {
+        const unsigned char c = (unsigned char)v[i];
+        if (c < 0x80) { out += (char)c; i++; continue; }
+        if ((c & 0xE0) != 0xC0 || i + 1 >= v.size() || ((unsigned char)v[i + 1] & 0xC0) != 0x80) return;
+        {
+            const unsigned cp = ((c & 0x1Fu) << 6) | ((unsigned char)v[i + 1] & 0x3Fu);
+            if (cp > 0xFF) return;
+            out += (char)cp;
+        }
+        i += 2;
+    }
+    for (i = 0; i < out.size(); i += n)
+    {
+        const unsigned char c = (unsigned char)out[i];
+        n = c < 0x80 ? 1 : (c & 0xE0) == 0xC0 ? 2 : (c & 0xF0) == 0xE0 ? 3 : (c & 0xF8) == 0xF0 ? 4 : 0;
+        if (!n || i + n > out.size()) return;
+        for (k = 1; k < n; k++)
+            if (((unsigned char)out[i + k] & 0xC0) != 0x80) return;
+        if (n > 1) multi = 1;
+    }
+    if (multi) v = out;
+}
+
 int h64_gameinfo_parse(H64GameInfo *info, const char *text, u32 len)
 {
     const char *p = text, *end = text + len;
@@ -203,6 +234,7 @@ int h64_gameinfo_parse(H64GameInfo *info, const char *text, u32 len)
         {
             std::string key(p, eq - p), value(eq + 1, eol - eq - 1);
             unsigned i;
+            undo_double_utf8(value);   // (a text saved twice encoded: as it was)
             while (!value.empty() && (value[value.size() - 1] == '\r' || value[value.size() - 1] == ' ')) value.erase(value.size() - 1);
             if (key == "found") { info->found = atoi(value.c_str()) != 0; sawFound = 1; }
             else if (key == "cover") info->cover = value == "yes" ? 1 : value == "none" ? 0 : -1;

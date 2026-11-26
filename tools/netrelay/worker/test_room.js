@@ -1,6 +1,6 @@
 // Checks the rooms and chats of a running server (wrangler dev, or the deployed one):
 //   node test_room.js http://127.0.0.1:8799
-// It registers four test players (rm<random><n>), so against the deployed server they stay in its lists.
+// It registers five test players (rm<random><n>), so against the deployed server they stay in its lists.
 const WebSocket = require("ws");
 const base = (process.argv[2] || "http://127.0.0.1:8799").replace(/\/$/, "");
 const wsBase = base.replace(/^http/, "ws") + "/v1/room";
@@ -29,7 +29,7 @@ const open = (query) => new Promise((resolve, reject) => {
 (async () => {
   const tag = (k) => "rm" + Math.random().toString(36).slice(2, 8) + k;
   const me = [];
-  for (let k = 0; k < 4; k++) {
+  for (let k = 0; k < 5; k++) {
     const name = tag(k), r = await api(`register?tag=${name}&country=MX&avatar=${k * 7}`);
     if (!r[0].startsWith("OK")) throw new Error("register: " + r[0]);
     me.push({ name, token: r[0].split("\t")[1] });
@@ -51,7 +51,7 @@ const open = (query) => new Promise((resolve, reject) => {
     console.log("guest " + k + ":", await g.until("game"), "|", await g.until("players"));
     guests.push(g);
   }
-  console.log("fifth:", await (await open(`?op=join&code=${code}&pass=secreto&proto=2${auth(1)}`)).next());
+  console.log("fifth:", await (await open(`?op=join&code=${code}&pass=secreto&proto=2${auth(4)}`)).next());
   guests[1].send("chat\thola a todos");
   console.log("chat seen by host:", await host.until("chat"), "| by guest 3:", await guests[2].until("chat"));
   guests[0].send("ping\t42");
@@ -93,6 +93,37 @@ const open = (query) => new Promise((resolve, reject) => {
   guests[2].close();
   const bye = await host.next();
   console.log("host told guest 3 left: port", bye[0], "type", bye.readUInt32BE(0) & 0xffffff);
+  // A console that lost its connection comes back to the game (op=rejoin): its place again, the others told "again".
+  const port3 = parseInt(starts[3].split("\t")[2], 10), port1 = parseInt(starts[1].split("\t")[2], 10);
+  const rq = (k, port, extra = "") => `?op=rejoin&code=${code}&port=${port}&local=1&players=4&proto=6${extra}${auth(k)}`;
+  console.log("stranger's rejoin:", await (await open(rq(0, port3))).next());
+  guests[2] = await open(rq(3, port3));
+  console.log("rejoined:", await guests[2].until("rejoined"), "| host sees:", await host.until("again"));
+  // ... and one whose old connection the server still holds: swapped, nobody told it left.
+  const old1 = guests[0], oldClosed = new Promise((r) => old1.on("close", (c, why) => r(why.toString())));
+  guests[0] = await open(rq(1, port1));
+  console.log("rejoined over its old connection:", await guests[0].until("rejoined"), "| old one closed:", await oldClosed);
+  for (const [k, from] of [[3, guests[2]], [1, guests[0]]]) {
+    const m = Buffer.alloc(16);
+    m.writeUInt32BE(2, 0);
+    m.writeUInt32BE(500 + k, 4);
+    from.send(m);
+    let got;
+    do got = await host.next(); while (typeof got === "string");
+    if (got.readUInt32BE(4) !== 500 + k || got[3] !== 2) throw new Error(`after the rejoin, host got ${got.toString("hex")}`);
+  }
+  console.log("binary relay after the rejoins: ok (no bye for the swapped one)");
+  // A game the server no longer has (restarted): made again by the first console back, joined by the next.
+  const gone = String(100000 + Math.floor(Math.random() * 900000));
+  const who = `&who=1:${me[0].name},2:${me[1].name}&game=SMASH%20REMIX&crc1=34EE4749&crc2=AABBCCDD&name=Otra&locked=1`;
+  const r0 = await open(`?op=rejoin&code=${gone}&port=1&local=1&players=2&proto=6${who}${auth(0)}`);
+  console.log("room made again:", await r0.until("rejoined"));
+  console.log("not one of its players:", await (await open(`?op=rejoin&code=${gone}&port=2&local=1&players=2&proto=6${who}${auth(2)}`)).next());
+  const r1 = await open(`?op=rejoin&code=${gone}&port=2&local=1&players=2&proto=6${who}${auth(1)}`);
+  console.log("second back:", await r1.until("rejoined"), "| first sees:", await r0.until("again"));
+  console.log("a join to it (started):", await (await open(`?op=join&code=${gone}&pass=&proto=6${auth(3)}`)).next());
+  r1.send("chat\thola de nuevo");
+  console.log("chat in the game made again:", await r0.until("chat"));
   // The general chat.
   console.log("say:", (await api("say?text=hola%20LAIKA" + auth(0)))[0], "| too soon:", (await api("say?text=otra" + auth(0)))[0]);
   const chat = await api("chat?since=0" + auth(1));

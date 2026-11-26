@@ -151,7 +151,19 @@ void AboutScreen(IDirect3DDevice9 *dev);
 // (main.cpp, at launch) both call this, so the picker always matches
 // whichever ROM is selected or running. Cheap - just a directory listing,
 // no file is opened.
-void HiresScanPacks(const char *romName);
+// A game whose folder holds no .hts (a hack, another region) takes another game's: the one
+// its folder's link.txt names (Details > HD textures > Use another game's pack; "-": none),
+// else the one of its cartridge code (`code`, the header's "NKTE": the original game, its
+// pack used as it is - no file copied); else the original game whose name the ROM's file name
+// (`romPath`) or its "hack of" name (game information) holds: "Mario Kart 64 Amped" -> MARIOKART64.
+// HiresPackSource says where the packs came from.
+void HiresScanPacks(const char *romName, const char *code = NULL, const char *romPath = NULL);
+enum { HSRC_NONE = 0, HSRC_OWN, HSRC_LINK, HSRC_AUTO };
+int HiresPackSource(void);
+const char *HiresPackFolder(void);   // the folder (its name) the packs are in: the game's own or the other game's
+// The game's pack in use as active.txt says it (1: its file in `file`; -1: none, HD off for it;
+// 0: not chosen): its own folder's, then (another game's packs) that folder's.
+int HiresActiveFor(char *file, size_t size);
 int HiresPackCount(void);
 const char *HiresPackName(int i);   // i: 0..HiresPackCount()-1, just the .hts file name
 const char *HiresPackPath(int i);   // the full <textures folder>\<rom>\... path, to open it

@@ -521,6 +521,10 @@ export default {
 //     pong\t<n>                             the answer to this console's "ping\t<n>"
 //     p2p\t<port>\t<what>                    in the game: a console's word about talking directly (its addresses,
 //                                           the ports it reaches, or "off"): the consoles agree among themselves
+//     again\t<port>\t<tag>                  in the game: a console that lost its connection is back (Room.rejoin)
+//     rejoined\t<port>                      to that console: its place in the game again
+// (/v1/room?op=rejoin&code=<code>&port=<n>&local=<n>&players=<n>&who=<port:tag,...>&game=...&crc1=&crc2=&name=
+// &locked=<0|1>: a console of a game the room lost while it played on directly; the room made again if gone.)
 // and takes "chat\t<text>", "ping\t<n>", "rtt\t<ms>" (its time to the server, measured with the pings),
 // "bye\t<why>" (why it is about to close: "nogame") from anyone, "local\t<1-3>" (how many play on it) before the game, "status\t<what>", "p2p\t<what>" and "back" in
 // the game, and "start" (two players at least) and "kick\t<place>" from
@@ -560,6 +564,18 @@ async function room(request, url, env) {
   }
   const code = q.get("code") ?? "";
   if (!/^[0-9]{6}$/.test(code)) return refuse("none");
+  if (q.get("op") === "rejoin") {
+    // A console of a game back after losing its connection (Room.rejoin); what it knows of the game, should the
+    // room be gone from the server.
+    args.set("code", code);
+    for (const k of ["port", "local", "players", "locked"]) args.set(k, String(parseInt(q.get(k) ?? "", 10) || 0));
+    args.set("who", clean(q.get("who"), 120));
+    args.set("name", clean(q.get("name"), ROOM_NAME_MAX) || who.name);
+    args.set("game", clean(q.get("game"), 40));
+    args.set("crc1", clean(q.get("crc1"), 8));
+    args.set("crc2", clean(q.get("crc2"), 8));
+    return env.ROOMS.get(env.ROOMS.idFromName(code)).fetch("https://room/rejoin?" + args, request);
+  }
   return env.ROOMS.get(env.ROOMS.idFromName(code)).fetch("https://room/join?" + args, request);
 }
 
@@ -828,6 +844,7 @@ export class Room {
   async fetch(request) {
     const url = new URL(request.url), q = url.searchParams;
     const create = url.pathname === "/create";
+    if (url.pathname === "/rejoin") return this.rejoin(q);
     if (create && this.open) return new Response("taken", { status: 409 });
     if (!create) {
       if (!this.open) return refuse("none");
@@ -873,10 +890,73 @@ export class Room {
     this.roster();
     await this.list();
     await this.state.storage.setAlarm(Date.now() + ROOM_BEAT_MS);
+    this.listen(p, ws);
+    return new Response(null, { status: 101, webSocket: pair[0] });
+  }
+
+  // A player's connection: its messages, and its end (not that of a connection it was given back in, Room.rejoin).
+  listen(p, ws) {
     ws.addEventListener("message", (e) => this.message(p, e.data));
-    const gone = () => this.leave(p);
+    const gone = () => {
+      if (p.ws === ws) this.leave(p);
+    };
     ws.addEventListener("close", gone);
     ws.addEventListener("error", gone);
+  }
+
+  // A console of the game back after losing its connection to the room (the consoles went on directly): its place
+  // in the game again ("rejoined\t<port>"), the others told ("again\t<port>\t<tag>": it did not leave). Its old
+  // connection, still here when the server had not seen it go, is let go. A room the server no longer has (it
+  // restarted, or every console lost it) is made again from what the console knows: the game playing, `who` the
+  // consoles in it ("1:TAG,3:TAG2", their first ports).
+  async rejoin(q) {
+    const tag = q.get("tag") ?? "", port = parseInt(q.get("port"), 10) || 0;
+    const local = Math.max(1, Math.min(parseInt(q.get("local"), 10) || 1, 3));
+    if (!this.open) {
+      const who = new Map();
+      for (const w of (q.get("who") ?? "").split(",")) {
+        const at = w.indexOf(":");
+        if (at > 0) who.set(parseInt(w.slice(0, at), 10) || 0, w.slice(at + 1));
+      }
+      if (port < 1 || (who.get(port) ?? "").toLowerCase() !== tag.toLowerCase()) return refuse("none");
+      this.open = true;
+      this.started = true;
+      this.counting = false;
+      this.code = q.get("code");
+      this.name = q.get("name") ?? "";
+      this.size = Math.max(2, Math.min(parseInt(q.get("players"), 10) || ROOM_PLAYERS, ROOM_PLAYERS));
+      // Its password is not known here: a locked room stays locked (to anyone new).
+      this.pass = q.get("locked") === "1" ? await sha256(this.code + crypto.randomUUID()) : "";
+      this.game = { name: q.get("game") ?? "", crc1: q.get("crc1") ?? "", crc2: q.get("crc2") ?? "", art: "" };
+      this.startedAt = now();
+      this.players = [];
+      this.inGame = who;
+      await this.log(tag, "made again");
+    }
+    if (!this.started || (this.inGame?.get(port) ?? "").toLowerCase() !== tag.toLowerCase()) return refuse("none");
+    const pair = new WebSocketPair();
+    const ws = pair[1];
+    ws.accept();
+    ws.binaryType = "arraybuffer";
+    let p = this.players.find((o) => o.playing && o.port === port);
+    if (p) {
+      const old = p.ws;
+      p.ws = ws;
+      try {
+        old.close(1000, "again");
+      } catch (e) {}
+    } else {
+      p = { ws, tag, avatar: parseInt(q.get("avatar"), 10) || 0, port, rtt: 0, playing: true, country: q.get("country") || "--",
+        conn: parseInt(q.get("conn"), 10) || 0, proto: parseInt(q.get("proto"), 10) || 0, seen: Date.now(), local, since: now() };
+      this.players.push(p);
+      for (const o of this.playing()) if (o !== p) this.send(o, ["again", port, tag].join("\t"));
+    }
+    this.last = p.seen = Date.now();
+    ws.send("rejoined\t" + port);
+    await this.log(tag, "rejoined");
+    await this.list();
+    await this.state.storage.setAlarm(Date.now() + ROOM_BEAT_MS);
+    this.listen(p, ws);
     return new Response(null, { status: 101, webSocket: pair[0] });
   }
 
@@ -1012,9 +1092,11 @@ export class Room {
     for (const p of this.players) {
       p.port = next;
       p.playing = true;
+      p.since = this.startedAt;
       for (let k = 0; k < p.local; k++) owner.push(next);
       next += p.local;
     }
+    this.inGame = new Map(this.players.map((p) => [p.port, p.tag]));   // who may come back to it (Room.rejoin)
     for (const p of this.players) this.send(p, ["start", owner.length, p.port, p.local, owner.join(",")].join("\t"));
     await this.together();
     await this.list();
@@ -1041,7 +1123,7 @@ export class Room {
   quit(p) {
     if (!p.playing) return;
     p.playing = false;
-    if (this.startedAt) this.week(p.tag, now() - this.startedAt);
+    if (this.startedAt) this.week(p.tag, now() - (p.since ?? this.startedAt));   // (since it came back, Room.rejoin)
     const bye = new Uint8Array(16);
     bye[0] = p.port;
     bye[3] = 4;
