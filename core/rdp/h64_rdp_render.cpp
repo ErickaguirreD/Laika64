@@ -1425,6 +1425,13 @@ void h64_rdp_command(H64System *sys, const u64 *words, u32 count)
         st->colorWidth = (w[0] & 1023) + 1;
         st->colorAddr = w[1] & 0xFFFFFF;
         st->colorFmt = size == 0 ? FB_I4 : size == 1 ? FB_I8 : size == 2 ? (fmt ? FB_IA88 : FB_RGBA5551) : FB_RGBA8888;
+        {
+            u32 bytes = ((st->colorWidth << size) >> 1) * (st->colorWidth > 400 ? 480 : 240), k;
+            for (k = 0; k < 8 && st->fbAddr[k] != st->colorAddr; k++) {}
+            if (k == 8) k = st->fbNext++ & 7;
+            st->fbAddr[k] = st->colorAddr;
+            st->fbBytes[k] = bytes;
+        }
         return;
     }
     }

@@ -117,6 +117,10 @@ struct H64RdpState
     u32 colorAddr, colorWidth;
     int colorFmt;                // FB_*
     u32 depthAddr;
+    // The colour images set lately (address, bytes of 240 lines, 480 when wider than 400): online, the state hash
+    // leaves them out (main.cpp NetVi) - the GPU's copy back lands there at times that differ between consoles.
+    u32 fbAddr[8], fbBytes[8];
+    u32 fbNext;
 
     // Hi-res texture packs (render/xenos/h64_hts.cpp): the RDRAM source of the
     // latest loads, and the palette entries of the latest LOAD_TLUTs (logical

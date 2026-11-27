@@ -23,7 +23,7 @@
 //                                             asked too), or ends one
 //   /v1/requests?g=&t=                        friendships asked of this player: name country avatar
 //   /v1/answer?g=&t=&name=&yes=1|0            yes or no to one
-//   /v1/dm?g=&t=&to=&text=                    a message to a friend
+//   /v1/dm?g=&t=&to=&text=                    a message to a player (a friend or not)
 //   /v1/conv?g=&t=&with=&since=               the messages with a friend after `since`: id mine text
 //   /v1/lobby?g=&t=&since=                    in one answer: the rooms waiting ("R" code host avatar players game
 //                                             name locked max hostms art crc; crc: "CRC1 CRC2" of its ROM), the games being played ("G" code game
@@ -288,7 +288,9 @@ async function profiles(cmd, q, request, env) {
     case "dm": {
       const other = await db.prepare("SELECT id FROM users WHERE lower = ?").bind((q.get("to") ?? "").toLowerCase()).first();
       const text = clean(q.get("text"), DM_LEN);
-      if (!other || !(await db.prepare("SELECT 1 FROM friends WHERE user = ? AND friend = ?").bind(me, other.id).first())) return ["ERR name"];
+      // Any player, a friend or not (2026-11-27: Players > X:Mensaje opens a conversation with anyone; only
+      // friends' messages went through and the others' showed "Sin conexión").
+      if (!other || other.id === me) return ["ERR name"];
       if (!text) return ["ERR text"];
       const last = await db.prepare("SELECT MAX(at) AS at FROM dm WHERE from_id = ?").bind(me).first();
       if (last && last.at && t - last.at < 1) return ["ERR busy"];

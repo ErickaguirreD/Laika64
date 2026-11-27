@@ -35,6 +35,7 @@
 #include "../../core/dynarec/h64_lockstep.h"
 #include "../../core/hle/h64_hle.h"
 #include "../../core/pif/h64_input_script.h"
+#include "../../core/rdp/h64_rdp_state.h"
 #include "../../core/savestate/h64_state.h"
 #include "../../render/xenos/h64_xenos.h"
 #include "../../tests/unit/unit_tests.h"
@@ -1120,14 +1121,18 @@ static void OsdT(int id, int num)
 }
 
 // A hash of one MB of RDRAM (four 64-bit FNV-style lanes, folded): the online play's state check.
-static u32 NetHashBlock(const u8 *p)
+// One MB of RDRAM, without the 32-byte runs in skip[0..skips) (offsets in the MB, [lo, hi)).
+static u32 NetHashBlock(const u8 *p, const u32 (*skip)[2], int skips)
 {
     const u64 *w = (const u64 *)p;
     u64 a = 0x9E3779B97F4A7C15ull, b = 0xC2B2AE3D27D4EB4Full, c = 0x165667B19E3779F9ull, d = 0x27D4EB2F165667C5ull;
     const u64 k = 0x100000001B3ull;
     u32 i;
+    int s;
     for (i = 0; i < 0x100000 / 8; i += 4)
     {
+        for (s = 0; s < skips && (i * 8 + 32 <= skip[s][0] || i * 8 >= skip[s][1]); s++) {}
+        if (s < skips) continue;
         a = (a ^ w[i]) * k;
         b = (b ^ w[i + 1]) * k;
         c = (c ^ w[i + 2]) * k;
@@ -1219,6 +1224,10 @@ static u32 s_netDesync, s_netDesyncFrame, s_netWaits;
 static double s_netWaitMs, s_netWaitMax;
 static DWORD s_netLastRecv, s_netLastSend;   // GetTickCount of the last message in and out
 static int s_netRtt[NET_PLAYERS + 1];       // per port: the time there and back, ms (0: not known yet)
+// A console's own work a frame (running and presenting, the waits for the others left out), in tenths of a ms:
+// this console's, measured each second, travels in its pings (b); the others' as they said it (0: not known).
+// Over 167 (60 frames a second) every console runs at that console's pace.
+static u32 s_netBusyMine, s_netBusy[NET_PLAYERS + 1];
 static char s_netTagOf[NET_PLAYERS + 1][ONLINE_TAG_MAX + 4];   // per port: its player's gamertag ("" directly: netplay.txt)
 static int s_netAvatarOf[NET_PLAYERS + 1];  // ... and avatar
 static DWORD s_netPingAt;                   // the next ping (one a second, as the game sends its inputs)
@@ -1498,7 +1507,11 @@ static int NetMessage(const NetMsg *m)
         t[sizeof(t) - 1] = 0;
         NetOsd(t, m->a ? 120000 : 8000);   // in the menu: shown until it comes back
     }
-    else if (type == NM_PING) NetSend(NM_PONG, m->a, (u32)p, 0);
+    else if (type == NM_PING)
+    {
+        if (m->b) s_netBusy[p] = m->b;
+        NetSend(NM_PONG, m->a, (u32)p, 0);
+    }
     else if (type == NM_PONG && (int)m->b == s_netPort)
     {
         const int ms = (int)(GetTickCount() - m->a);
@@ -1790,7 +1803,7 @@ static void NetPad(H64System *sys)
     }
     if ((int)(GetTickCount() - s_netPingAt) >= 0)
     {
-        NetSend(NM_PING, GetTickCount(), 0, 0);   // the others answer: the time there and back (the ping shown)
+        NetSend(NM_PING, GetTickCount(), s_netBusyMine, 0);   // the others answer: the time there and back (the ping shown)
         s_netPingAt = GetTickCount() + 1000;
     }
     NetPump(0);
@@ -1811,7 +1824,7 @@ static void NetPad(H64System *sys)
             // Still here. Directly, every NET_P2P_NUDGE_MS: each message carries this console's last inputs again, and
             // a packet lost on the way left both consoles waiting for each other until the next ping (~0.5 s
             // freezes at the same frame on both, Mario Kart 2026-11-18).
-            if (s_netMode > 0 && GetTickCount() - s_netLastSend >= (s_netP2p ? NET_P2P_NUDGE_MS : NET_PING_MS)) NetSend(NM_PING, GetTickCount(), 0, 0);
+            if (s_netMode > 0 && GetTickCount() - s_netLastSend >= (s_netP2p ? NET_P2P_NUDGE_MS : NET_PING_MS)) NetSend(NM_PING, GetTickCount(), s_netBusyMine, 0);
             if (s_netMode > 0 && !NetReady(n) && GetTickCount() - s_netLastRecv > NET_TIMEOUT_MS) NetEnd("las demas consolas no responden");
             if (s_netMode > 0 && !told && GetTickCount() - waitAt >= 1000)
             {
@@ -1858,6 +1871,20 @@ static void NetPad(H64System *sys)
         H64_INFO("[net] %u reads: waited %u times, %.0f ms in all (longest %.1f ms), %u frames out of step", n + 1, s_netWaits,
                  s_netWaitMs, s_netWaitMax, s_netDesync);
         s_netWaitMax = 0;
+        {
+            // Each console's own work a frame: one over 16.7 ms sets every console's pace (all wait for it).
+            char t[160];
+            int len = 0;
+            for (p = 1; p <= s_netPlayers && len < (int)sizeof(t) - 40; p++)
+            {
+                const u32 b = NET_MINE(p) ? s_netBusyMine : s_netBusy[p];
+                if (!NET_CONSOLE(p) || (NET_MINE(p) && p != s_netPort)) continue;
+                if (b) len += _snprintf(t + len, sizeof(t) - len, " %s%s %.1f%s", len ? "," : "", s_netTagOf[p][0] ? s_netTagOf[p] : "?",
+                                        b / 10.0, b > 167 ? " (lenta)" : "");
+            }
+            t[len] = 0;
+            if (len) H64_INFO("[net] work a frame, ms (16.7 = 60 FPS):%s", t);
+        }
     }
 }
 
@@ -1917,7 +1944,23 @@ static void NetVi(H64System *sys)
     if (sys->asyncAudioWait) sys->asyncAudioWait(sys->asyncUser);
     h64_system_state_hash(sys, &cpu, NULL);
     s_netMine[slot][0] = f + 1;
-    s_netMine[slot][1] = NetHashBlock(sys->rdram + (block << 20)) ^ cpu;
+    {
+        // Without the colour images: the GPU's copy back of a frame lands at times that differ between consoles
+        // (after a long wait for another console, Mario Kart's frames in MB 3 differed now and then, the game the
+        // same on all - "DESINCRONIZADO" with nothing out of step). The list is the same everywhere.
+        u32 skip[8][2];
+        int skips = 0, k;
+        const H64RdpState *st = sys->rdpState;
+        for (k = 0; st && k < 8; k++)
+        {
+            const u32 lo = st->fbAddr[k], hi = lo + st->fbBytes[k];
+            if (!st->fbBytes[k] || hi <= (block << 20) || lo >= ((block + 1) << 20)) continue;
+            skip[skips][0] = lo > (block << 20) ? lo - (block << 20) : 0;
+            skip[skips][1] = hi < ((block + 1) << 20) ? hi - (block << 20) : 0x100000;
+            skips++;
+        }
+        s_netMine[slot][1] = NetHashBlock(sys->rdram + (block << 20), skip, skips) ^ cpu;
+    }
     NetSend(NM_HASH, f, s_netMine[slot][1], 0);
     for (p = 1; p <= s_netPlayers; p++)
         if (NET_CONSOLE(p) && p != s_netPort) NetHashCheck(p, slot);
@@ -2210,6 +2253,8 @@ static void NetConnect(H64System *sys, const Config *c)
     s_netShowChat = c->netChatShow;
     s_netShowPlayers = c->netPlayersShow;
     memset(s_netRtt, 0, sizeof(s_netRtt));
+    memset(s_netBusy, 0, sizeof(s_netBusy));
+    s_netBusyMine = 0;
     s_netChatCount = 0;
     s_qcOpen = s_qcKbd = 0;
     s_netSentUpTo = s_netNextSlot = s_netDelay;   // reads [0, delay): neutral, sent by nobody
@@ -2244,7 +2289,7 @@ static void NetKeepAlive(void)
         s_netBackSay--;
         NetSend(NM_STATUS, 0, 0, 0);   // back, again
     }
-    if (s_netMode > 0 && GetTickCount() - s_netLastSend >= NET_PING_MS) NetSend(NM_PING, GetTickCount(), 0, 0);
+    if (s_netMode > 0 && GetTickCount() - s_netLastSend >= NET_PING_MS) NetSend(NM_PING, GetTickCount(), s_netBusyMine, 0);
     if (s_netMode > 0 && GetTickCount() - s_netLastRecv > NET_TIMEOUT_MS) NetEnd("las demas consolas no responden");
 }
 
@@ -4374,6 +4419,7 @@ static int RunGameBody(IDirect3DDevice9 *dev, Config *c, const char *romPath)
     u32 fpsFrames = 0;
     double fpsStart = QpcMs();
     LONGLONG busyTicks = 0;   // time running and presenting since fpsStart (the details' CPU load)
+    double netWaitAt = 0.0;   // s_netWaitMs at fpsStart (online: the waits taken out of busyTicks)
     u64 gfxProfAt = 0;   // snapshot at fpsStart, for the GPU load detail (Settings > Show FPS) - set once sys exists
     char rom[256];
     u8 *data;
@@ -4885,6 +4931,15 @@ static int RunGameBody(IDirect3DDevice9 *dev, Config *c, const char *romPath)
         if (QpcMs() - fpsStart >= 1000.0)
         {
             double nowMs = QpcMs();
+            if (s_netWaitMs < netWaitAt) netWaitAt = 0.0;   // a new online game since
+            if (s_netMode > 0 && fpsFrames)
+            {
+                // This console's own work a frame, for its pings (s_netBusyMine).
+                const double ms = busyTicks * 1000.0 / (double)freq.QuadPart - (s_netWaitMs - netWaitAt);
+                const u32 v = ms > 0.0 ? (u32)(ms * 10.0 / fpsFrames + 0.5) : 0;
+                s_netBusyMine = v ? v : 1;   // 0 travels as "not known"
+            }
+            netWaitAt = s_netWaitMs;
             if (s_showFps)
             {
                 // The lines chosen (Settings > System > On-screen performance), in this order:

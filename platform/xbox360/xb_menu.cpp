@@ -14406,9 +14406,9 @@ static void online_message(IDirect3DDevice9 *dev, const char *title, const char 
 }
 
 // Why the last request failed (OnlineError), in the menus' language.
-static const char *online_error_text(void)
+// The text of a server's error (OnlineError's words).
+static const char *online_error_text_of(const char *e)
 {
-    const char *e = OnlineError();
     if (!strcmp(e, "taken")) return Tr(T_ONLINE_TAG_TAKEN);
     if (!strcmp(e, "name")) return Tr(T_ONLINE_TAG_RULES);
     if (!strcmp(e, "none") || !strcmp(e, "expired")) return Tr(T_ONLINE_NO_ROOM);
@@ -14419,6 +14419,11 @@ static const char *online_error_text(void)
     if (!strcmp(e, "password")) return Tr(T_ONLINE_PASSWORD_WRONG);
     if (!strcmp(e, "kicked")) return Tr(T_ONLINE_KICKED);
     return Tr(T_ONLINE_NO_SERVER);
+}
+
+static const char *online_error_text(void)
+{
+    return online_error_text_of(OnlineError());
 }
 
 static void online_time(int minutes, char *out, size_t size)
@@ -17825,7 +17830,9 @@ static int online_conversation(IDirect3DDevice9 *dev, const char *with, int avat
             OnlineUnreadClear(with);
             if (hadSend && !s_conv.sent)
             {
-                online_message(dev, with, !strcmp(s_conv.sendError, "busy") ? Tr(T_ONLINE_CHAT_SOON) : online_error_text());
+                // The send's own error (kept by conv_thread): the reading after it put OnlineError back to none,
+                // and every refused message said "Sin conexión".
+                online_message(dev, with, !strcmp(s_conv.sendError, "busy") ? Tr(T_ONLINE_CHAT_SOON) : online_error_text_of(s_conv.sendError));
                 UiInputInit(&in);
             }
         }
