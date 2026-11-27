@@ -15823,18 +15823,54 @@ static int chat_minutes(const char *when)
 // after another under one name and avatar, long ones over up to three lines, and a faint line with how long it
 // was where the talk paused 10 minutes or more.
 // A chat line's height in online_chat_view (with its name and avatar when `first`).
+static int s_chatNameAbove;   // a narrow chat (the room's): a run's name on a line of its own, its text under it, all the width
+
 static float chat_item_h(const OnlineChatLine *m, int first, float x, float w)
 {
     const float size = 17, timeW = m->when[0] ? UiTextWidth(UI_REGULAR, 14, m->when) + 10 : 0;
-    const float tx = x + 36 + (first ? UiTextWidth(UI_BOLD, size, m->tag) + 8 : 0);
+    const float tx = x + 36 + (first && !s_chatNameAbove ? UiTextWidth(UI_BOLD, size, m->tag) + 8 : 0);
     const int lines = RichText(UI_REGULAR, size, 0, 0, x + w - timeW - tx, 3, 0, m->text.c_str(), 0, NULL);
-    return (first ? 6 : 0) + lines * size * 1.35f + 4;
+    return (first ? 6 : 0) + (first && s_chatNameAbove ? size * 1.35f : 0) + lines * size * 1.35f + 4;
 }
 
 static int chat_pause(const std::vector<OnlineChatLine> &chat, int k)
 {
     const int now = chat_minutes(chat[k].when), before = k > 0 ? chat_minutes(chat[k - 1].when) : -1;
     return k > 0 && (chat[k].daysAgo != chat[k - 1].daysAgo || (now >= 0 && before >= 0 && (now - before + 1440) % 1440 >= 10));
+}
+
+// A word wider than `w` (no space to wrap at: "wwwwwwww...") split with spaces where it no longer fits, so the
+// chat's lines wrap it instead of running over the time and out of the column. Emojis (4-byte UTF-8) left whole.
+static std::string chat_break_words(const std::string &text, float w)
+{
+    std::string out, word;
+    size_t i = 0;
+    while (i <= text.size())
+    {
+        const unsigned char c = i < text.size() ? (unsigned char)text[i] : ' ';
+        if (c == ' ')
+        {
+            out += word;
+            if (i < text.size()) out += ' ';
+            word.clear();
+            i++;
+            continue;
+        }
+        {
+            // one UTF-8 character
+            const size_t n = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : c >= 0xC0 ? 2 : 1;
+            const std::string ch = text.substr(i, n);
+            if (n < 4 && !word.empty() && UiTextWidth(UI_REGULAR, 17, (word + ch).c_str()) > w)
+            {
+                out += word;
+                out += ' ';
+                word.clear();
+            }
+            word += ch;
+            i += n;
+        }
+    }
+    return out;
 }
 
 // The general chat up to message `count` (-1: all of them; the lobby's older messages show the ones before).
@@ -15868,18 +15904,21 @@ static void online_chat_view(float x, float top, float bottom, float w, const st
         const int newDay = k > 0 && m->daysAgo != chat[k - 1].daysAgo;
         const int pause = k > 0 && (gap >= 10 || newDay), first = k == 0 || k == kTop || pause || _stricmp(chat[k - 1].tag, m->tag);
         const float timeW = m->when[0] ? UiTextWidth(UI_REGULAR, 14, m->when) + 10 : 0;
-        const float nameW = first ? UiTextWidth(UI_BOLD, size, m->tag) + 8 : 0, tx = x + 36 + nameW;
+        const int above = first && s_chatNameAbove;
+        const float nameW = first && !above ? UiTextWidth(UI_BOLD, size, m->tag) + 8 : 0, tx = x + 36 + nameW;
         const int lines = RichText(UI_REGULAR, size, 0, 0, x + w - timeW - tx, 3, 0, m->text.c_str(), 0, NULL);
-        float hgt = (first ? 6 : 0) + lines * lineH + 4, y0, cy;
+        float hgt = (first ? 6 : 0) + (above ? lineH : 0) + lines * lineH + 4, y0, cy, ny;
         if (yb - hgt < top) break;
         y0 = yb - hgt + (first ? 6 : 0);
+        ny = y0 + lineH * 0.5f;   // the name's line
+        if (above) y0 += lineH;
         cy = y0 + lineH * 0.5f;
         if (!_stricmp(m->tag, me))
             UiRoundRect(x - 6, y0 - 2, w + 10, lines * lineH + 3, 7, D3DCOLOR_ARGB(34, 150, 120, 255), D3DCOLOR_ARGB(34, 150, 120, 255));
         if (first)
         {
-            online_avatar(x + 14, cy, 13, m->avatar, m->tag);
-            UiText(UI_BOLD, size, x + 36, cy, online_tag_colour(m->tag), m->tag, UI_LEFT);
+            online_avatar(x + 14, ny, 13, m->avatar, m->tag);
+            UiText(UI_BOLD, size, x + 36, ny, online_tag_colour(m->tag), m->tag, UI_LEFT);
         }
         RichText(UI_REGULAR, size, tx, cy, x + w - timeW - tx, 3, UI_COL_TEXT, m->text.c_str(), 1, NULL);   // (its emojis drawn)
         if (m->when[0]) UiText(UI_REGULAR, 14, x + w, cy, UI_COL_TEXT3, m->when, UI_RIGHT);
@@ -16209,7 +16248,7 @@ static int online_lobby_run(IDirect3DDevice9 *dev, const std::string &hostFile)
             OnlineRoomSay(ready ? "@r1" : "@r0");
             xb_audio_ui_sound(ready ? XB_SFX_VALUE_UP : XB_SFX_VALUE_DOWN);
         }
-        if ((down & XINPUT_GAMEPAD_RIGHT_THUMB) && !lb->countdown)
+        if ((down & XINPUT_GAMEPAD_RIGHT_THUMB) && !(in.held & XINPUT_GAMEPAD_LEFT_THUMB) && !lb->countdown)   // (LS + RS: a screenshot)
         {
             // RS: Invite to play (friends, players online lately).
             xb_audio_ui_sound(XB_SFX_SELECT);
@@ -16444,7 +16483,21 @@ static int online_lobby_run(IDirect3DDevice9 *dev, const std::string &hostFile)
             last = (int)vis.size() - chatOff;
             if (last < 0) last = 0;
             first = last - fit > 0 ? last - fit : 0;
-            for (q = first; q < last; q++) online_chat_line(chatX + 16, bottom - (last - q) * lineH + lineH * 0.5f, chatW - 34, &lb->chat[vis[q]]);
+            {
+                // long messages over up to three lines, as in the general chat (one line each cut them with "...")
+                std::vector<OnlineChatLine> shown;
+                for (q = 0; q < last; q++)
+                {
+                    // the room for the text on a line: the column less the avatar, the name and the time
+                    OnlineChatLine m = lb->chat[vis[q]];
+                    const float room = chatW - 34 - 36 - (m.when[0] ? UiTextWidth(UI_REGULAR, 14, m.when) + 10 : 0) - 6;
+                    if (room > 40) m.text = chat_break_words(m.text, room);
+                    shown.push_back(m);
+                }
+                s_chatNameAbove = 1;
+                online_chat_view(chatX + 16, top + 40, bottom, chatW - 34, shown);
+                s_chatNameAbove = 0;
+            }
             if (vis.empty()) UiText(UI_REGULAR, 15, chatX + 16, top + 56, UI_COL_TEXT3, Tr(T_ONLINE_CHAT_EMPTY), UI_LEFT);
             if ((int)vis.size() > fit)
             {
@@ -17291,9 +17344,12 @@ static int online_play_run(IDirect3DDevice9 *dev)
             UiCircle(px + 80, y + 142, 9, UI_COL_BG_BOTTOM);
             UiCircle(px + 80, y + 142, 6, ONLINE_GREEN);
             UiText(UI_BOLD, 26, px + 108, y + 82, online_tag_colour(u->name), u->name, UI_LEFT);
-            if (u->avatar >= ONLINE_AVATAR_CUSTOM) premium_tag(px + 120 + UiTextWidth(UI_BOLD, 26, u->name), y + 82, 13);
             fw = online_flag(px + 108, y + 110, 16, ci);
-            UiText(UI_REGULAR, 15, px + 108 + (fw ? fw + 8 : 0), y + 110, UI_COL_TEXT2, online_country_name(ci), UI_LEFT);
+            {
+                // the country; a custom avatar's "Premium avatar" after it (beside a long name it left the card)
+                const float cr = UiText(UI_REGULAR, 15, px + 108 + (fw ? fw + 8 : 0), y + 110, UI_COL_TEXT2, online_country_name(ci), UI_LEFT);
+                if (u->avatar >= ONLINE_AVATAR_CUSTOM) premium_tag(px + 108 + (fw ? fw + 8 : 0) + cr + 12, y + 110, 12);
+            }
             online_ping_bars(px + 108, y + 136, 16, ms);
             if (ms) _snprintf(t, sizeof(t) - 1, "%d ms", ms);
             else strncpy(t, "-- ms", sizeof(t) - 1);
@@ -29420,7 +29476,31 @@ static int home_screen(IDirect3DDevice9 *dev, Config *c, const std::vector<RomEn
                     _snprintf(t, sizeof(t) - 1, "%s", nf ? Tr(T_HOME_FRIENDS_ON) : Tr(T_HOME_FRIENDS_NONE));
                     if (nf) _snprintf(t, sizeof(t) - 1, Tr(T_HOME_FRIENDS_ON), nf);
                     t[sizeof(t) - 1] = 0;
-                    home_text(UI_BOLD, 15, fxl, cy + 94, UI_COL_TEXT, t, UI_LEFT, 0, a);
+                    if (nf) home_text(UI_BOLD, 15, fxl, cy + 94, UI_COL_TEXT, t, UI_LEFT, 0, a);
+                    else
+                    {
+                        // nobody: centred in the column, the friends' symbol, "No friends online" and the Y button with
+                        // "friends" (the text's two halves, around " - Y ")
+                        static const D3DCOLOR yel = D3DCOLOR_ARGB(255, 240, 190, 40);
+                        const float mx = (fxl + cx + cw) * 0.5f - 10, my = cy + ch * 0.5f + 10;
+                        char head[96], hint[48];
+                        const char *dash = strstr(t, " - Y ");
+                        float hw;
+                        _snprintf(head, sizeof(head) - 1, "%.*s", dash ? (int)(dash - t) : (int)strlen(t), t);
+                        head[sizeof(head) - 1] = 0;
+                        _snprintf(hint, sizeof(hint) - 1, "%s", dash ? dash + 5 : "");
+                        hint[sizeof(hint) - 1] = 0;
+                        UiCircle(mx, my - 50, 26, UiAlpha(D3DCOLOR_ARGB(50, 255, 255, 255), a));
+                        menu_icon(UI_ICON_FRIENDS, mx, my - 50, UiAlpha(UI_COL_TEXT3, a));
+                        home_text(UI_BOLD, 17, mx, my, UI_COL_TEXT2, head, UI_CENTER, 0, a);
+                        if (hint[0])
+                        {
+                            hw = UiTextWidth(UI_REGULAR, 15, hint) + 30;
+                            UiCircle(mx - hw * 0.5f + 11, my + 32, 11, UiAlpha(yel, a));
+                            home_text(UI_BOLD, 13, mx - hw * 0.5f + 11, my + 32, D3DCOLOR_ARGB(255, 30, 24, 10), "Y", UI_CENTER, 0, a);
+                            home_text(UI_REGULAR, 15, mx - hw * 0.5f + 30, my + 32, UI_COL_TEXT3, hint, UI_LEFT, 0, a);
+                        }
+                    }
                     for (k = 0; k < nf && cy + 130 + k * 30 < cy + ch - 18; k++)
                     {
                         char fit[64];

@@ -1255,6 +1255,7 @@ static double s_netWaitAbsorbMs;
 static u32 s_netBaseVi;                     // the delay in frames (agreed: the hello's delay, 4 directly)
 static u32 s_netNextSlot;                   // the next read this console's own input goes to
 static u32 s_netRateReads;                  // s_netReads at the last count
+static u32 s_netRateWaits, s_netCalm;       // s_netWaits at the last count; counts in a row without a wait (a step down needs 2)
 static u32 s_netDelayNext;                  // a new delay, from the next read on (0: none)
 static DWORD s_netRelayPingAt;              // directly: the next ping that keeps the room open
 // Directly, the room is only the chat and the way back should the direct one fail: a room silent this long (its
@@ -1799,6 +1800,8 @@ static void NetPad(H64System *sys)
         DWORD shownAt = waitAt;
         int told = 0, still = 0;
         s_netWaits++;
+        s_netCalm = 0;
+        if (s_netDelayNext && s_netDelayNext < s_netDelay) s_netDelayNext = 0;   // waiting: no step down now
         while (s_netMode > 0 && !NetReady(n))
         {
             NetPump(2);
@@ -1889,6 +1892,11 @@ static void NetVi(H64System *sys)
         // The reads of the last NET_RATE_VI frames (a loading screen that hardly reads changes nothing).
         const u32 reads = s_netReads - s_netRateReads;
         s_netRateReads = s_netReads;
+        // A step down only after 2 counts in a row without waiting for the other consoles (a 50 ms link with
+        // jitter went 4, 5, 6, 4, 5... and each step down brought the waits back).
+        if (s_netWaits == s_netRateWaits) s_netCalm++;
+        else s_netCalm = 0;
+        s_netRateWaits = s_netWaits;
         if (reads >= NET_RATE_VI / 6)
         {
             // In quarters of a read: changed only when it is 3/4 of a read away from the delay now (a game reading
@@ -1897,6 +1905,7 @@ static void NetVi(H64System *sys)
             u32 d = (q + 2) / 4;
             if (d < 1) d = 1;
             if (d > NET_RING / 4) d = NET_RING / 4;
+            if (d < s_netDelay && s_netCalm < 2) d = s_netDelay;
             if (d != s_netDelay && (q >= s_netDelay * 4 + 3 || q + 3 <= s_netDelay * 4)) s_netDelayNext = d;
             else if (s_netDelayNext && d == s_netDelay) s_netDelayNext = 0;   // a step down not finished: where it is now is right
         }
@@ -2204,7 +2213,7 @@ static void NetConnect(H64System *sys, const Config *c)
     s_netChatCount = 0;
     s_qcOpen = s_qcKbd = 0;
     s_netSentUpTo = s_netNextSlot = s_netDelay;   // reads [0, delay): neutral, sent by nobody
-    s_netRateReads = s_netDelayNext = s_netShrinkWait = 0;
+    s_netRateReads = s_netDelayNext = s_netShrinkWait = s_netRateWaits = s_netCalm = 0;
     s_netWaitAbsorbMs = 0.0;
     if (relay) NetP2pSetup(hello.b ^ hello.c ^ (u32)s_netPlayers);   // directly if every way works (the same verdict everywhere)
     // The delay in frames from here on (see NET_RATE_VI): the hello's, 4 when the consoles reach each other directly.
