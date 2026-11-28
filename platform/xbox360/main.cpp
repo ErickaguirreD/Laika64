@@ -1216,6 +1216,8 @@ static int s_netMyMenu;                         // this console is in its menu (
 static DWORD s_netMenuSaidAt;                   // ... and said so last then
 static int s_netBackSay;                        // "back in the game" said this many times more (a lost packet)
 static int s_netFromRoom;                       // the message NetMessage reads came through the room
+static DWORD s_netRoomFrom[NET_PLAYERS + 1];    // per console: when the room last passed on a message of its
+#define NET_SILENT_END_MS 15000     // the console waited for heard neither way this long (not in its menu): the game ends
 static H64Pad s_netIn[NET_PLAYERS + 1][NET_RING];   // per port: its inputs (this console's own too)
 static u8 s_netBuf[512];
 static u32 s_netBufLen;
@@ -1475,6 +1477,7 @@ static int NetMessage(const NetMsg *m)
     const int p = NetFrom(m), q = p + (int)NET_SUB(m->type);   // q: the port an input is of
     const u32 type = NET_KIND(m->type);
     if (!p) return 1;
+    if (s_netFromRoom) s_netRoomFrom[p] = GetTickCount();
     if ((type == NM_INPUT || type == NM_INPUT2) && q <= s_netPlayers && s_netOwner[q] == p && !s_netGone[q])
     {
         const u32 n = type == NM_INPUT2 ? 2 : 1;
@@ -1833,6 +1836,32 @@ static void NetPad(H64System *sys)
                 offSaidAt = GetTickCount();
                 H64_INFO("[net] waited %u ms at read %u on the room: everyone to the room again", (u32)(offSaidAt - waitAt), n);
                 NetWsSend(s_netWs, "p2p	off", 7, 1);
+            }
+            if (s_netMode > 0 && GetTickCount() - waitAt >= NET_SILENT_END_MS)
+            {
+                // The console waited for gone quiet both ways (its console hung or lost its connection: the room says so
+                // only 60-80 s later, and it was waited for forever - the host of a 4-player Mario Kart, 2026-11-27).
+                // The game ends here: going on without it would differ between consoles (each had its inputs up to a
+                // different read).
+                const DWORD now = GetTickCount();
+                for (p = 1; p <= s_netPlayers; p++)
+                    if (!NET_MINE(p) && !s_netGone[p] && s_netHave[p] <= n) break;
+                if (p <= s_netPlayers)
+                {
+                    const int o = s_netOwner[p];
+                    const DWORD direct = s_netP2pOpen ? now - P2pLastHeard(o) : 0xFFFFFFFFu, room = now - s_netRoomFrom[o];
+                    const int menu = s_netMenuAt[o] && now - s_netMenuAt[o] < NET_MENU_HEARD_MS;
+                    if (!menu && direct > NET_SILENT_END_MS && room > NET_SILENT_END_MS)
+                    {
+                        char t[96];
+                        H64_WARN("[net] console %d silent %u ms directly, %u ms through the room, at read %u: the game ends", o,
+                                 direct == 0xFFFFFFFFu ? 0 : (u32)direct, (u32)room, n);
+                        if (s_netTagOf[p][0]) _snprintf(t, sizeof(t) - 1, "%s dejo de responder", s_netTagOf[p]);
+                        else _snprintf(t, sizeof(t) - 1, "el jugador %d dejo de responder", p);
+                        t[sizeof(t) - 1] = 0;
+                        NetEnd(t);
+                    }
+                }
             }
             if (s_netMode > 0 && !told && GetTickCount() - waitAt >= 1000)
             {
@@ -2262,6 +2291,7 @@ static void NetConnect(H64System *sys, const Config *c)
     s_netShowPlayers = c->netPlayersShow;
     memset(s_netRtt, 0, sizeof(s_netRtt));
     memset(s_netBusy, 0, sizeof(s_netBusy));
+    for (p = 0; p <= NET_PLAYERS; p++) s_netRoomFrom[p] = GetTickCount();
     s_netBusyMine = 0;
     s_netChatCount = 0;
     s_qcOpen = s_qcKbd = 0;
