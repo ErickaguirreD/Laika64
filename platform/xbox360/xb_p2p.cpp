@@ -18,6 +18,7 @@ extern "C" VOID XeCryptRandom(PBYTE pb, DWORD cb);   // xboxkrnl export
 #define P2P_STUN_PORT 3478
 #define P2P_MSGS 12                 // messages in one packet at most
 #define P2P_QUEUE 512               // messages received and not read yet
+#define P2P_HEARD_MS 1000           // a console heard this lately: "heard" in the packets (probes go every 100 ms)
 
 // A packet: the header, then `count` messages of 16 bytes.
 struct P2pHead { u32 magic, token; u8 port, kind, heard, count; };   // kind 0: probe, 1: messages
@@ -155,12 +156,16 @@ void P2pPeer(int port, const char *cand)
     H64_INFO("[p2p] port %d is at %s (local %s)", port, pub, lan);
 }
 
+// The consoles heard lately (not once): a way that went quiet one way only (its packets no longer coming here)
+// is told to the other end, whose P2pReached drops - it took the direct way again on its own, sent its inputs only
+// there and the game waited for them forever (3 consoles, Mario Kart 2026-11-27).
 static u8 heard_mask(void)
 {
+    const DWORD now = GetTickCount();
     int p;
     u8 m = 0;
     for (p = 1; p <= P2P_PLAYERS; p++)
-        if (s_peer[p].heard) m |= (u8)(1u << p);
+        if (s_peer[p].heard && now - s_peer[p].lastHeard < P2P_HEARD_MS) m |= (u8)(1u << p);
     return m;
 }
 

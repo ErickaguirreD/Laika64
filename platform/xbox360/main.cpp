@@ -1810,7 +1810,7 @@ static void NetPad(H64System *sys)
     if (s_netMode > 0 && !NetReady(n))
     {
         const DWORD waitAt = GetTickCount();
-        DWORD shownAt = waitAt;
+        DWORD shownAt = waitAt, offSaidAt = waitAt;
         int told = 0, still = 0;
         s_netWaits++;
         s_netCalm = 0;
@@ -1826,6 +1826,14 @@ static void NetPad(H64System *sys)
             // freezes at the same frame on both, Mario Kart 2026-11-18).
             if (s_netMode > 0 && GetTickCount() - s_netLastSend >= (s_netP2p ? NET_P2P_NUDGE_MS : NET_PING_MS)) NetSend(NM_PING, GetTickCount(), s_netBusyMine, 0);
             if (s_netMode > 0 && !NetReady(n) && GetTickCount() - s_netLastRecv > NET_TIMEOUT_MS) NetEnd("las demas consolas no responden");
+            if (s_netMode > 0 && !s_netP2p && s_netP2pOffAt && s_netWs && GetTickCount() - waitAt >= 2000 && GetTickCount() - offSaidAt >= 2000)
+            {
+                // On the room and nothing coming: a console still (or again) direct sends its inputs only that way.
+                // Everyone back to the room again - each one that was direct sends its last inputs there (NetP2pOff).
+                offSaidAt = GetTickCount();
+                H64_INFO("[net] waited %u ms at read %u on the room: everyone to the room again", (u32)(offSaidAt - waitAt), n);
+                NetWsSend(s_netWs, "p2p	off", 7, 1);
+            }
             if (s_netMode > 0 && !told && GetTickCount() - waitAt >= 1000)
             {
                 // A wait the players notice: who the game waits for (the first console whose input has not come).

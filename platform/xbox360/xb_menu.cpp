@@ -7353,6 +7353,7 @@ static int update_run(IDirect3DDevice9 *dev, const char *version)
 // What is new in this version: NEWS_1..NEWS_COUNT (the menus' language), once after an update, in the ROM
 // list's card (news_card). Each release changes the NEWS_* texts (and NEWS_COUNT).
 #define NEWS_COUNT 5
+#define NEWS_SHOWN 0   // the novelties shown of those (3.6.4: none - only its fix, NEWS_NOTE_H, under the donations)
 
 // ---- About ----
 // Settings > About (and X in the ROM browser and the in-game menu): three tabs,
@@ -26263,28 +26264,31 @@ static void offer_card(const char *version, DWORD age)
 
 static void news_card(DWORD age)
 {
-    static char text[NEWS_COUNT][512];
-    static int lines[NEWS_COUNT], made;
+    // The novelties shown, then the fix lines (NEWS_NOTE, NEWS_NOTE2).
+    static char text[NEWS_SHOWN + 2][512];
+    static int lines[NEWS_SHOWN + 2], made;
+    const int items = NEWS_SHOWN + 2;
     char t[96];
     float x, y, a, w = 500, h, ly;
     int i;
     if (age >= NEWS_CARD_MS) return;
     if (!made)
     {
-        for (i = 0; i < NEWS_COUNT; i++)
+        for (i = 0; i < items; i++)
         {
-            lines[i] = UiTextWrap(UI_REGULAR, 15, w - 58, 3, Tr(T_NEWS_1 + i), text[i], sizeof(text[i]));
+            const int id = i < NEWS_SHOWN ? T_NEWS_1 + i : i == NEWS_SHOWN ? T_NEWS_NOTE : T_NEWS_NOTE2;
+            lines[i] = UiTextWrap(UI_REGULAR, 15, w - 58, 3, Tr(id), text[i], sizeof(text[i]));
             if (lines[i] < 1) lines[i] = 1;
         }
         made = 1;
     }
-    for (h = 104, i = 0; i < NEWS_COUNT; i++) h += lines[i] * 20 + 10;
+    for (h = 104, i = 0; i < items; i++) h += lines[i] * 20 + 10;
     center_card(w, h, (float)age, NEWS_CARD_MS, &x, &y, &a);
     if (a <= 0.01f) return;
     _snprintf(t, sizeof(t) - 1, Tr(T_NEWS_TITLE), H64_VERSION_STRING);
     t[sizeof(t) - 1] = 0;
     UiText(UI_BOLD, 17, x + 20, y + 26, UiAlpha(UI_COL_TEXT, a), t, UI_LEFT);
-    for (ly = y + 56, i = 0; i < NEWS_COUNT; i++)
+    for (ly = y + 56, i = 0; i < items; i++)
     {
         UiCircle(x + 25, ly + 10, 3, UiAlpha(D3DCOLOR_ARGB(255, 150, 130, 255), a));
         UiText(UI_REGULAR, 15, x + 38, ly + 10, UiAlpha(UI_COL_TEXT2, a), text[i], UI_LEFT);
@@ -28661,7 +28665,7 @@ static void home_news(float a, Laika *nlk)
         }
     }
     // the novelties
-    for (k = 0, cy = y + 352; k < NEWS_COUNT; k++, cy += 56)
+    for (k = 0, cy = y + 352; k < NEWS_SHOWN; k++, cy += 56)
     {
         char fit[200];
         UiRoundRect(x + 24, cy, w - 48, 50, 14, (col[k] & 0x00FFFFFF) | 0x22000000, (col[k] & 0x00FFFFFF) | 0x22000000);
